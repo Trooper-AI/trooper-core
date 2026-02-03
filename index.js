@@ -8,9 +8,47 @@ import { EventEmitter } from 'events';
 const app = express();
 const PORT = process.env.PORT || 3002;
 const WEBHOOK_SECRET = process.env.OPENCLAW_WEBHOOK_SECRET || '';
+const MISSION_CONTROL_URL = process.env.MISSION_CONTROL_URL || 'https://control-center-bot.onrender.com';
 
 app.use(cors());
 app.use(express.json());
+
+// Forward agent responses back to Mission Control
+async function forwardToMissionControl(notification, result) {
+  try {
+    const { context, agentName } = notification;
+    const { taskId, sourceName, content: originalContent, notificationType } = context || {};
+    
+    if (!taskId) {
+      console.log(`⚠️ No taskId in notification, skipping Mission Control callback`);
+      return;
+    }
+    
+    console.log(`📤 Forwarding agent response to Mission Control for task ${taskId}`);
+    
+    const res = await fetch(`${MISSION_CONTROL_URL}/api/agent-response`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        taskId,
+        agentName,
+        response: result,
+        notificationType,
+        originalMention: originalContent,
+        mentionedBy: sourceName,
+        timestamp: Date.now()
+      })
+    });
+    
+    if (!res.ok) {
+      console.error(`❌ Mission Control callback failed: ${res.status}`);
+    } else {
+      console.log(`✅ Agent response forwarded to Mission Control`);
+    }
+  } catch (error) {
+    console.error(`❌ Failed to forward to Mission Control:`, error.message);
+  }
+}
 
 // Pending requests waiting for OpenClaw to process
 const pendingRequests = new Map();
@@ -203,7 +241,11 @@ app.post('/requests/:id/result', (req, res) => {
   request.completedAt = Date.now();
   
   if (isAsync) {
-    // For async, just mark as done and remove from queue
+    // For async notifications, forward the result back to Mission Control
+    // so the agent's response gets posted as a comment
+    if (result && !error) {
+      forwardToMissionControl(request, result);
+    }
     asyncNotifications.delete(id);
   } else {
     // For sync, notify waiting handler
