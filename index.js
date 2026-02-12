@@ -56,6 +56,10 @@ const pendingRequests = new Map();
 const asyncNotifications = new Map();
 const requestEmitter = new EventEmitter();
 
+// Skill registry — OpenClaw pushes skills here, CrabsHQ pulls them
+// slug -> { slug, name, displayName, summary, description, version, stats, content, updatedAt, registeredAt }
+const skillRegistry = new Map();
+
 // Cleanup old requests every 5 minutes
 setInterval(() => {
   const now = Date.now();
@@ -74,14 +78,15 @@ setInterval(() => {
 
 // Health check
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     service: 'openclaw-bridge',
     pending: {
       sync: pendingRequests.size,
       async: asyncNotifications.size,
       total: pendingRequests.size + asyncNotifications.size
     },
+    skills: skillRegistry.size,
     uptime: process.uptime()
   });
 });
@@ -285,6 +290,87 @@ function waitForResult(requestId, timeoutMs) {
   });
 }
 
+// ─── Skill Registry Endpoints ───────────────────────────────────────────────
+// OpenClaw registers its available skills (bulk or single)
+app.post('/skills/register', (req, res) => {
+  if (WEBHOOK_SECRET && req.headers['x-webhook-secret'] !== WEBHOOK_SECRET) {
+    return res.status(401).json({ error: 'Invalid webhook secret' });
+  }
+
+  const { skills } = req.body;
+  if (!Array.isArray(skills) || skills.length === 0) {
+    return res.status(400).json({ error: 'skills array is required' });
+  }
+
+  let registered = 0;
+  for (const skill of skills) {
+    if (!skill.slug) continue;
+    skillRegistry.set(skill.slug, {
+      slug: skill.slug,
+      name: skill.name || skill.slug,
+      displayName: skill.displayName || skill.name || skill.slug,
+      summary: skill.summary || skill.description || '',
+      description: skill.summary || skill.description || '',
+      version: skill.version || null,
+      stats: skill.stats || {},
+      content: skill.content || '',
+      updatedAt: skill.updatedAt || null,
+      changelog: skill.changelog || null,
+      registeredAt: Date.now(),
+    });
+    registered++;
+  }
+
+  console.log(`📦 Registered ${registered} skills (${skillRegistry.size} total)`);
+  res.json({ success: true, registered, total: skillRegistry.size });
+});
+
+// CrabsHQ fetches the skill catalog
+app.get('/skills/catalog', (req, res) => {
+  const skills = Array.from(skillRegistry.values()).map(({ content, ...meta }) => meta);
+  res.json({ skills, totalSkills: skills.length });
+});
+
+// CrabsHQ fetches SKILL.md content for a specific skill
+app.get('/skills/:slug/content', (req, res) => {
+  const skill = skillRegistry.get(req.params.slug);
+  if (!skill || !skill.content) {
+    return res.status(404).json({ error: 'Skill not found or has no content' });
+  }
+  res.type('text/plain').send(skill.content);
+});
+
+// CrabsHQ searches skills by query
+app.get('/skills/search', (req, res) => {
+  const { q } = req.query;
+  if (!q || !q.trim()) return res.json({ results: [] });
+
+  const query = q.toLowerCase();
+  const results = Array.from(skillRegistry.values())
+    .filter(s =>
+      s.name.toLowerCase().includes(query) ||
+      s.description.toLowerCase().includes(query) ||
+      s.slug.toLowerCase().includes(query)
+    )
+    .map(({ content, ...meta }) => meta);
+
+  res.json({ results });
+});
+
+// Get skill registry stats
+app.get('/skills/stats', (req, res) => {
+  res.json({
+    totalSkills: skillRegistry.size,
+    skills: Array.from(skillRegistry.values()).map(s => ({
+      slug: s.slug,
+      name: s.displayName,
+      version: s.version,
+      hasContent: !!s.content,
+      registeredAt: s.registeredAt,
+    })),
+  });
+});
+
 // Dashboard UI
 app.get('/', (req, res) => {
   const syncPending = Array.from(pendingRequests.values());
@@ -364,11 +450,18 @@ app.get('/', (req, res) => {
 
   <h2>ENDPOINTS</h2>
   <div class="status">
+    <strong>Tasks</strong><br>
     <code>POST /webhook/mission-control</code> - Receive tasks (auto-detects sync/async)<br>
     <code>GET /requests/pending</code> - OpenClaw polls for all work<br>
     <code>GET /notifications/pending</code> - Get async notifications only<br>
     <code>POST /requests/:id/result</code> - Submit results<br>
-    <code>POST /notifications/:id/ack</code> - Acknowledge notification<br>
+    <code>POST /notifications/:id/ack</code> - Acknowledge notification<br><br>
+    <strong>Skills</strong><br>
+    <code>POST /skills/register</code> - OpenClaw registers available skills<br>
+    <code>GET /skills/catalog</code> - CrabsHQ fetches skill catalog<br>
+    <code>GET /skills/:slug/content</code> - CrabsHQ fetches SKILL.md<br>
+    <code>GET /skills/search?q=</code> - CrabsHQ searches skills<br>
+    <code>GET /skills/stats</code> - Skill registry stats<br><br>
     <code>GET /health</code> - Health check
   </div>
 
@@ -394,11 +487,27 @@ app.get('/', (req, res) => {
       </div>
     `).join('')}
 
+  <h2>SKILL REGISTRY</h2>
+  ${skillRegistry.size === 0
+    ? '<p class="empty">No skills registered — OpenClaw needs to POST to /skills/register</p>'
+    : `<div class="status">
+        <strong>${skillRegistry.size} skills registered</strong><br>
+        ${Array.from(skillRegistry.values()).map(s => `
+          <div class="request" style="margin-top:0.5rem">
+            <span class="type" style="background:#22c55e">SKILL</span>
+            <strong>${s.displayName}</strong> <span style="color:#64748b">(${s.slug})</span>
+            ${s.version ? `<span class="badge">v${s.version}</span>` : ''}
+            ${s.content ? '<span class="badge" style="background:#22c55e;color:#0f172a">has SKILL.md</span>' : '<span class="badge" style="background:#ef4444">no content</span>'}
+          </div>
+        `).join('')}
+      </div>`}
+
   <h2>SETUP</h2>
   <div class="status">
     <p>1. Set <code>OPENCLAW_BRIDGE_URL</code> in Mission Control to this URL</p>
     <p>2. Configure OpenClaw to poll <code>/requests/pending</code> and submit to <code>/requests/:id/result</code></p>
-    <p>3. Async notifications (mentions, thread updates) are stored until processed or expire (10 min)</p>
+    <p>3. OpenClaw registers skills via <code>POST /skills/register</code> — CrabsHQ fetches them automatically</p>
+    <p>4. Async notifications (mentions, thread updates) are stored until processed or expire (10 min)</p>
   </div>
 </body>
 </html>
@@ -417,6 +526,13 @@ Endpoints:
   GET  /notifications/pending    - Poll async notifications only
   POST /requests/:id/result      - Submit results
   POST /notifications/:id/ack    - Acknowledge notification
+
+  POST /skills/register          - OpenClaw registers skills
+  GET  /skills/catalog           - CrabsHQ fetches skill catalog
+  GET  /skills/:slug/content     - CrabsHQ fetches SKILL.md
+  GET  /skills/search?q=         - CrabsHQ searches skills
+  GET  /skills/stats             - Skill registry stats
+
   GET  /health                   - Health check
   `);
 });
