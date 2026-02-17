@@ -383,6 +383,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /usr/bin/docker:/usr/bin/docker:ro
+      - /opt/openclaw-data/startup.sh:/opt/startup.sh:ro
     group_add:
       - "${DOCKER_GID}"
     extra_hosts:
@@ -394,8 +395,6 @@ services:
       CHROMIUM_PATH: /usr/bin/google-chrome-stable
       PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome-stable
       OPENCLAW_BROWSER_EXECUTABLE: /usr/bin/google-chrome-stable
-    volumes:
-      - /opt/openclaw-data/startup.sh:/opt/startup.sh:ro
     entrypoint: ["/bin/bash", "/opt/startup.sh"]
     command: ["${GATEWAY_PORT}"]
 OVERRIDE
