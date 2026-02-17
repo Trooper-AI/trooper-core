@@ -300,6 +300,9 @@ class OpenClawGateway {
       if (!ok) throw new Error('Cannot connect to OpenClaw gateway');
     }
 
+    // Create timestamp marker so we can find screenshots created during this run
+    try { execSync('docker exec openclaw-openclaw-gateway-1 touch /tmp/.openclaw-run-marker', { timeout: 3000 }); } catch {}
+
     const id = randomUUID();
     const idempotencyKey = opts.idempotencyKey || randomUUID();
     const sessionKey = opts.sessionKey || `hook:crabhq:${opts.agentId || 'main'}:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
@@ -350,39 +353,24 @@ class OpenClawGateway {
         console.log(`[OpenClaw] Agent request sent (session=${sessionKey})`);
       });
 
-      // Extract text AND image paths from payloads
-      console.log(`[OpenClaw] Raw payloads: ${JSON.stringify(result?.result?.payloads || []).substring(0, 500)}`);
-      console.log(`[OpenClaw] Tool calls: ${JSON.stringify(toolCalls.map(t => ({ tool: t.tool, summary: t.summary })))}`);
-      const payloads = result?.result?.payloads || [];
-      const textParts = payloads.map(p => p.text).filter(Boolean);
-      const imageParts = [];
-      // Check payloads for image content blocks
-      for (const p of payloads) {
-        if (p.type === 'image' && p.source?.path) imageParts.push(p.source.path);
-        if (p.media) imageParts.push(p.media); // MEDIA: path
-        // Check content array (Anthropic format)
-        if (Array.isArray(p.content)) {
-          for (const block of p.content) {
-            if (block.type === 'image' && block.source?.path) imageParts.push(block.source.path);
+      const resultText = result?.result?.payloads?.map(p => p.text).filter(Boolean).join('\n\n');
+      let response = resultText || textChunks.join('') || null;
+
+      // Check for new screenshots created during this agent run
+      if (response) {
+        try {
+          const newFiles = execSync(
+            `docker exec openclaw-openclaw-gateway-1 find /home/node/.openclaw/media/browser -type f -newer /tmp/.openclaw-run-marker 2>/dev/null || true`,
+            { timeout: 5000 }
+          ).toString().trim().split('\n').filter(f => /\.(png|jpg|jpeg|webp|gif)$/i.test(f));
+          if (newFiles.length > 0) {
+            console.log(`[OpenClaw] Found ${newFiles.length} new screenshot(s): ${newFiles.join(', ')}`);
+            const imageMarkdown = newFiles.map(f => `\n\n![screenshot](${f})`).join('');
+            response += imageMarkdown;
           }
+        } catch (e) {
+          console.warn(`[OpenClaw] Screenshot check failed: ${e.message}`);
         }
-      }
-      // Also check tool results for screenshot paths
-      for (const tc of toolCalls) {
-        if (tc.summary && /\.(png|jpg|jpeg|webp|gif)$/i.test(tc.summary)) {
-          imageParts.push(tc.summary.trim());
-        }
-        // Check for MEDIA: prefix in tool summary
-        if (tc.summary && tc.summary.includes('MEDIA:')) {
-          const mediaMatch = tc.summary.match(/MEDIA:\s*(\S+)/);
-          if (mediaMatch) imageParts.push(mediaMatch[1]);
-        }
-      }
-      // Build response with inline image markdown
-      let response = textParts.join('\n\n') || textChunks.join('') || null;
-      if (imageParts.length > 0 && response) {
-        const imageMarkdown = imageParts.map(p => `\n\n![screenshot](${p})`).join('');
-        response += imageMarkdown;
       }
       // Append tool log if any tools were used
       if (response && toolCalls.length > 0) {
@@ -408,6 +396,9 @@ class OpenClawGateway {
       const ok = await this.connect();
       if (!ok) throw new Error('Cannot connect to OpenClaw gateway');
     }
+
+    // Create timestamp marker so we can find screenshots created during this run
+    try { execSync('docker exec openclaw-openclaw-gateway-1 touch /tmp/.openclaw-run-marker', { timeout: 3000 }); } catch {}
 
     const id = randomUUID();
     const idempotencyKey = opts.idempotencyKey || randomUUID();
@@ -471,27 +462,23 @@ class OpenClawGateway {
         console.log(`[OpenClaw] Agent streaming request sent (session=${sessionKey})`);
       });
 
-      const payloads2 = result?.result?.payloads || [];
-      const textParts2 = payloads2.map(p => p.text).filter(Boolean);
-      const imageParts2 = [];
-      for (const p of payloads2) {
-        if (p.type === 'image' && p.source?.path) imageParts2.push(p.source.path);
-        if (p.media) imageParts2.push(p.media);
-        if (Array.isArray(p.content)) {
-          for (const block of p.content) {
-            if (block.type === 'image' && block.source?.path) imageParts2.push(block.source.path);
+      const resultText = result?.result?.payloads?.map(p => p.text).filter(Boolean).join('\n\n');
+      let response = resultText || textChunks.join('') || null;
+
+      // Check for new screenshots created during this agent run
+      if (response) {
+        try {
+          const newFiles = execSync(
+            `docker exec openclaw-openclaw-gateway-1 find /home/node/.openclaw/media/browser -type f -newer /tmp/.openclaw-run-marker 2>/dev/null || true`,
+            { timeout: 5000 }
+          ).toString().trim().split('\n').filter(f => /\.(png|jpg|jpeg|webp|gif)$/i.test(f));
+          if (newFiles.length > 0) {
+            console.log(`[OpenClaw] Found ${newFiles.length} new screenshot(s): ${newFiles.join(', ')}`);
+            response += newFiles.map(f => `\n\n![screenshot](${f})`).join('');
           }
+        } catch (e) {
+          console.warn(`[OpenClaw] Screenshot check failed: ${e.message}`);
         }
-      }
-      for (const tc of toolLog) {
-        if (tc.summary && /\.(png|jpg|jpeg|webp|gif)$/i.test(tc.summary)) imageParts2.push(tc.summary.trim());
-        if (tc.summary && tc.summary.includes('MEDIA:')) {
-          const m = tc.summary.match(/MEDIA:\s*(\S+)/); if (m) imageParts2.push(m[1]);
-        }
-      }
-      let response = textParts2.join('\n\n') || textChunks.join('') || null;
-      if (imageParts2.length > 0 && response) {
-        response += imageParts2.map(p => `\n\n![screenshot](${p})`).join('');
       }
       const formattedToolLog = toolLog.map(t => ({
         tool: t.tool,
