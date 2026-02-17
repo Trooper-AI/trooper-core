@@ -350,8 +350,40 @@ class OpenClawGateway {
         console.log(`[OpenClaw] Agent request sent (session=${sessionKey})`);
       });
 
-      const resultText = result?.result?.payloads?.map(p => p.text).filter(Boolean).join('\n\n');
-      let response = resultText || textChunks.join('') || null;
+      // Extract text AND image paths from payloads
+      console.log(`[OpenClaw] Raw payloads: ${JSON.stringify(result?.result?.payloads || []).substring(0, 500)}`);
+      console.log(`[OpenClaw] Tool calls: ${JSON.stringify(toolCalls.map(t => ({ tool: t.tool, summary: t.summary })))}`);
+      const payloads = result?.result?.payloads || [];
+      const textParts = payloads.map(p => p.text).filter(Boolean);
+      const imageParts = [];
+      // Check payloads for image content blocks
+      for (const p of payloads) {
+        if (p.type === 'image' && p.source?.path) imageParts.push(p.source.path);
+        if (p.media) imageParts.push(p.media); // MEDIA: path
+        // Check content array (Anthropic format)
+        if (Array.isArray(p.content)) {
+          for (const block of p.content) {
+            if (block.type === 'image' && block.source?.path) imageParts.push(block.source.path);
+          }
+        }
+      }
+      // Also check tool results for screenshot paths
+      for (const tc of toolCalls) {
+        if (tc.summary && /\.(png|jpg|jpeg|webp|gif)$/i.test(tc.summary)) {
+          imageParts.push(tc.summary.trim());
+        }
+        // Check for MEDIA: prefix in tool summary
+        if (tc.summary && tc.summary.includes('MEDIA:')) {
+          const mediaMatch = tc.summary.match(/MEDIA:\s*(\S+)/);
+          if (mediaMatch) imageParts.push(mediaMatch[1]);
+        }
+      }
+      // Build response with inline image markdown
+      let response = textParts.join('\n\n') || textChunks.join('') || null;
+      if (imageParts.length > 0 && response) {
+        const imageMarkdown = imageParts.map(p => `\n\n![screenshot](${p})`).join('');
+        response += imageMarkdown;
+      }
       // Append tool log if any tools were used
       if (response && toolCalls.length > 0) {
         const toolLog = toolCalls.map(t => ({
@@ -439,8 +471,28 @@ class OpenClawGateway {
         console.log(`[OpenClaw] Agent streaming request sent (session=${sessionKey})`);
       });
 
-      const resultText = result?.result?.payloads?.map(p => p.text).filter(Boolean).join('\n\n');
-      const response = resultText || textChunks.join('') || null;
+      const payloads2 = result?.result?.payloads || [];
+      const textParts2 = payloads2.map(p => p.text).filter(Boolean);
+      const imageParts2 = [];
+      for (const p of payloads2) {
+        if (p.type === 'image' && p.source?.path) imageParts2.push(p.source.path);
+        if (p.media) imageParts2.push(p.media);
+        if (Array.isArray(p.content)) {
+          for (const block of p.content) {
+            if (block.type === 'image' && block.source?.path) imageParts2.push(block.source.path);
+          }
+        }
+      }
+      for (const tc of toolLog) {
+        if (tc.summary && /\.(png|jpg|jpeg|webp|gif)$/i.test(tc.summary)) imageParts2.push(tc.summary.trim());
+        if (tc.summary && tc.summary.includes('MEDIA:')) {
+          const m = tc.summary.match(/MEDIA:\s*(\S+)/); if (m) imageParts2.push(m[1]);
+        }
+      }
+      let response = textParts2.join('\n\n') || textChunks.join('') || null;
+      if (imageParts2.length > 0 && response) {
+        response += imageParts2.map(p => `\n\n![screenshot](${p})`).join('');
+      }
       const formattedToolLog = toolLog.map(t => ({
         tool: t.tool,
         params: t.params && Object.keys(t.params).length > 0 ? t.params : undefined,
