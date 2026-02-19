@@ -25,6 +25,7 @@ GATEWAY_PORT=18789
 MEDIA_PORT=18791
 API_URL="{{API_URL}}"
 CAPTCHA_2CAPTCHA_API_KEY="{{CAPTCHA_2CAPTCHA_API_KEY}}"
+TWOCAPTCHA_PROXY_KEY="{{TWOCAPTCHA_PROXY_KEY}}"
 COMPOSIO_API_KEY="{{COMPOSIO_API_KEY}}"
 
 # Deploy log — writes to /tmp/deploy.log, served via HTTP on BRIDGE_PORT
@@ -196,6 +197,9 @@ ${HTTPS_DOMAIN} {
  handle /files/* {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
+ handle_path /vnc/* {
+ reverse_proxy 127.0.0.1:6080
+ }
  handle {
  reverse_proxy 127.0.0.1:${GATEWAY_PORT}
  }
@@ -234,6 +238,7 @@ OPENAI_API_KEY=${OPENAI_API_KEY}
 BRAVE_API_KEY=${BRAVE_API_KEY}
 OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
 CAPTCHA_2CAPTCHA_API_KEY=${CAPTCHA_2CAPTCHA_API_KEY}
+TWOCAPTCHA_PROXY_KEY=${TWOCAPTCHA_PROXY_KEY}
 COMPOSIO_API_KEY=${COMPOSIO_API_KEY}
 ENV
 
@@ -403,6 +408,8 @@ services:
       - /usr/bin/docker:/usr/bin/docker:ro
       - /opt/openclaw-data/startup.sh:/opt/startup.sh:ro
       - /opt/openclaw-data/2captcha-extension:/opt/openclaw-data/2captcha-extension:ro
+    ports:
+      - "127.0.0.1:5999:5999"
     group_add:
       - "${DOCKER_GID}"
     extra_hosts:
@@ -415,13 +422,14 @@ services:
       PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome-stable
       OPENCLAW_BROWSER_EXECUTABLE: /usr/bin/google-chrome-stable
       CAPTCHA_2CAPTCHA_API_KEY: \${CAPTCHA_2CAPTCHA_API_KEY}
+      TWOCAPTCHA_PROXY_KEY: \${TWOCAPTCHA_PROXY_KEY}
       COMPOSIO_API_KEY: \${COMPOSIO_API_KEY}
     user: "0:0"
     entrypoint: ["/bin/bash", "/opt/startup.sh"]
     command: ["${GATEWAY_PORT}"]
 OVERRIDE
 
-# Startup script that ensures Chrome is installed before starting the gateway
+# Startup script that ensures Chrome + Xvfb are installed before starting the gateway
 cat > /opt/openclaw-data/startup.sh << 'STARTUP'
 #!/bin/bash
 # Ensure Chrome is installed (survives container restarts)
@@ -434,6 +442,15 @@ if ! command -v google-chrome-stable &>/dev/null; then
  echo "[startup] Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo FAILED)"
 else
  echo "[startup] Chrome already installed: $(google-chrome-stable --version 2>/dev/null)"
+fi
+# Ensure TigerVNC is installed (Xvnc = virtual display + VNC server in one process)
+# Replaces Xvfb — provides the display extensions need PLUS live VNC streaming to web app
+if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ] && ! command -v Xvnc &>/dev/null; then
+ echo "[startup] Installing TigerVNC for display + VNC support..."
+ apt-get update -qq 2>/dev/null && apt-get install -y -qq tigervnc-standalone-server 2>/dev/null
+ echo "[startup] TigerVNC installed (Xvnc available)"
+elif [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
+ echo "[startup] TigerVNC already installed"
 fi
 # Install Composio CLI if API key is set and not already installed
 if [ -n "${COMPOSIO_API_KEY:-}" ] && ! command -v composio &>/dev/null; then
@@ -488,19 +505,66 @@ if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
   fi
 fi
 
-# Load 2Captcha extension via a Chrome wrapper script (OpenClaw config doesn't support custom args).
-# --disable-dev-shm-usage and --disable-gpu are already automatic (Linux + headless:true).
+# Load 2Captcha extension via Chrome wrapper + Xvnc (extensions need a display context).
+# Xvnc provides BOTH a virtual display AND a VNC server — enabling live browser view
+# in the web app via noVNC. Also routes Chrome through 2captcha residential proxy
+# so browsing comes from residential IPs (avoids Google/Cloudflare blocks).
 if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ] && [ -d /opt/openclaw-data/2captcha-extension ] && [ -n "$(ls -A /opt/openclaw-data/2captcha-extension 2>/dev/null)" ]; then
   cat > /opt/openclaw-data/chrome-wrapper.sh << 'CHROMEWRAP'
 #!/bin/bash
-exec /usr/bin/google-chrome-stable --load-extension=/opt/openclaw-data/2captcha-extension "$@"
+# ── Xvnc: Virtual display + VNC server on :99 (port 5999) ──
+# Xvnc replaces Xvfb — same virtual display but also serves VNC for live browser view
+if ! pgrep -f "Xvnc :99" >/dev/null 2>&1; then
+  Xvnc :99 -geometry 1920x1080 -depth 24 -rfbport 5999 -localhost \
+    -SecurityTypes None -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents &
+  sleep 0.5
+fi
+export DISPLAY=:99
+
+# ── Residential proxy via 2captcha (when TWOCAPTCHA_PROXY_KEY is set) ──
+# Routes ALL Chrome traffic through residential IP to avoid bot detection
+PROXY_ARGS=""
+EXT_DIRS="/opt/openclaw-data/2captcha-extension"
+if [ -n "${TWOCAPTCHA_PROXY_KEY:-}" ]; then
+  # Generate fresh session ID for a new residential IP each launch
+  SESSION_ID=$(head -c 12 /dev/urandom | base64 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 9)
+  PROXY_USER="${TWOCAPTCHA_PROXY_KEY}-zone-custom-session-${SESSION_ID}-sessTime-120"
+  PROXY_PASS="${TWOCAPTCHA_PROXY_KEY}"
+  PROXY_ARGS="--proxy-server=http://na.proxy.2captcha.com:2334"
+
+  # Create a small MV3 extension that handles proxy authentication
+  PROXY_EXT_DIR=/tmp/proxy-auth-ext
+  mkdir -p "$PROXY_EXT_DIR"
+  cat > "$PROXY_EXT_DIR/manifest.json" << 'PMANI'
+{"manifest_version":3,"name":"Proxy Auth","version":"1.0","permissions":["webRequest","webRequestAuthProvider"],"host_permissions":["<all_urls>"],"background":{"service_worker":"background.js"}}
+PMANI
+  cat > "$PROXY_EXT_DIR/background.js" << PBGJS
+chrome.webRequest.onAuthRequired.addListener(
+  (details, callback) => {
+    callback({ authCredentials: { username: "${PROXY_USER}", password: "${PROXY_PASS}" } });
+  },
+  { urls: ["<all_urls>"] },
+  ["asyncBlocking"]
+);
+PBGJS
+  EXT_DIRS="${EXT_DIRS},${PROXY_EXT_DIR}"
+fi
+
+exec /usr/bin/google-chrome-stable \
+  --load-extension=${EXT_DIRS} \
+  --disable-extensions-except=${EXT_DIRS} \
+  --disable-blink-features=AutomationControlled \
+  ${PROXY_ARGS} \
+  "$@"
 CHROMEWRAP
   chmod +x /opt/openclaw-data/chrome-wrapper.sh
+  # Set headless:false so OpenClaw doesn't add --headless=new (wrapper uses Xvfb instead)
+  sed -i 's|"headless": true|"headless": false|g' /opt/openclaw-data/config/openclaw.json
   # Mount the wrapper into the container and point config at it
   sed -i '/- \/opt\/openclaw-data\/2captcha-extension/a\      - /opt/openclaw-data/chrome-wrapper.sh:/opt/openclaw-data/chrome-wrapper.sh:ro' /opt/openclaw/docker-compose.override.yml
   sed -i 's|/usr/bin/google-chrome-stable|/opt/openclaw-data/chrome-wrapper.sh|g' /opt/openclaw-data/config/openclaw.json
   sed -i 's|/usr/bin/google-chrome-stable|/opt/openclaw-data/chrome-wrapper.sh|g' /opt/openclaw/docker-compose.override.yml
-  echo "[setup] 2Captcha: Chrome wrapper configured"
+  echo "[setup] 2Captcha: Chrome wrapper + Xvfb configured (headful mode with virtual display)"
 fi
 
 # Fix permissions: container runs as uid 1000, files should be private
@@ -585,6 +649,15 @@ POLLER
 
 cd /opt/openclaw-poller && timeout 120 npm install --prefer-offline 2>/dev/null || timeout 120 npm install
 
+# ── [6.5/8] noVNC + websockify (live browser view via VNC) ────────────
+# Installs on the HOST (not in container). Websockify bridges WebSocket → VNC protocol.
+# Caddy proxies /vnc/* → websockify:6080 → Xvnc:5999 (inside container, mapped to host).
+if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
+  dlog "Installing noVNC + websockify for live browser streaming..."
+  apt-get install -y -qq --no-install-recommends novnc websockify 2>/dev/null || true
+  echo "[setup] noVNC + websockify installed for VNC live view"
+fi
+
 # ── [7/8] Systemd services ──────────────────────────────────────────
 
 # Docker Compose service (auto-start containers on boot)
@@ -656,13 +729,39 @@ Environment=NODE_ENV=production
 WantedBy=multi-user.target
 PSVC
 
+# Websockify service — bridges noVNC WebSocket to Xvnc inside the container
+# Only enabled when 2captcha is set (which means Xvnc runs in the container)
+if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
+cat > /etc/systemd/system/openclaw-vnc.service << VNCSVC
+[Unit]
+Description=noVNC Websockify (browser live view)
+After=docker.service openclaw-docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc 6080 localhost:5999
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+VNCSVC
+fi
+
 systemctl daemon-reload
 systemctl enable openclaw-docker openclaw-bridge openclaw-poller
+if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
+  systemctl enable openclaw-vnc
+fi
 dlog "Starting services..."
 # Kill the temporary log server so the real bridge can use the port
 kill $LOG_SERVER_PID 2>/dev/null; sleep 1
 systemctl start openclaw-bridge
 systemctl start openclaw-poller
+if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
+  systemctl start openclaw-vnc
+fi
 # Start Caddy (HTTPS reverse proxy) — needs gateway container to be up
 systemctl restart caddy 2>/dev/null || true
 
