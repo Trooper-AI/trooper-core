@@ -475,9 +475,19 @@ if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
   fi
 fi
 
-# Add 2Captcha extension to browser args if configured (must run after 2captcha block)
+# Load 2Captcha extension via a Chrome wrapper script (OpenClaw config doesn't support custom args).
+# --disable-dev-shm-usage and --disable-gpu are already automatic (Linux + headless:true).
 if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ] && [ -d /opt/openclaw-data/2captcha-extension ] && [ -n "$(ls -A /opt/openclaw-data/2captcha-extension 2>/dev/null)" ]; then
-  sed -i 's|"defaultProfile": "openclaw"|"defaultProfile": "openclaw",\n  "args": ["--disable-dev-shm-usage", "--disable-gpu", "--load-extension=/opt/openclaw-data/2captcha-extension"]|' /opt/openclaw-data/config/openclaw.json
+  cat > /opt/openclaw-data/chrome-wrapper.sh << 'CHROMEWRAP'
+#!/bin/bash
+exec /usr/bin/google-chrome-stable --load-extension=/opt/openclaw-data/2captcha-extension "$@"
+CHROMEWRAP
+  chmod +x /opt/openclaw-data/chrome-wrapper.sh
+  # Mount the wrapper into the container and point config at it
+  sed -i '/- \/opt\/openclaw-data\/2captcha-extension/a\      - /opt/openclaw-data/chrome-wrapper.sh:/opt/openclaw-data/chrome-wrapper.sh:ro' /opt/openclaw/docker-compose.override.yml
+  sed -i 's|/usr/bin/google-chrome-stable|/opt/openclaw-data/chrome-wrapper.sh|g' /opt/openclaw-data/config/openclaw.json
+  sed -i 's|/usr/bin/google-chrome-stable|/opt/openclaw-data/chrome-wrapper.sh|g' /opt/openclaw/docker-compose.override.yml
+  echo "[setup] 2Captcha: Chrome wrapper configured"
 fi
 
 # Fix permissions: container runs as uid 1000, files should be private
