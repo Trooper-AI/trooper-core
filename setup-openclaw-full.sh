@@ -289,6 +289,7 @@ if [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "{{GEMINI_API_KEY}}"
 fi
 if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ]; then
  build_fallback "openrouter/anthropic/claude-sonnet-4-5"
+ build_fallback "openrouter/openai/gpt-4o-mini"
 fi
 
 # Build fallbacks JSON (may be empty)
@@ -408,13 +409,13 @@ if [ -z "$MODELS_PROVIDERS" ]; then
    }'
 fi
 
-# Resolve embedding provider — prefer openai for embeddings, fall back to anthropic
+# Resolve memorySearch config — OpenRouter for embeddings, or OpenAI if key exists
 if [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "{{OPENAI_API_KEY}}" ]; then
- EMBEDDING_PROVIDER="openai"
- EMBEDDING_MODEL="text-embedding-3-small"
+ MEMORY_SEARCH_JSON='"memorySearch": { "enabled": true, "provider": "openai", "model": "text-embedding-3-small" }'
+elif [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ]; then
+ MEMORY_SEARCH_JSON='"memorySearch": { "enabled": true, "provider": "openai", "model": "text-embedding-3-small", "remote": { "baseUrl": "https://openrouter.ai/api/v1/", "apiKey": "'"${OPENROUTER_API_KEY}"'" } }'
 else
- EMBEDDING_PROVIDER="${RESOLVED_PROVIDER}"
- EMBEDDING_MODEL="text-embedding-3-small"
+ MEMORY_SEARCH_JSON='"memorySearch": { "enabled": true }'
 fi
 
 # OpenClaw config — security-hardened, multi-model support
@@ -462,9 +463,7 @@ cat > /opt/openclaw-data/config/openclaw.json << OCCONFIG
  "prompt": "Write any lasting notes to memory/ as YYYY-MM-DD.md; reply with NO_REPLY if nothing to store."
  }
  },
- "memorySearch": {
- "enabled": true
- }
+ ${MEMORY_SEARCH_JSON}
  }
  },
  "models": {
