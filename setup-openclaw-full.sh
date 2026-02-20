@@ -463,9 +463,7 @@ cat > /opt/openclaw-data/config/openclaw.json << OCCONFIG
  }
  },
  "memorySearch": {
- "enabled": true,
- "provider": "${EMBEDDING_PROVIDER}",
- "model": "${EMBEDDING_MODEL}"
+ "enabled": true
  }
  }
  },
