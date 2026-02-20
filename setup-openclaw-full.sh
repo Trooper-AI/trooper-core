@@ -3,11 +3,16 @@
 # Called via cloud-init (Hetzner user_data) — runs on first boot, no SSH needed.
 # Template variables replaced at runtime by provision.js:
 # {{GATEWAY_TOKEN}} - Unique token for this org's OpenClaw gateway
-# {{OPENAI_API_KEY}} - Shared OpenAI API key
+# {{OPENAI_API_KEY}} - OpenAI API key (optional)
+# {{ANTHROPIC_API_KEY}} - Anthropic/Claude API key (optional)
+# {{GEMINI_API_KEY}} - Google Gemini API key (optional)
+# {{OPENROUTER_API_KEY}} - OpenRouter API key (optional)
 # {{BRAVE_API_KEY}} - Brave search API key
 # {{BRIDGE_PORT}} - Port for the local bridge (default 3002)
 # {{ORG_ID}} - Organization ID
 # {{OPENCLAW_DOCKER_IMAGE}} - Docker image (default: ghcr.io/openclaw/openclaw:latest)
+# {{PRIMARY_PROVIDER}} - Preferred model provider (anthropic|openai|gemini|openrouter, default: auto-detect)
+# {{PRIMARY_MODEL}} - Preferred model ID (default: auto-detect from provider)
 
 set -e
 
@@ -15,6 +20,9 @@ trap 'dlog "Setup failed (line $LINENO, exit $?)" "installing"' ERR
 
 GATEWAY_TOKEN="{{GATEWAY_TOKEN}}"
 OPENAI_API_KEY="{{OPENAI_API_KEY}}"
+ANTHROPIC_API_KEY="{{ANTHROPIC_API_KEY}}"
+GEMINI_API_KEY="{{GEMINI_API_KEY}}"
+OPENROUTER_API_KEY="{{OPENROUTER_API_KEY}}"
 BRAVE_API_KEY="{{BRAVE_API_KEY}}"
 BRIDGE_PORT="{{BRIDGE_PORT}}"
 ORG_ID="{{ORG_ID}}"
@@ -26,6 +34,8 @@ MEDIA_PORT=18791
 API_URL="{{API_URL}}"
 CAPTCHA_2CAPTCHA_API_KEY="{{CAPTCHA_2CAPTCHA_API_KEY}}"
 COMPOSIO_API_KEY="{{COMPOSIO_API_KEY}}"
+PRIMARY_PROVIDER="{{PRIMARY_PROVIDER}}"
+PRIMARY_MODEL="{{PRIMARY_MODEL}}"
 
 # Deploy log — writes to /tmp/deploy.log, served via HTTP on BRIDGE_PORT
 DEPLOY_LOG=/tmp/deploy.log
@@ -211,7 +221,86 @@ else
  echo "ERROR: No public IP — Caddy HTTPS not configured!"
 fi
 
-# ── [4/8] OpenClaw ──────────────────────────────────────────────────
+# ── [4/9] Model Routing ────────────────────────────────────────────
+# Determine which AI model provider and model to use based on available API keys.
+# Priority: user-specified > anthropic > openai > gemini > openrouter
+dlog "Configuring model routing..." "model-routing"
+
+resolve_primary_model() {
+ # If user explicitly specified provider + model, use that
+ if [ -n "${PRIMARY_PROVIDER:-}" ] && [ "${PRIMARY_PROVIDER}" != "{{PRIMARY_PROVIDER}}" ] && \
+    [ -n "${PRIMARY_MODEL:-}" ] && [ "${PRIMARY_MODEL}" != "{{PRIMARY_MODEL}}" ]; then
+  echo "${PRIMARY_PROVIDER}/${PRIMARY_MODEL}"
+  return
+ fi
+
+ # If user specified provider but not model, pick best model for that provider
+ local provider="${PRIMARY_PROVIDER:-}"
+ if [ -n "$provider" ] && [ "$provider" != "{{PRIMARY_PROVIDER}}" ]; then
+  case "$provider" in
+   anthropic) echo "anthropic/claude-sonnet-4-5"; return ;;
+   openai)    echo "openai/gpt-5.2"; return ;;
+   gemini)    echo "google/gemini-2.5-pro"; return ;;
+   openrouter) echo "openrouter/anthropic/claude-sonnet-4-5"; return ;;
+  esac
+ fi
+
+ # Auto-detect from available API keys (priority: anthropic > openai > gemini > openrouter)
+ if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "{{ANTHROPIC_API_KEY}}" ]; then
+  echo "anthropic/claude-sonnet-4-5"
+ elif [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "{{OPENAI_API_KEY}}" ]; then
+  echo "openai/gpt-5.2"
+ elif [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "{{GEMINI_API_KEY}}" ]; then
+  echo "google/gemini-2.5-pro"
+ elif [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ]; then
+  echo "openrouter/anthropic/claude-sonnet-4-5"
+ else
+  # Fallback — no keys found, default to anthropic
+  echo "anthropic/claude-sonnet-4-5"
+ fi
+}
+
+RESOLVED_MODEL=$(resolve_primary_model)
+RESOLVED_PROVIDER=$(echo "$RESOLVED_MODEL" | cut -d'/' -f1)
+RESOLVED_MODEL_ID=$(echo "$RESOLVED_MODEL" | cut -d'/' -f2-)
+dlog "Model routing: ${RESOLVED_MODEL} (provider: ${RESOLVED_PROVIDER})"
+echo "Model routing resolved: ${RESOLVED_MODEL}"
+
+# Build fallback chain — include all providers that have keys
+MODEL_FALLBACKS=""
+build_fallback() {
+ local ref="$1"
+ if [ "$ref" != "$RESOLVED_MODEL" ]; then
+  if [ -z "$MODEL_FALLBACKS" ]; then
+   MODEL_FALLBACKS="\"${ref}\""
+  else
+   MODEL_FALLBACKS="${MODEL_FALLBACKS}, \"${ref}\""
+  fi
+ fi
+}
+if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "{{ANTHROPIC_API_KEY}}" ]; then
+ build_fallback "anthropic/claude-sonnet-4-5"
+fi
+if [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "{{OPENAI_API_KEY}}" ]; then
+ build_fallback "openai/gpt-5.2"
+fi
+if [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "{{GEMINI_API_KEY}}" ]; then
+ build_fallback "google/gemini-2.5-pro"
+fi
+if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ]; then
+ build_fallback "openrouter/anthropic/claude-sonnet-4-5"
+fi
+
+# Build fallbacks JSON (may be empty)
+if [ -n "$MODEL_FALLBACKS" ]; then
+ FALLBACKS_JSON=", \"fallbacks\": [${MODEL_FALLBACKS}]"
+else
+ FALLBACKS_JSON=""
+fi
+
+echo "Fallback chain: ${MODEL_FALLBACKS:-none}"
+
+# ── [5/9] OpenClaw ──────────────────────────────────────────────────
 # Shallow clone for docker-compose.yml only — the actual image comes from GHCR
 dlog "Fetching OpenClaw compose files..."
 if [ ! -d /opt/openclaw ]; then
@@ -225,7 +314,7 @@ mkdir -p /opt/openclaw-data/config/media/browser
 mkdir -p /opt/openclaw-data/config/agents/main/agent
 mkdir -p /opt/openclaw-data/config/hooks
 
-# .env for docker compose
+# .env for docker compose — pass all available provider keys
 cat > /opt/openclaw/.env << ENV
 OPENCLAW_IMAGE=openclaw:local
 OPENCLAW_GATEWAY_PORT=0.0.0.0:${GATEWAY_PORT}
@@ -233,17 +322,102 @@ OPENCLAW_BRIDGE_PORT=127.0.0.1:18790
 OPENCLAW_GATEWAY_BIND=127.0.0.1
 OPENCLAW_CONFIG_DIR=/opt/openclaw-data/config
 OPENCLAW_WORKSPACE_DIR=/opt/openclaw-data/workspace
-OPENAI_API_KEY=${OPENAI_API_KEY}
-BRAVE_API_KEY=${BRAVE_API_KEY}
 OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
+BRAVE_API_KEY=${BRAVE_API_KEY}
 CAPTCHA_2CAPTCHA_API_KEY=${CAPTCHA_2CAPTCHA_API_KEY}
 COMPOSIO_API_KEY=${COMPOSIO_API_KEY}
 ENV
 
+# Conditionally add provider API keys to .env (only if set)
+[ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "{{OPENAI_API_KEY}}" ] && echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> /opt/openclaw/.env
+[ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "{{ANTHROPIC_API_KEY}}" ] && echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> /opt/openclaw/.env
+[ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "{{GEMINI_API_KEY}}" ] && echo "GEMINI_API_KEY=${GEMINI_API_KEY}" >> /opt/openclaw/.env
+[ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ] && echo "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}" >> /opt/openclaw/.env
+
 # Derive hook token from gateway token
 HOOK_TOKEN=$(echo -n "${GATEWAY_TOKEN}-hook" | sha256sum | cut -c1-32)
 
-# OpenClaw config — security-hardened per docs
+# ── Build dynamic models.providers JSON ──
+# Only include providers whose API keys are available
+MODELS_PROVIDERS=""
+add_provider() {
+ local entry="$1"
+ if [ -z "$MODELS_PROVIDERS" ]; then
+  MODELS_PROVIDERS="$entry"
+ else
+  MODELS_PROVIDERS="${MODELS_PROVIDERS},
+$entry"
+ fi
+}
+
+if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "{{ANTHROPIC_API_KEY}}" ]; then
+ add_provider '   "anthropic": {
+    "baseUrl": "https://api.anthropic.com/v1",
+    "api": "anthropic-messages",
+    "models": [
+     { "id": "claude-opus-4-6", "name": "Claude Opus 4.6", "contextWindow": 200000 },
+     { "id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "contextWindow": 200000 },
+     { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "contextWindow": 200000 },
+     { "id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "contextWindow": 200000 }
+    ]
+   }'
+fi
+
+if [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "{{OPENAI_API_KEY}}" ]; then
+ add_provider '   "openai": {
+    "baseUrl": "https://api.openai.com/v1",
+    "api": "openai-completions",
+    "models": [
+     { "id": "gpt-5.2", "name": "GPT-5.2", "contextWindow": 128000 },
+     { "id": "gpt-5.0", "name": "GPT-5.0", "contextWindow": 128000 }
+    ]
+   }'
+fi
+
+if [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "{{GEMINI_API_KEY}}" ]; then
+ add_provider '   "google": {
+    "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+    "api": "google-generative-ai",
+    "models": [
+     { "id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "contextWindow": 1000000 },
+     { "id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "contextWindow": 1000000 }
+    ]
+   }'
+fi
+
+if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ]; then
+ add_provider '   "openrouter": {
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "api": "openai-completions",
+    "models": [
+     { "id": "anthropic/claude-sonnet-4-5", "name": "Claude Sonnet 4.5 (OR)", "contextWindow": 200000 },
+     { "id": "openai/gpt-5.2", "name": "GPT-5.2 (OR)", "contextWindow": 128000 },
+     { "id": "google/gemini-2.5-pro", "name": "Gemini 2.5 Pro (OR)", "contextWindow": 1000000 }
+    ]
+   }'
+fi
+
+# Fallback: if no providers configured, add anthropic as default
+if [ -z "$MODELS_PROVIDERS" ]; then
+ MODELS_PROVIDERS='   "anthropic": {
+    "baseUrl": "https://api.anthropic.com/v1",
+    "api": "anthropic-messages",
+    "models": [
+     { "id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "contextWindow": 200000 }
+    ]
+   }'
+fi
+
+# Resolve embedding provider — prefer openai for embeddings, fall back to anthropic
+if [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "{{OPENAI_API_KEY}}" ]; then
+ EMBEDDING_PROVIDER="openai"
+ EMBEDDING_MODEL="text-embedding-3-small"
+else
+ EMBEDDING_PROVIDER="${RESOLVED_PROVIDER}"
+ EMBEDDING_MODEL="text-embedding-3-small"
+fi
+
+# OpenClaw config — security-hardened, multi-model support
 cat > /opt/openclaw-data/config/openclaw.json << OCCONFIG
 {
  "agents": {
@@ -258,7 +432,7 @@ cat > /opt/openclaw-data/config/openclaw.json << OCCONFIG
  }
  ],
  "defaults": {
- "model": { "primary": "openai/gpt-5.2" },
+ "model": { "primary": "${RESOLVED_MODEL}"${FALLBACKS_JSON} },
  "maxConcurrent": 4,
  "thinkingDefault": "low",
  "heartbeat": {
@@ -274,7 +448,7 @@ cat > /opt/openclaw-data/config/openclaw.json << OCCONFIG
  }
  },
  "subagents": {
- "model": "openai/gpt-5.2",
+ "model": "${RESOLVED_MODEL}",
  "thinking": "low",
  "maxConcurrent": 8,
  "archiveAfterMinutes": 30
@@ -290,20 +464,14 @@ cat > /opt/openclaw-data/config/openclaw.json << OCCONFIG
  },
  "memorySearch": {
  "enabled": true,
- "provider": "openai",
- "model": "text-embedding-3-small"
+ "provider": "${EMBEDDING_PROVIDER}",
+ "model": "${EMBEDDING_MODEL}"
  }
  }
  },
  "models": {
  "providers": {
- "openai": {
- "baseUrl": "https://api.openai.com/v1",
- "api": "openai-completions",
- "models": [
- { "id": "gpt-5.2", "name": "GPT-5 Mini", "contextWindow": 128000 }
- ]
- }
+${MODELS_PROVIDERS}
  }
  },
  "tools": {
@@ -413,7 +581,10 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      OPENAI_API_KEY: \${OPENAI_API_KEY}
+      OPENAI_API_KEY: \${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: \${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: \${GEMINI_API_KEY:-}
+      OPENROUTER_API_KEY: \${OPENROUTER_API_KEY:-}
       BRAVE_API_KEY: \${BRAVE_API_KEY}
       CHROME_PATH: /usr/bin/google-chrome-stable
       CHROMIUM_PATH: /usr/bin/google-chrome-stable
@@ -465,20 +636,55 @@ exec su -s /bin/bash node -c "node dist/index.js gateway --allow-unconfigured --
 STARTUP
 chmod +x /opt/openclaw-data/startup.sh
 
-# Auth profiles for OpenAI
+# Auth profiles — dynamically built from all available API keys
+AUTH_PROFILES=""
+AUTH_LASTGOOD=""
+add_auth_profile() {
+ local id="$1" provider="$2" key="$3"
+ local entry="\"${id}\": { \"type\": \"api_key\", \"provider\": \"${provider}\", \"key\": \"${key}\" }"
+ local lastgood="\"${provider}\": \"${id}\""
+ if [ -z "$AUTH_PROFILES" ]; then
+  AUTH_PROFILES="  $entry"
+  AUTH_LASTGOOD="  $lastgood"
+ else
+  AUTH_PROFILES="${AUTH_PROFILES},
+  $entry"
+  AUTH_LASTGOOD="${AUTH_LASTGOOD},
+  $lastgood"
+ fi
+}
+
+if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "{{ANTHROPIC_API_KEY}}" ]; then
+ add_auth_profile "anthropic:default" "anthropic" "${ANTHROPIC_API_KEY}"
+fi
+if [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "{{OPENAI_API_KEY}}" ]; then
+ add_auth_profile "openai:default" "openai" "${OPENAI_API_KEY}"
+fi
+if [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "{{GEMINI_API_KEY}}" ]; then
+ add_auth_profile "google:default" "google" "${GEMINI_API_KEY}"
+fi
+if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ]; then
+ add_auth_profile "openrouter:default" "openrouter" "${OPENROUTER_API_KEY}"
+fi
+
+# Fallback: if no keys, create empty profiles
+if [ -z "$AUTH_PROFILES" ]; then
+ AUTH_PROFILES=""
+ AUTH_LASTGOOD=""
+fi
+
 cat > /opt/openclaw-data/config/agents/main/agent/auth-profiles.json << AUTHPROF
 {
  "version": 1,
  "profiles": {
- "openai:default": {
- "type": "api_key",
- "provider": "openai",
- "key": "${OPENAI_API_KEY}"
- }
+${AUTH_PROFILES}
  },
- "lastGood": { "openai": "openai:default" }
+ "lastGood": {
+${AUTH_LASTGOOD}
+ }
 }
 AUTHPROF
+dlog "Auth profiles configured for: $(echo "$AUTH_LASTGOOD" | grep -o '"[a-z]*"' | tr '\n' ' ' || echo 'none')"
 
 # ── OpenClaw Workspace Bootstrap ──────────────────────────────────────
 # Workspace files are pushed AFTER deploy via the bridge API (provision.js)
@@ -626,7 +832,7 @@ docker image prune -f 2>/dev/null || true
 docker compose exec -T openclaw-gateway openclaw setup --workspace /opt/openclaw-data/workspace 2>/dev/null || true
 docker compose exec -T openclaw-gateway openclaw doctor --fix 2>/dev/null || true
 
-# ── [5/8] Bridge ────────────────────────────────────────────────────
+# ── [6/9] Bridge ────────────────────────────────────────────────────
 dlog "Setting up Bridge..."
 mkdir -p /opt/openclaw-bridge
 dlog "Downloading bridge from GitHub..."
@@ -637,7 +843,7 @@ dlog "Bridge downloaded ($(wc -c < /opt/openclaw-bridge/index.mjs) bytes)"
 
 cd /opt/openclaw-bridge && timeout 120 npm install --prefer-offline 2>/dev/null || timeout 120 npm install
 
-# ── [6/8] Poller (minimal stub — bridge handles everything now) ─────
+# ── [7/9] Poller (minimal stub — bridge handles everything now) ─────
 dlog "Setting up Poller..."
 mkdir -p /opt/openclaw-poller
 cat > /opt/openclaw-poller/package.json << 'PPKG'
@@ -660,7 +866,7 @@ POLLER
 
 cd /opt/openclaw-poller && timeout 120 npm install --prefer-offline 2>/dev/null || timeout 120 npm install
 
-# ── [6.5/8] noVNC + websockify (live browser view via VNC) ────────────
+# ── [7.5/9] noVNC + websockify (live browser view via VNC) ────────────
 # Installs on the HOST (not in container). Websockify bridges WebSocket → VNC protocol.
 # Caddy proxies /vnc/* → websockify:6080 → Xvnc:5999 (inside container, mapped to host).
 if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
@@ -669,7 +875,7 @@ if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
   echo "[setup] noVNC + websockify installed for VNC live view"
 fi
 
-# ── [7/8] Systemd services ──────────────────────────────────────────
+# ── [8/9] Systemd services ──────────────────────────────────────────
 
 # Docker Compose service (auto-start containers on boot)
 cat > /etc/systemd/system/openclaw-docker.service << DSVC
@@ -731,7 +937,7 @@ Environment=BRIDGE_URL=http://127.0.0.1:${BRIDGE_PORT}
 Environment=OPENCLAW_URL=http://127.0.0.1:${GATEWAY_PORT}
 Environment=OPENCLAW_TOKEN=${GATEWAY_TOKEN}
 Environment=OPENCLAW_HOOK_TOKEN=oc-hook-${HOOK_TOKEN}
-Environment=OPENCLAW_MODEL=openai/gpt-5.2
+Environment=OPENCLAW_MODEL=${RESOLVED_MODEL}
 Environment=POLL_INTERVAL=3000
 Environment=REQUEST_TIMEOUT=180000
 Environment=NODE_ENV=production
@@ -776,7 +982,7 @@ fi
 # Start Caddy (HTTPS reverse proxy) — needs gateway container to be up
 systemctl restart caddy 2>/dev/null || true
 
-# ── [8/8] Verify ────────────────────────────────────────────────────
+# ── [9/9] Verify ────────────────────────────────────────────────────
 sleep 5
 
 # Check docker
