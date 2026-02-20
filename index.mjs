@@ -1636,7 +1636,7 @@ app.get('/config/api-keys', (req, res) => {
  };
  const anthropicKey = getEnvVal('ANTHROPIC_API_KEY');
  const openaiKey = getEnvVal('OPENAI_API_KEY');
- const geminiKey = getEnvVal('GOOGLE_API_KEY') || getEnvVal('GEMINI_API_KEY');
+ const geminiKey = getEnvVal('GEMINI_API_KEY') || getEnvVal('GOOGLE_API_KEY');
  const braveKey = getEnvVal('BRAVE_API_KEY');
  const composioKey = getEnvVal('COMPOSIO_API_KEY');
  const openrouterKey = getEnvVal('OPENROUTER_API_KEY');
@@ -1802,6 +1802,12 @@ app.post('/config/api-keys', async (req, res) => {
     { id: 'openai/gpt-5.2', name: 'GPT-5.2 (OR)', contextWindow: 128000 },
     { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro (OR)', contextWindow: 1000000 },
    ] }},
+ mistral: { key: mistralKey, config: {
+   baseUrl: 'https://api.mistral.ai/v1', api: 'openai-completions',
+   models: [
+    { id: 'mistral-large-latest', name: 'Mistral Large', contextWindow: 128000 },
+    { id: 'mistral-medium-latest', name: 'Mistral Medium', contextWindow: 32000 },
+   ] }},
  };
  const newProviders = Object.entries(providerConfigs).filter(([, entry]) => entry.key !== undefined);
  if (newProviders.length > 0) {
@@ -1824,6 +1830,22 @@ app.post('/config/api-keys', async (req, res) => {
  }
  } catch (e) { console.error('Failed to update openclaw.json providers:', e.message); }
  }
+ }
+
+ // Ensure MISTRAL_API_KEY is passed through docker-compose override
+ if (mistralKey !== undefined) {
+  try {
+   const overridePath = '/opt/openclaw/docker-compose.override.yml';
+   let override = readFileSync(overridePath, 'utf8');
+   if (!override.includes('MISTRAL_API_KEY')) {
+    override = override.replace(
+     /(OPENROUTER_API_KEY:[^\n]*\n)/,
+     `$1      MISTRAL_API_KEY: \${MISTRAL_API_KEY:-}\n`
+    );
+    writeFileSync(overridePath, override);
+    console.log('[bridge] Added MISTRAL_API_KEY to docker-compose.override.yml');
+   }
+  } catch (e) { console.error('Failed to patch docker-compose override:', e.message); }
  }
 
  console.log('Restarting OpenClaw containers after key update...');

@@ -582,6 +582,7 @@ services:
       ANTHROPIC_API_KEY: \${ANTHROPIC_API_KEY:-}
       GEMINI_API_KEY: \${GEMINI_API_KEY:-}
       OPENROUTER_API_KEY: \${OPENROUTER_API_KEY:-}
+      MISTRAL_API_KEY: \${MISTRAL_API_KEY:-}
       BRAVE_API_KEY: \${BRAVE_API_KEY}
       CHROME_PATH: /usr/bin/google-chrome-stable
       CHROMIUM_PATH: /usr/bin/google-chrome-stable
