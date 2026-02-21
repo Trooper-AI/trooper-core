@@ -854,10 +854,15 @@ async function handleIncomingTaskStream(req, res) {
      clearInterval(screenshotPollerInterval);
    }
 
-   // Try VNC live view first (real-time), fall back to screenshot polling (1.5s flipbook)
-   const vncUrl = getVNCLiveViewUrl();
-   if (vncUrl && isVNCAvailable()) {
-     sendSSE('browser_session', { liveViewUrl: vncUrl });
+   // Priority: Browserbase live view > VNC > screenshot polling
+   const bbLiveUrl = getBrowserbaseLiveViewUrl();
+   if (bbLiveUrl) {
+     // Ensure Browserbase session is fresh
+     ensureBrowserbaseSession().catch(() => {});
+     sendSSE('browser_session', { liveViewUrl: bbLiveUrl });
+     console.log(`[browserbase] Sent live view URL to client: ${bbLiveUrl}`);
+   } else if (getVNCLiveViewUrl() && isVNCAvailable()) {
+     sendSSE('browser_session', { liveViewUrl: getVNCLiveViewUrl() });
      console.log(`[VNC] Sent live view URL to client`);
    } else {
      // Fallback: poll screenshots from container every 1.5s
@@ -2333,6 +2338,134 @@ app.put('/config/auth-profiles', (req, res) => {
 });
 
 // ── Start Server ─────────────────────────────────────────────────────
-server.listen(PORT, '0.0.0.0', () => {
+// ── Browserbase Integration ─────────────────────────────────────────
+// Managed cloud browser with proxy rotation, CAPTCHA solving, stealth.
+// Creates a long-lived session at startup, writes CDP URL to OpenClaw config.
+const BROWSERBASE_API_KEY = process.env.BROWSERBASE_API_KEY || '';
+const BROWSERBASE_PROJECT_ID = process.env.BROWSERBASE_PROJECT_ID || '';
+const BROWSERBASE_API_URL = 'https://api.browserbase.com/v1';
+
+let browserbaseSession = null; // { id, connectUrl, liveViewUrl, createdAt }
+
+async function browserbaseApiRequest(method, path, body) {
+  const res = await fetch(`${BROWSERBASE_API_URL}${path}`, {
+    method,
+    headers: { 'Content-Type': 'application/json', 'x-bb-api-key': BROWSERBASE_API_KEY },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Browserbase ${method} ${path} failed (${res.status}): ${text}`);
+  }
+  const ct = res.headers.get('content-type');
+  return ct && ct.includes('application/json') ? res.json() : null;
+}
+
+async function createBrowserbaseSession() {
+  if (!BROWSERBASE_API_KEY || !BROWSERBASE_PROJECT_ID) return null;
+
+  console.log('[browserbase] Creating managed browser session...');
+  const session = await browserbaseApiRequest('POST', '/sessions', {
+    projectId: BROWSERBASE_PROJECT_ID,
+    keepAlive: true,
+    timeout: 21600, // 6 hours max
+    proxies: true,
+    browserSettings: {
+      advancedStealth: true,
+      solveCaptchas: true,
+      blockAds: true,
+      recordSession: true,
+      viewport: { width: 1920, height: 1080 },
+    },
+  });
+
+  // Get live debug URL
+  let liveViewUrl = null;
+  try {
+    const debug = await browserbaseApiRequest('GET', `/sessions/${session.id}/debug`);
+    liveViewUrl = debug?.debuggerFullscreenUrl || debug?.debuggerUrl || null;
+  } catch (e) {
+    liveViewUrl = `https://www.browserbase.com/sessions/${session.id}`;
+  }
+
+  browserbaseSession = {
+    id: session.id,
+    connectUrl: session.connectUrl,
+    liveViewUrl,
+    createdAt: Date.now(),
+  };
+
+  console.log(`[browserbase] Session ready: ${session.id}`);
+  console.log(`[browserbase] CDP: ${session.connectUrl?.substring(0, 60)}...`);
+  console.log(`[browserbase] Live view: ${liveViewUrl}`);
+
+  // Write CDP URL to OpenClaw config as a browser profile
+  try {
+    const configPath = '/opt/openclaw-data/config/openclaw.json';
+    const config = JSON.parse(readFileSync(configPath, 'utf8'));
+    if (!config.browser) config.browser = {};
+    if (!config.browser.profiles) config.browser.profiles = {};
+    config.browser.profiles.browserbase = { cdpUrl: session.connectUrl, color: '#00AA00' };
+    config.browser.defaultProfile = 'browserbase';
+    config.browser.remoteCdpTimeoutMs = 5000;
+    config.browser.remoteCdpHandshakeTimeoutMs = 10000;
+    writeFileSync(configPath, JSON.stringify(config, null, 2));
+    try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
+    console.log('[browserbase] Wrote browserbase profile to openclaw.json');
+  } catch (e) {
+    console.error('[browserbase] Failed to update openclaw.json:', e.message);
+  }
+
+  return browserbaseSession;
+}
+
+async function ensureBrowserbaseSession() {
+  if (!BROWSERBASE_API_KEY || !BROWSERBASE_PROJECT_ID) return null;
+
+  // Renew if session is older than 5 hours (sessions expire at 6h)
+  if (browserbaseSession && (Date.now() - browserbaseSession.createdAt) < 5 * 60 * 60 * 1000) {
+    return browserbaseSession;
+  }
+
+  // Close old session
+  if (browserbaseSession) {
+    try { await browserbaseApiRequest('POST', `/sessions/${browserbaseSession.id}/stop`, {}); } catch {}
+  }
+
+  return createBrowserbaseSession();
+}
+
+function getBrowserbaseLiveViewUrl() {
+  return browserbaseSession?.liveViewUrl || null;
+}
+
+server.listen(PORT, '0.0.0.0', async () => {
  console.log(`OpenClaw Bridge v2.1 on :${PORT} | WS Relay: ${RENDER_WS_URL ? 'active' : 'disabled'} | OpenClaw: ${OPENCLAW_GATEWAY_TOKEN ? 'native' : 'poller'}`);
+
+ // Initialize Browserbase if configured
+ if (BROWSERBASE_API_KEY && BROWSERBASE_PROJECT_ID) {
+   try {
+     await createBrowserbaseSession();
+     // Restart OpenClaw gateway to pick up the new browser profile
+     try { execSync('docker restart openclaw-gateway 2>&1', { timeout: 30000 }); } catch {}
+     console.log('[browserbase] OpenClaw gateway restarted with browserbase profile');
+   } catch (e) {
+     console.error('[browserbase] Failed to initialize:', e.message);
+     console.error('[browserbase] Falling back to OpenClaw built-in Chrome');
+   }
+
+   // Auto-renew session every 4.5 hours
+   setInterval(async () => {
+     try {
+       const session = await ensureBrowserbaseSession();
+       if (session) {
+         // Update OpenClaw config with new CDP URL
+         try { execSync('docker restart openclaw-gateway 2>&1', { timeout: 30000 }); } catch {}
+         console.log('[browserbase] Session renewed, gateway restarted');
+       }
+     } catch (e) {
+       console.error('[browserbase] Session renewal failed:', e.message);
+     }
+   }, 4.5 * 60 * 60 * 1000);
+ }
 });
