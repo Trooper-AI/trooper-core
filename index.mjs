@@ -2441,10 +2441,7 @@ async function acquireBrowserbaseSession() {
     timeout: 600, // 10 minute timeout — enough for a task, not wasteful
     proxies: true,
     browserSettings: {
-      advancedStealth: true,
-      solveCaptchas: true,
       blockAds: true,
-      recordSession: true,
       viewport: { width: 1920, height: 1080 },
     },
   });
