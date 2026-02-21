@@ -597,6 +597,30 @@ class OpenClawGateway {
  console.warn(`[OpenClaw] Screenshot check failed: ${e.message}`);
  }
  }
+ // Synthesize tool events for OpenClaw native tools (browser, web_search, etc.)
+ // that don't emit tool_use/tool_result in the stream protocol
+ if (toolLog.length === 0 && response) {
+   const hasBrowserScreenshot = /!\[screenshot\]\(data:image\//.test(response) || /MEDIA:/.test(response);
+   const hasBrowsing = /navigat|screenshot|browser|visited|opened|clicked|page|scroll/i.test(response);
+   const hasWebSearch = /search results|searched for|web search|found.*online/i.test(response);
+
+   if (hasBrowserScreenshot || hasBrowsing) {
+     toolLog.push({ tool: 'browser', params: {}, status: 'ok', summary: 'Browser session completed' });
+     if (onEvent) {
+       onEvent('tool_start', { tool: 'browser', params: {}, index: 0 });
+       onEvent('tool_result', { tool: 'browser', success: true, summary: 'Browser session completed', index: 0 });
+     }
+   }
+   if (hasWebSearch) {
+     const idx = toolLog.length;
+     toolLog.push({ tool: 'web_search', params: {}, status: 'ok', summary: 'Web search completed' });
+     if (onEvent) {
+       onEvent('tool_start', { tool: 'web_search', params: {}, index: idx });
+       onEvent('tool_result', { tool: 'web_search', success: true, summary: 'Web search completed', index: idx });
+     }
+   }
+ }
+
  const formattedToolLog = toolLog.map(t => ({
  tool: t.tool,
  params: t.params && Object.keys(t.params).length > 0 ? t.params : undefined,
@@ -853,15 +877,8 @@ async function handleIncomingTaskStream(req, res) {
  let screenshotPollerInterval = null;
  let browserbaseAcquired = false;
 
- // Pre-acquire Browserbase session if configured (so CDP URL is ready when browser tool fires)
- if (isBrowserbaseConfigured()) {
-   try {
-     const bbSession = await acquireBrowserbaseSession();
-     if (bbSession) browserbaseAcquired = true;
-   } catch (e) {
-     console.warn(`[browserbase] On-demand session failed, falling back to built-in Chrome: ${e.message}`);
-   }
- }
+ // Browserbase sessions are now acquired lazily (on first browser tool_start)
+ // to avoid wasting sessions on non-browser tasks
 
  try {
  console.log(`[${id}] SSE streaming to OpenClaw agent:${agentId} for ${agentName || 'default'}...`);
@@ -2407,7 +2424,9 @@ function writeBrowserbaseProfile(connectUrl) {
     const config = JSON.parse(readFileSync(configPath, 'utf8'));
     if (!config.browser) config.browser = {};
     if (!config.browser.profiles) config.browser.profiles = {};
-    config.browser.profiles.browserbase = { cdpUrl: connectUrl, color: '#00AA00' };
+    // OpenClaw expects http(s):// for CDP, but Browserbase returns wss:// — convert protocol
+    const cdpUrl = connectUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://');
+    config.browser.profiles.browserbase = { cdpUrl, color: '#00AA00' };
     config.browser.defaultProfile = 'browserbase';
     config.browser.remoteCdpTimeoutMs = 5000;
     config.browser.remoteCdpHandshakeTimeoutMs = 10000;
@@ -2506,7 +2525,7 @@ async function releaseBrowserbaseSession() {
 
   console.log(`[browserbase] Releasing session ${sessionId}`);
   try {
-    await browserbaseApiRequest('POST', `/sessions/${sessionId}/stop`, {});
+    await browserbaseApiRequest('POST', `/sessions/${sessionId}`, { projectId: BROWSERBASE_PROJECT_ID, status: 'REQUEST_RELEASE' });
   } catch (e) {
     console.warn(`[browserbase] Failed to stop session: ${e.message}`);
   }
