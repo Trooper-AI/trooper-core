@@ -339,6 +339,14 @@ class OpenClawGateway {
  // Dual-phase: 1st response is "accepted", wait for final "ok"
  if (pending.expectFinal && frame.payload?.status === 'accepted') {
  pending.runId = frame.payload.runId;
+ // Re-register event listener under the actual runId so streaming events are delivered
+ // (listener was registered with idempotencyKey, but events arrive with runId)
+ if (pending.idempotencyKey && frame.payload.runId) {
+   const listener = this._eventListeners.get(pending.idempotencyKey);
+   if (listener) {
+     this._eventListeners.set(frame.payload.runId, listener);
+   }
+ }
  return;
  }
 
@@ -393,7 +401,7 @@ class OpenClawGateway {
  this._pendingRequests.set(id, {
  resolve: (payload) => { clearTimeout(timeout); resolve(payload); },
  reject: (err) => { clearTimeout(timeout); reject(err); },
- expectFinal: true, runId: null,
+ expectFinal: true, runId: null, idempotencyKey,
  });
 
  this.ws.send(JSON.stringify({
@@ -414,7 +422,7 @@ class OpenClawGateway {
  const resultText = result?.result?.payloads?.map(p => p.text).filter(Boolean).join('\n\n');
  let response = resultText || textChunks.join('') || null;
 
- // Check for new screenshots created during this agent run
+ // Check for new screenshots created during this agent run — convert to base64 data URIs
  if (response) {
  try {
  const newFiles = execSync(
@@ -423,7 +431,14 @@ class OpenClawGateway {
  ).toString().trim().split('\n').filter(f => /\.(png|jpg|jpeg|webp|gif)$/i.test(f));
  if (newFiles.length > 0) {
  console.log(`[OpenClaw] Found ${newFiles.length} new screenshot(s): ${newFiles.join(', ')}`);
- const imageMarkdown = newFiles.map(f => `\n\n![screenshot](${f})`).join('');
+ const imageMarkdown = newFiles.map(f => {
+   try {
+     const b64 = execSync(`docker exec openclaw-openclaw-gateway-1 bash -c 'cat "${f}" | base64 -w0'`, { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }).toString().trim();
+     const ext = f.split('.').pop().toLowerCase();
+     const mime = ext === 'jpg' || ext === 'jpeg' ? 'jpeg' : ext === 'webp' ? 'webp' : 'png';
+     return b64.length > 100 ? `\n\n![screenshot](data:image/${mime};base64,${b64})` : '';
+   } catch { return ''; }
+ }).filter(Boolean).join('');
  response += imageMarkdown;
  }
  } catch (e) {
@@ -443,7 +458,14 @@ class OpenClawGateway {
  if (response) console.log(`[OpenClaw] Agent response: ${response.length} chars (${toolCalls.length} tool calls)`);
  return response;
  } finally {
+ // Clean up both the idempotencyKey and any runId alias
+ const listener = this._eventListeners.get(idempotencyKey);
  this._eventListeners.delete(idempotencyKey);
+ if (listener) {
+   for (const [key, val] of this._eventListeners) {
+     if (val === listener) this._eventListeners.delete(key);
+   }
+ }
  }
  }
 
@@ -529,7 +551,7 @@ class OpenClawGateway {
  this._pendingRequests.set(id, {
  resolve: (payload) => { clearTimeout(timeout); resolve(payload); },
  reject: (err) => { clearTimeout(timeout); reject(err); },
- expectFinal: true, runId: null,
+ expectFinal: true, runId: null, idempotencyKey,
  });
 
  this.ws.send(JSON.stringify({
@@ -550,7 +572,7 @@ class OpenClawGateway {
  const resultText = result?.result?.payloads?.map(p => p.text).filter(Boolean).join('\n\n');
  let response = resultText || textChunks.join('') || null;
 
- // Check for new screenshots created during this agent run
+ // Check for new screenshots created during this agent run — convert to base64 data URIs
  if (response) {
  try {
  const newFiles = execSync(
@@ -559,7 +581,17 @@ class OpenClawGateway {
  ).toString().trim().split('\n').filter(f => /\.(png|jpg|jpeg|webp|gif)$/i.test(f));
  if (newFiles.length > 0) {
  console.log(`[OpenClaw] Found ${newFiles.length} new screenshot(s): ${newFiles.join(', ')}`);
- response += newFiles.map(f => `\n\n![screenshot](${f})`).join('');
+ for (const f of newFiles) {
+   try {
+     const b64 = execSync(`docker exec openclaw-openclaw-gateway-1 bash -c 'cat "${f}" | base64 -w0'`, { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }).toString().trim();
+     const ext = f.split('.').pop().toLowerCase();
+     const mime = ext === 'jpg' || ext === 'jpeg' ? 'jpeg' : ext === 'webp' ? 'webp' : 'png';
+     if (b64.length > 100) {
+       response += `\n\n![screenshot](data:image/${mime};base64,${b64})`;
+       if (onEvent) onEvent('screenshot_frame', { base64: b64, timestamp: Date.now() });
+     }
+   } catch { /* ignore individual screenshot errors */ }
+ }
  }
  } catch (e) {
  console.warn(`[OpenClaw] Screenshot check failed: ${e.message}`);
@@ -575,7 +607,14 @@ class OpenClawGateway {
  if (response) console.log(`[OpenClaw] Agent streaming response: ${response.length} chars (${toolLog.length} tool calls)`);
  return { response, toolLog: formattedToolLog };
  } finally {
+ // Clean up both the idempotencyKey and any runId alias
+ const listener = this._eventListeners.get(idempotencyKey);
  this._eventListeners.delete(idempotencyKey);
+ if (listener) {
+   for (const [key, val] of this._eventListeners) {
+     if (val === listener) this._eventListeners.delete(key);
+   }
+ }
  }
  }
 
