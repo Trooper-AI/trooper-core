@@ -339,6 +339,14 @@ class OpenClawGateway {
  // Dual-phase: 1st response is "accepted", wait for final "ok"
  if (pending.expectFinal && frame.payload?.status === 'accepted') {
  pending.runId = frame.payload.runId;
+ // Re-register event listener under the actual runId so streaming events are delivered
+ // (listener was registered with idempotencyKey, but events arrive with runId)
+ if (pending.idempotencyKey && frame.payload.runId) {
+   const listener = this._eventListeners.get(pending.idempotencyKey);
+   if (listener) {
+     this._eventListeners.set(frame.payload.runId, listener);
+   }
+ }
  return;
  }
 
@@ -393,7 +401,7 @@ class OpenClawGateway {
  this._pendingRequests.set(id, {
  resolve: (payload) => { clearTimeout(timeout); resolve(payload); },
  reject: (err) => { clearTimeout(timeout); reject(err); },
- expectFinal: true, runId: null,
+ expectFinal: true, runId: null, idempotencyKey,
  });
 
  this.ws.send(JSON.stringify({
@@ -414,7 +422,7 @@ class OpenClawGateway {
  const resultText = result?.result?.payloads?.map(p => p.text).filter(Boolean).join('\n\n');
  let response = resultText || textChunks.join('') || null;
 
- // Check for new screenshots created during this agent run
+ // Check for new screenshots created during this agent run — convert to base64 data URIs
  if (response) {
  try {
  const newFiles = execSync(
@@ -423,7 +431,14 @@ class OpenClawGateway {
  ).toString().trim().split('\n').filter(f => /\.(png|jpg|jpeg|webp|gif)$/i.test(f));
  if (newFiles.length > 0) {
  console.log(`[OpenClaw] Found ${newFiles.length} new screenshot(s): ${newFiles.join(', ')}`);
- const imageMarkdown = newFiles.map(f => `\n\n![screenshot](${f})`).join('');
+ const imageMarkdown = newFiles.map(f => {
+   try {
+     const b64 = execSync(`docker exec openclaw-openclaw-gateway-1 bash -c 'cat "${f}" | base64 -w0'`, { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }).toString().trim();
+     const ext = f.split('.').pop().toLowerCase();
+     const mime = ext === 'jpg' || ext === 'jpeg' ? 'jpeg' : ext === 'webp' ? 'webp' : 'png';
+     return b64.length > 100 ? `\n\n![screenshot](data:image/${mime};base64,${b64})` : '';
+   } catch { return ''; }
+ }).filter(Boolean).join('');
  response += imageMarkdown;
  }
  } catch (e) {
@@ -443,7 +458,14 @@ class OpenClawGateway {
  if (response) console.log(`[OpenClaw] Agent response: ${response.length} chars (${toolCalls.length} tool calls)`);
  return response;
  } finally {
+ // Clean up both the idempotencyKey and any runId alias
+ const listener = this._eventListeners.get(idempotencyKey);
  this._eventListeners.delete(idempotencyKey);
+ if (listener) {
+   for (const [key, val] of this._eventListeners) {
+     if (val === listener) this._eventListeners.delete(key);
+   }
+ }
  }
  }
 
@@ -529,7 +551,7 @@ class OpenClawGateway {
  this._pendingRequests.set(id, {
  resolve: (payload) => { clearTimeout(timeout); resolve(payload); },
  reject: (err) => { clearTimeout(timeout); reject(err); },
- expectFinal: true, runId: null,
+ expectFinal: true, runId: null, idempotencyKey,
  });
 
  this.ws.send(JSON.stringify({
@@ -550,7 +572,7 @@ class OpenClawGateway {
  const resultText = result?.result?.payloads?.map(p => p.text).filter(Boolean).join('\n\n');
  let response = resultText || textChunks.join('') || null;
 
- // Check for new screenshots created during this agent run
+ // Check for new screenshots created during this agent run — convert to base64 data URIs
  if (response) {
  try {
  const newFiles = execSync(
@@ -559,7 +581,17 @@ class OpenClawGateway {
  ).toString().trim().split('\n').filter(f => /\.(png|jpg|jpeg|webp|gif)$/i.test(f));
  if (newFiles.length > 0) {
  console.log(`[OpenClaw] Found ${newFiles.length} new screenshot(s): ${newFiles.join(', ')}`);
- response += newFiles.map(f => `\n\n![screenshot](${f})`).join('');
+ for (const f of newFiles) {
+   try {
+     const b64 = execSync(`docker exec openclaw-openclaw-gateway-1 bash -c 'cat "${f}" | base64 -w0'`, { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }).toString().trim();
+     const ext = f.split('.').pop().toLowerCase();
+     const mime = ext === 'jpg' || ext === 'jpeg' ? 'jpeg' : ext === 'webp' ? 'webp' : 'png';
+     if (b64.length > 100) {
+       response += `\n\n![screenshot](data:image/${mime};base64,${b64})`;
+       if (onEvent) onEvent('screenshot_frame', { base64: b64, timestamp: Date.now() });
+     }
+   } catch { /* ignore individual screenshot errors */ }
+ }
  }
  } catch (e) {
  console.warn(`[OpenClaw] Screenshot check failed: ${e.message}`);
@@ -575,7 +607,14 @@ class OpenClawGateway {
  if (response) console.log(`[OpenClaw] Agent streaming response: ${response.length} chars (${toolLog.length} tool calls)`);
  return { response, toolLog: formattedToolLog };
  } finally {
+ // Clean up both the idempotencyKey and any runId alias
+ const listener = this._eventListeners.get(idempotencyKey);
  this._eventListeners.delete(idempotencyKey);
+ if (listener) {
+   for (const [key, val] of this._eventListeners) {
+     if (val === listener) this._eventListeners.delete(key);
+   }
+ }
  }
  }
 
@@ -732,6 +771,17 @@ async function handleIncomingTask(req, res) {
  }
  }
 
+ // Acquire Browserbase session if configured
+ let browserbaseAcquired = false;
+ if (isBrowserbaseConfigured()) {
+   try {
+     const bbSession = await acquireBrowserbaseSession();
+     if (bbSession) browserbaseAcquired = true;
+   } catch (e) {
+     console.warn(`[browserbase] On-demand session failed: ${e.message}`);
+   }
+ }
+
  try {
  console.log(`[${id}] Routing to OpenClaw agent:${agentId} via WebSocket for ${agentName || 'default'} (session: ${sessionKey})...`);
  const result = await gateway.runAgent(fullTask, {
@@ -752,6 +802,10 @@ async function handleIncomingTask(req, res) {
  } catch (err) {
  console.error(`[${id}] Agent failed: ${err.message}`);
  res.status(502).json({ error: `Agent failed: ${err.message}`, requestId: id });
+ } finally {
+ if (browserbaseAcquired) {
+   releaseBrowserbaseSession().catch(e => console.warn(`[browserbase] Release failed: ${e.message}`));
+ }
  }
 }
 
@@ -797,6 +851,18 @@ async function handleIncomingTaskStream(req, res) {
  sendSSE('start', { requestId: id, agentId, agentName: agentName || 'default' });
 
  let screenshotPollerInterval = null;
+ let browserbaseAcquired = false;
+
+ // Pre-acquire Browserbase session if configured (so CDP URL is ready when browser tool fires)
+ if (isBrowserbaseConfigured()) {
+   try {
+     const bbSession = await acquireBrowserbaseSession();
+     if (bbSession) browserbaseAcquired = true;
+   } catch (e) {
+     console.warn(`[browserbase] On-demand session failed, falling back to built-in Chrome: ${e.message}`);
+   }
+ }
+
  try {
  console.log(`[${id}] SSE streaming to OpenClaw agent:${agentId} for ${agentName || 'default'}...`);
  const { response, toolLog } = await gateway.runAgentStreaming(fullTask, {
@@ -815,10 +881,13 @@ async function handleIncomingTaskStream(req, res) {
      clearInterval(screenshotPollerInterval);
    }
 
-   // Try VNC live view first (real-time), fall back to screenshot polling (1.5s flipbook)
-   const vncUrl = getVNCLiveViewUrl();
-   if (vncUrl && isVNCAvailable()) {
-     sendSSE('browser_session', { liveViewUrl: vncUrl });
+   // Priority: Browserbase live view > VNC > screenshot polling
+   const bbLiveUrl = getBrowserbaseLiveViewUrl();
+   if (bbLiveUrl) {
+     sendSSE('browser_session', { liveViewUrl: bbLiveUrl });
+     console.log(`[browserbase] Sent live view URL to client: ${bbLiveUrl}`);
+   } else if (getVNCLiveViewUrl() && isVNCAvailable()) {
+     sendSSE('browser_session', { liveViewUrl: getVNCLiveViewUrl() });
      console.log(`[VNC] Sent live view URL to client`);
    } else {
      // Fallback: poll screenshots from container every 1.5s
@@ -877,6 +946,10 @@ async function handleIncomingTaskStream(req, res) {
    screenshotPollerInterval = null;
  }
  clearInterval(keepAlive);
+ // Release Browserbase session when task is done (saves money)
+ if (browserbaseAcquired) {
+   releaseBrowserbaseSession().catch(e => console.warn(`[browserbase] Release failed: ${e.message}`));
+ }
  res.end();
  }
 }
@@ -2294,6 +2367,143 @@ app.put('/config/auth-profiles', (req, res) => {
 });
 
 // ── Start Server ─────────────────────────────────────────────────────
+// ── Browserbase Integration ─────────────────────────────────────────
+// On-demand managed cloud browser: proxy rotation, CAPTCHA solving, stealth.
+// Creates a session per browser task, destroys when done. Saves money.
+// OpenClaw hot-reloads config so no gateway restart needed.
+const BROWSERBASE_API_KEY = process.env.BROWSERBASE_API_KEY || '';
+const BROWSERBASE_PROJECT_ID = process.env.BROWSERBASE_PROJECT_ID || '';
+const BROWSERBASE_API_URL = 'https://api.browserbase.com/v1';
+
+let browserbaseSession = null; // { id, connectUrl, liveViewUrl, createdAt, refCount }
+
+async function browserbaseApiRequest(method, path, body) {
+  const res = await fetch(`${BROWSERBASE_API_URL}${path}`, {
+    method,
+    headers: { 'Content-Type': 'application/json', 'x-bb-api-key': BROWSERBASE_API_KEY },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Browserbase ${method} ${path} failed (${res.status}): ${text}`);
+  }
+  const ct = res.headers.get('content-type');
+  return ct && ct.includes('application/json') ? res.json() : null;
+}
+
+// Write the Browserbase CDP URL into OpenClaw's config (hot-reloaded, no restart needed)
+function writeBrowserbaseProfile(connectUrl) {
+  try {
+    const configPath = '/opt/openclaw-data/config/openclaw.json';
+    const config = JSON.parse(readFileSync(configPath, 'utf8'));
+    if (!config.browser) config.browser = {};
+    if (!config.browser.profiles) config.browser.profiles = {};
+    config.browser.profiles.browserbase = { cdpUrl: connectUrl, color: '#00AA00' };
+    config.browser.defaultProfile = 'browserbase';
+    config.browser.remoteCdpTimeoutMs = 5000;
+    config.browser.remoteCdpHandshakeTimeoutMs = 10000;
+    writeFileSync(configPath, JSON.stringify(config, null, 2));
+    try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
+    console.log('[browserbase] Wrote browserbase profile to openclaw.json (hot-reload)');
+  } catch (e) {
+    console.error('[browserbase] Failed to update openclaw.json:', e.message);
+  }
+}
+
+// Revert OpenClaw to built-in Chrome when no Browserbase session is active
+function revertToBuiltinBrowser() {
+  try {
+    const configPath = '/opt/openclaw-data/config/openclaw.json';
+    const config = JSON.parse(readFileSync(configPath, 'utf8'));
+    if (config.browser?.defaultProfile === 'browserbase') {
+      config.browser.defaultProfile = 'openclaw';
+      writeFileSync(configPath, JSON.stringify(config, null, 2));
+      try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
+      console.log('[browserbase] Reverted to built-in Chrome profile');
+    }
+  } catch (e) { /* ignore */ }
+}
+
+// Create a new Browserbase session (on-demand, per browser task)
+async function acquireBrowserbaseSession() {
+  if (!BROWSERBASE_API_KEY || !BROWSERBASE_PROJECT_ID) return null;
+
+  // Reuse existing session if still active (multiple tools in same task)
+  if (browserbaseSession && (Date.now() - browserbaseSession.createdAt) < 10 * 60 * 1000) {
+    browserbaseSession.refCount++;
+    return browserbaseSession;
+  }
+
+  console.log('[browserbase] Creating on-demand browser session...');
+  const session = await browserbaseApiRequest('POST', '/sessions', {
+    projectId: BROWSERBASE_PROJECT_ID,
+    keepAlive: true,
+    timeout: 600, // 10 minute timeout — enough for a task, not wasteful
+    proxies: true,
+    browserSettings: {
+      advancedStealth: true,
+      solveCaptchas: true,
+      blockAds: true,
+      recordSession: true,
+      viewport: { width: 1920, height: 1080 },
+    },
+  });
+
+  // Get live debug URL
+  let liveViewUrl = null;
+  try {
+    const debug = await browserbaseApiRequest('GET', `/sessions/${session.id}/debug`);
+    liveViewUrl = debug?.debuggerFullscreenUrl || debug?.debuggerUrl || null;
+  } catch (e) {
+    liveViewUrl = `https://www.browserbase.com/sessions/${session.id}`;
+  }
+
+  browserbaseSession = {
+    id: session.id,
+    connectUrl: session.connectUrl,
+    liveViewUrl,
+    createdAt: Date.now(),
+    refCount: 1,
+  };
+
+  console.log(`[browserbase] Session ready: ${session.id} (10min timeout)`);
+  console.log(`[browserbase] Live view: ${liveViewUrl}`);
+
+  // Write to OpenClaw config — gateway hot-reloads, no restart needed
+  writeBrowserbaseProfile(session.connectUrl);
+
+  return browserbaseSession;
+}
+
+// Release a Browserbase session (called when browser tool completes)
+async function releaseBrowserbaseSession() {
+  if (!browserbaseSession) return;
+
+  browserbaseSession.refCount--;
+  if (browserbaseSession.refCount > 0) return; // Still in use by another tool
+
+  const sessionId = browserbaseSession.id;
+  browserbaseSession = null;
+
+  console.log(`[browserbase] Releasing session ${sessionId}`);
+  try {
+    await browserbaseApiRequest('POST', `/sessions/${sessionId}/stop`, {});
+  } catch (e) {
+    console.warn(`[browserbase] Failed to stop session: ${e.message}`);
+  }
+
+  // Revert OpenClaw to built-in Chrome
+  revertToBuiltinBrowser();
+}
+
+function getBrowserbaseLiveViewUrl() {
+  return browserbaseSession?.liveViewUrl || null;
+}
+
+function isBrowserbaseConfigured() {
+  return !!(BROWSERBASE_API_KEY && BROWSERBASE_PROJECT_ID);
+}
+
 server.listen(PORT, '0.0.0.0', () => {
- console.log(`OpenClaw Bridge v2.1 on :${PORT} | WS Relay: ${RENDER_WS_URL ? 'active' : 'disabled'} | OpenClaw: ${OPENCLAW_GATEWAY_TOKEN ? 'native' : 'poller'}`);
+ console.log(`OpenClaw Bridge v2.1 on :${PORT} | WS Relay: ${RENDER_WS_URL ? 'active' : 'disabled'} | OpenClaw: ${OPENCLAW_GATEWAY_TOKEN ? 'native' : 'poller'} | Browserbase: ${isBrowserbaseConfigured() ? 'ready' : 'not configured'}`);
 });
