@@ -881,13 +881,20 @@ async function handleIncomingTaskStream(req, res) {
      clearInterval(screenshotPollerInterval);
    }
 
+   // Extract domain from browser tool params (url, query, etc.)
+   const params = data?.params || data?.input || {};
+   const navUrl = params.url || params.uri || '';
+   let domain = '';
+   try { domain = navUrl ? new URL(navUrl.startsWith('http') ? navUrl : `https://${navUrl}`).hostname : ''; } catch {}
+
    // Priority: Browserbase live view > VNC > screenshot polling
    const bbLiveUrl = getBrowserbaseLiveViewUrl();
+   const bbSessionId = browserbaseSession?.id || null;
    if (bbLiveUrl) {
-     sendSSE('browser_session', { liveViewUrl: bbLiveUrl });
+     sendSSE('browser_session', { liveViewUrl: bbLiveUrl, sessionId: bbSessionId, domain, provider: 'browserbase' });
      console.log(`[browserbase] Sent live view URL to client: ${bbLiveUrl}`);
    } else if (getVNCLiveViewUrl() && isVNCAvailable()) {
-     sendSSE('browser_session', { liveViewUrl: getVNCLiveViewUrl() });
+     sendSSE('browser_session', { liveViewUrl: getVNCLiveViewUrl(), domain, provider: 'vnc' });
      console.log(`[VNC] Sent live view URL to client`);
    } else {
      // Fallback: poll screenshots from container every 1.5s
@@ -946,8 +953,10 @@ async function handleIncomingTaskStream(req, res) {
    screenshotPollerInterval = null;
  }
  clearInterval(keepAlive);
- // Release Browserbase session when task is done (saves money)
+ // Signal browser session end and release Browserbase session
  if (browserbaseAcquired) {
+   const bbId = browserbaseSession?.id || null;
+   try { sendSSE('browser_session_end', { sessionId: bbId }); } catch {}
    releaseBrowserbaseSession().catch(e => console.warn(`[browserbase] Release failed: ${e.message}`));
  }
  res.end();
@@ -2435,16 +2444,29 @@ async function acquireBrowserbaseSession() {
   }
 
   console.log('[browserbase] Creating on-demand browser session...');
-  const session = await browserbaseApiRequest('POST', '/sessions', {
-    projectId: BROWSERBASE_PROJECT_ID,
-    keepAlive: true,
-    timeout: 600, // 10 minute timeout — enough for a task, not wasteful
-    proxies: true,
-    browserSettings: {
-      blockAds: true,
-      viewport: { width: 1920, height: 1080 },
-    },
-  });
+  // First try with proxies (requires Hobby plan+), fall back without if 403
+  let session;
+  try {
+    session = await browserbaseApiRequest('POST', '/sessions', {
+      projectId: BROWSERBASE_PROJECT_ID,
+      keepAlive: true,
+      timeout: 600,
+      proxies: true,
+      browserSettings: { blockAds: true, viewport: { width: 1920, height: 1080 } },
+    });
+  } catch (e) {
+    if (e.message.includes('403') || e.message.includes('Forbidden') || e.message.includes('plan')) {
+      console.log('[browserbase] Proxies not available on plan, retrying without proxies...');
+      session = await browserbaseApiRequest('POST', '/sessions', {
+        projectId: BROWSERBASE_PROJECT_ID,
+        keepAlive: true,
+        timeout: 600,
+        browserSettings: { viewport: { width: 1920, height: 1080 } },
+      });
+    } else {
+      throw e;
+    }
+  }
 
   // Get live debug URL
   let liveViewUrl = null;
