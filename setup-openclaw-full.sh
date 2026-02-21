@@ -1085,11 +1085,17 @@ for _dl_attempt in 1 2 3; do
 done
 
 dlog "Installing bridge dependencies..."
+echo "[bridge] node=$(node -v 2>&1) npm=$(npm -v 2>&1) pwd=$(pwd)"
+echo "[bridge] package.json exists=$([ -f /opt/openclaw-bridge/package.json ] && echo yes || echo no)"
+echo "[bridge] index.mjs exists=$([ -f /opt/openclaw-bridge/index.mjs ] && echo yes || echo no)"
+echo "[bridge] index.mjs size=$(wc -c < /opt/openclaw-bridge/index.mjs 2>/dev/null || echo 0)"
+ls -la /opt/openclaw-bridge/
 cd /opt/openclaw-bridge && timeout 180 npm install 2>&1 || {
-  dlog "npm install failed, retrying with clean cache..."
+  dlog "npm install failed (exit $?), retrying with clean cache..."
   npm cache clean --force 2>/dev/null || true
   timeout 180 npm install 2>&1
 }
+echo "[bridge] npm install done, node_modules exists=$([ -d /opt/openclaw-bridge/node_modules ] && echo yes || echo no)"
 dlog "Bridge dependencies installed"
 
 # ── [7/9] Poller (minimal stub — bridge handles everything now) ─────
