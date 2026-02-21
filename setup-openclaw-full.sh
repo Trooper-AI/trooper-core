@@ -1062,11 +1062,13 @@ for _dl_attempt in 1 2 3; do
   sleep $((${_dl_attempt} * 3))
 done
 
+dlog "Installing bridge dependencies..."
 cd /opt/openclaw-bridge && timeout 180 npm install 2>&1 || {
   dlog "npm install failed, retrying with clean cache..."
   npm cache clean --force 2>/dev/null || true
   timeout 180 npm install 2>&1
 }
+dlog "Bridge dependencies installed"
 
 # ── [7/9] Poller (minimal stub — bridge handles everything now) ─────
 dlog "Setting up Poller..."
@@ -1093,6 +1095,7 @@ cd /opt/openclaw-poller && timeout 120 npm install --prefer-offline 2>/dev/null 
 
 
 # ── [8/9] Systemd services ──────────────────────────────────────────
+dlog "Configuring systemd services..."
 
 # Docker Compose service (auto-start containers on boot)
 cat > /etc/systemd/system/openclaw-docker.service << DSVC
@@ -1198,7 +1201,7 @@ fi
 
 # Pre-approve bridge device — generate identity BEFORE starting bridge, write it into gateway config
 # This eliminates the pairing race condition entirely
-echo "Pre-generating bridge device identity and approving in gateway config..."
+dlog "Pre-approving bridge device identity..."
 mkdir -p /opt/openclaw-data/config/devices /opt/openclaw-bridge
 
 # Generate ed25519 keypair and device identity using Node.js (same as bridge does internally)
@@ -1236,6 +1239,7 @@ console.log('Pre-approved device: ' + deviceId.substring(0, 12) + '...');
 chown -R 1000:1000 /opt/openclaw-data
 
 # Restart services so they pick up pre-approved identity
+dlog "Restarting services with pre-approved identity..."
 systemctl restart openclaw-bridge
 sleep 3
 # Gateway needs to reload paired.json — restart container
@@ -1245,27 +1249,30 @@ sleep 5
 systemctl restart openclaw-bridge
 sleep 5
 
+# ── [9/9] Verify ────────────────────────────────────────────────────
+dlog "Verifying services..."
+
 # Check bridge
 if curl -s http://127.0.0.1:${BRIDGE_PORT}/health | grep -q ok; then
- echo "Bridge: HEALTHY"
+ dlog "Bridge: HEALTHY"
 else
- echo "Bridge: NOT HEALTHY"
+ dlog "Bridge: NOT HEALTHY — check journalctl -u openclaw-bridge"
 fi
 
 # Check poller
 if systemctl is-active --quiet openclaw-poller; then
- echo "Poller: RUNNING"
+ dlog "Poller: RUNNING"
 else
- echo "Poller: NOT RUNNING"
+ dlog "Poller: NOT RUNNING"
  journalctl -u openclaw-poller --no-pager -n 10
 fi
 
 # Check Caddy (HTTPS)
 if systemctl is-active --quiet caddy; then
- echo "Caddy: RUNNING (HTTPS via ${SSLIP_DOMAIN:-unknown})"
+ dlog "Caddy: RUNNING (HTTPS via ${SSLIP_DOMAIN:-unknown})"
 else
- echo "Caddy: NOT RUNNING"
+ dlog "Caddy: NOT RUNNING"
  journalctl -u caddy --no-pager -n 10
 fi
 
-echo done
+dlog "Setup complete" "ready"
