@@ -487,6 +487,32 @@ class OpenClawGateway {
  summary: last?.summary || '',
  index: toolLog.length - 1,
  });
+ // Extract screenshot from browser tool results (MEDIA: path or base64 image content)
+ const isBrowserScreenshot = last && /browser|screenshot/i.test(last.tool || '');
+ if (isBrowserScreenshot && !data.is_error) {
+   try {
+     // Check for MEDIA: path in content
+     const contentStr = typeof data.content === 'string' ? data.content : JSON.stringify(data.content || '');
+     const mediaMatch = contentStr.match(/MEDIA:\s*([^\s"]+)/);
+     if (mediaMatch) {
+       const mediaPath = mediaMatch[1];
+       const b64 = execSync(
+         `docker exec openclaw-openclaw-gateway-1 bash -c 'cat "${mediaPath}" | base64 -w0'`,
+         { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }
+       ).toString().trim();
+       if (b64 && b64.length > 100 && onEvent) {
+         onEvent('screenshot_frame', { base64: b64, timestamp: Date.now() });
+       }
+     }
+     // Check for base64 image block in content array
+     if (Array.isArray(data.content)) {
+       const imgBlock = data.content.find(b => b.type === 'image' && b.source?.data);
+       if (imgBlock && onEvent) {
+         onEvent('screenshot_frame', { base64: imgBlock.source.data, timestamp: Date.now() });
+       }
+     }
+   } catch (e) { /* ignore screenshot extraction errors */ }
+ }
  }
  if (stream === 'thinking' && data?.text) {
  if (onEvent) onEvent('thinking', { text: data.text });
@@ -796,6 +822,7 @@ async function handleIncomingTaskStream(req, res) {
      console.log(`[VNC] Sent live view URL to client`);
    } else {
      // Fallback: poll screenshots from container every 1.5s
+     // Search both the media root and common subdirs where screenshots may be saved
      screenshotPollerInterval = setInterval(() => {
        if (res.writableEnded) {
          if (screenshotPollerInterval) clearInterval(screenshotPollerInterval);
@@ -803,7 +830,7 @@ async function handleIncomingTaskStream(req, res) {
        }
        try {
          const out = execSync(
-           `docker exec openclaw-openclaw-gateway-1 bash -c 'ls -t /home/node/.openclaw/media/browser/*.{png,jpg,jpeg,webp} 2>/dev/null | head -1 | xargs -I{} cat {} | base64 -w0'`,
+           `docker exec openclaw-openclaw-gateway-1 bash -c 'find /home/node/.openclaw/media/ /tmp/ -maxdepth 2 -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.webp" 2>/dev/null | head -20 | xargs -r ls -t 2>/dev/null | head -1 | xargs -r base64 -w0'`,
            { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }
          ).toString().trim();
          if (out && out.length > 100) {
