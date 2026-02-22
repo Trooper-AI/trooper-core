@@ -1035,6 +1035,54 @@ app.get('/health', (req, res) => {
  });
 });
 
+// Phase 4: Extended monitoring health endpoint
+app.get('/monitoring/health', (req, res) => {
+ const activeSessions = gateway.isReady ? (gateway.sessions?.size || 0) : 0;
+ const pendingCount = pendingRequests.size;
+ const oldestPending = pendingCount > 0
+   ? Math.round((Date.now() - Math.min(...[...pendingRequests.values()].map(r => r.startedAt || Date.now()))) / 1000)
+   : 0;
+ const status = gateway.isReady
+   ? (pendingCount > 20 ? 'degraded' : 'healthy')
+   : 'disconnected';
+
+ res.json({
+   status,
+   service: 'openclaw-bridge',
+   openclawConnected: gateway.isReady,
+   mode: gateway.isReady ? 'websocket' : 'poller-fallback',
+   activeSessions,
+   pendingRequests: pendingCount,
+   oldestPendingSeconds: oldestPending,
+   skills: skillRegistry.size,
+   uptimeSeconds: Math.round(process.uptime()),
+   memoryMB: Math.round(process.memoryUsage().rss / (1024 * 1024)),
+ });
+});
+
+// Phase 4: Relay SLA escalation to agent sessions
+app.post('/webhook/escalate', (req, res) => {
+ const { taskId, taskTitle, agentId, reason, policyName } = req.body;
+ if (!taskId) return res.status(400).json({ error: 'taskId required' });
+
+ console.log(`[Bridge:SLA] Escalation received for task "${taskTitle}" (agent: ${agentId || 'none'}, reason: ${reason || 'sla_breach'})`);
+
+ // If there's an active agent session, notify them
+ if (agentId && gateway.isReady) {
+   const sessionKey = `org:${process.env.ORG_ID || 'default'}:agent:${agentId}`;
+   // Queue a system notification to the agent about the escalation
+   gateway.emit('escalation', {
+     sessionKey,
+     taskId,
+     taskTitle,
+     reason: reason || 'sla_breach',
+     policyName: policyName || null,
+   });
+ }
+
+ res.json({ ok: true, relayed: gateway.isReady });
+});
+
 app.post('/webhook/crabhq', handleIncomingTask);
 app.post('/webhook/mission-control', handleIncomingTask);
 app.post('/webhook/mission-control/stream', handleIncomingTaskStream);
