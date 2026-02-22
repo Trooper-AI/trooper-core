@@ -1063,6 +1063,24 @@ docker compose exec -T openclaw-gateway bash -c '
 ' || echo "Chrome exec skipped (non-fatal)"
 docker image prune -f 2>/dev/null || true
 
+# Wait for gateway to be listening before running setup/doctor
+# startup.sh installs Chrome first, then starts the gateway — we must wait for both
+dlog "Waiting for OpenClaw gateway to start listening..."
+_gw_ready=0
+for _gw_wait in $(seq 1 45); do
+  if docker compose exec -T openclaw-gateway node -e "fetch('http://127.0.0.1:${GATEWAY_PORT}/',{signal:AbortSignal.timeout(3000)}).then(()=>process.exit(0)).catch(()=>process.exit(1))" 2>/dev/null; then
+    echo "Gateway ready after ${_gw_wait}s"
+    _gw_ready=1
+    break
+  fi
+  sleep 2
+done
+if [ "$_gw_ready" -eq 0 ]; then
+  echo "WARNING: Gateway did not respond after 90s — running setup/doctor anyway"
+  # Dump container logs for debugging
+  docker compose logs --tail 40 openclaw-gateway 2>/dev/null || true
+fi
+
 # Run openclaw setup/doctor (use node directly — openclaw CLI is not in PATH)
 docker compose exec -T -w /app openclaw-gateway node dist/index.js setup --workspace /home/node/.openclaw/workspace 2>/dev/null || true
 docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --fix 2>/dev/null || true
