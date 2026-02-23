@@ -174,7 +174,6 @@ app.use((req, res, next) => {
 class OpenClawGateway {
  constructor(url, token) {
  this.url = url.replace(/^http/, 'ws');
- this.httpUrl = url.replace(/^ws/, 'http');
  this.token = token;
  this.ws = null;
  this.connected = false;
@@ -187,33 +186,6 @@ class OpenClawGateway {
  this._authResolve = null;
  this._authReject = null;
  this._pingInterval = null;
- this._waitForGatewayThenConnect();
- }
-
- // Wait for the gateway HTTP endpoint to be reachable before the first WS connect.
- // During provisioning the gateway installs Chrome + TigerVNC, which can take 1–2 minutes.
- // Without this, the bridge spams connection errors with exponential backoff.
- async _waitForGatewayThenConnect() {
- const maxWait = 180000; // 3 minutes
- const interval = 3000;  // check every 3 seconds
- const start = Date.now();
- while (Date.now() - start < maxWait) {
-   try {
-     const ctrl = new AbortController();
-     const t = setTimeout(() => ctrl.abort(), 2500);
-     const res = await fetch(`${this.httpUrl}/health`, { signal: ctrl.signal }).catch(() => null);
-     clearTimeout(t);
-     if (res && (res.ok || res.status === 401 || res.status === 404)) {
-       // Gateway is up (any HTTP response means it's listening)
-       console.log('[OpenClaw] Gateway reachable, connecting...');
-       this.connect();
-       return;
-     }
-   } catch {}
-   await new Promise(r => setTimeout(r, interval));
- }
- // Timed out waiting — try connecting anyway
- console.log('[OpenClaw] Gateway readiness wait timed out, connecting anyway...');
  this.connect();
  }
 
@@ -861,9 +833,8 @@ async function handleIncomingTask(req, res) {
      const bbSession = await acquireBrowserbaseSession();
      if (bbSession) {
        browserbaseAcquired = true;
-       // Wait for gateway to hot-reload config after docker touch + inotify + chokidar
-       // Observed reload latency is ~2s; 3s gives safe margin.
-       await new Promise(r => setTimeout(r, 3000));
+       // Wait for gateway to hot-reload config after inotify touch
+       await new Promise(r => setTimeout(r, 1500));
      }
    } catch (e) {
      console.warn(`[browserbase] On-demand session failed: ${e.message}`);
@@ -955,9 +926,8 @@ async function handleIncomingTaskStream(req, res) {
      const bbSession = await acquireBrowserbaseSession();
      if (bbSession) {
        browserbaseAcquired = true;
-       // Wait for gateway to hot-reload config after docker touch + inotify + chokidar
-       // Observed reload latency is ~2s; 3s gives safe margin.
-       await new Promise(r => setTimeout(r, 3000));
+       // Wait for gateway to hot-reload config after inotify touch
+       await new Promise(r => setTimeout(r, 1500));
        console.log(`[browserbase] Session acquired — browser tools will use Browserbase`);
      } else {
        console.log(`[browserbase] acquireBrowserbaseSession() returned null — using built-in Chrome`);
@@ -1136,54 +1106,6 @@ app.get('/health', (req, res) => {
  pending: pendingRequests.size, skills: skillRegistry.size,
  uptime: process.uptime(),
  });
-});
-
-// Phase 4: Extended monitoring health endpoint
-app.get('/monitoring/health', (req, res) => {
- const activeSessions = gateway.isReady ? (gateway.sessions?.size || 0) : 0;
- const pendingCount = pendingRequests.size;
- const oldestPending = pendingCount > 0
-   ? Math.round((Date.now() - Math.min(...[...pendingRequests.values()].map(r => r.startedAt || Date.now()))) / 1000)
-   : 0;
- const status = gateway.isReady
-   ? (pendingCount > 20 ? 'degraded' : 'healthy')
-   : 'disconnected';
-
- res.json({
-   status,
-   service: 'openclaw-bridge',
-   openclawConnected: gateway.isReady,
-   mode: gateway.isReady ? 'websocket' : 'poller-fallback',
-   activeSessions,
-   pendingRequests: pendingCount,
-   oldestPendingSeconds: oldestPending,
-   skills: skillRegistry.size,
-   uptimeSeconds: Math.round(process.uptime()),
-   memoryMB: Math.round(process.memoryUsage().rss / (1024 * 1024)),
- });
-});
-
-// Phase 4: Relay SLA escalation to agent sessions
-app.post('/webhook/escalate', (req, res) => {
- const { taskId, taskTitle, agentId, reason, policyName } = req.body;
- if (!taskId) return res.status(400).json({ error: 'taskId required' });
-
- console.log(`[Bridge:SLA] Escalation received for task "${taskTitle}" (agent: ${agentId || 'none'}, reason: ${reason || 'sla_breach'})`);
-
- // If there's an active agent session, notify them
- if (agentId && gateway.isReady) {
-   const sessionKey = `org:${process.env.ORG_ID || 'default'}:agent:${agentId}`;
-   // Queue a system notification to the agent about the escalation
-   gateway.emit('escalation', {
-     sessionKey,
-     taskId,
-     taskTitle,
-     reason: reason || 'sla_breach',
-     policyName: policyName || null,
-   });
- }
-
- res.json({ ok: true, relayed: gateway.isReady });
 });
 
 app.post('/webhook/crabhq', handleIncomingTask);
@@ -2791,15 +2713,13 @@ const CDP_PROXY_PORT = 18880;
 let cdpProxyServer = null;
 let cdpProxyWsTarget = null; // The Browserbase WSS connect URL
 const cdpProxyBrowserId = 'browserbase-' + Math.random().toString(36).slice(2, 10);
-let _warmRemoteWs = null; // Pre-warmed Browserbase WebSocket connection
 
 function startCdpProxy(browserbaseConnectUrl) {
   cdpProxyWsTarget = browserbaseConnectUrl;
 
   if (cdpProxyServer) {
-    // Already running — just update the target URL and pre-warm
+    // Already running — just update the target URL
     console.log(`[cdp-proxy] Updated target → ${browserbaseConnectUrl.substring(0, 60)}...`);
-    preWarmBrowserbaseWs();
     return;
   }
 
@@ -2827,51 +2747,22 @@ function startCdpProxy(browserbaseConnectUrl) {
   });
 
   // Proxy WebSocket connections to Browserbase
-  // Uses pre-warmed connection when available to eliminate handshake latency.
-  // Buffers client messages until upstream is ready to avoid drops.
   const proxyWss = new WebSocketServer({ server: httpServer });
   proxyWss.on('connection', (clientWs) => {
     if (!cdpProxyWsTarget) {
       clientWs.close(1011, 'No Browserbase session active');
       return;
     }
-
-    // Try to reuse a pre-warmed Browserbase connection (saves 2-5s handshake)
-    let remoteWs;
-    if (_warmRemoteWs && _warmRemoteWs.readyState === WebSocket.OPEN) {
-      remoteWs = _warmRemoteWs;
-      _warmRemoteWs = null;
-      console.log(`[cdp-proxy] Proxying CDP connection → Browserbase (pre-warmed)`);
-    } else {
-      if (_warmRemoteWs) { try { _warmRemoteWs.terminate(); } catch {} _warmRemoteWs = null; }
-      remoteWs = new WebSocket(cdpProxyWsTarget);
-      console.log(`[cdp-proxy] Proxying CDP connection → Browserbase (new)`);
-    }
-
-    // Buffer client messages until upstream is open
-    const pendingMessages = [];
-    let upstreamReady = remoteWs.readyState === WebSocket.OPEN;
-
-    clientWs.on('message', (data) => {
-      if (upstreamReady && remoteWs.readyState === WebSocket.OPEN) {
-        remoteWs.send(data);
-      } else {
-        pendingMessages.push(data);
-      }
-    });
+    console.log(`[cdp-proxy] Proxying CDP connection → Browserbase`);
+    const remoteWs = new WebSocket(cdpProxyWsTarget);
 
     remoteWs.on('open', () => {
-      upstreamReady = true;
-      // Flush buffered messages
-      while (pendingMessages.length > 0) {
-        if (remoteWs.readyState === WebSocket.OPEN) {
-          remoteWs.send(pendingMessages.shift());
-        } else break;
-      }
-    });
-
-    remoteWs.on('message', (data) => {
-      if (clientWs.readyState === WebSocket.OPEN) clientWs.send(data);
+      clientWs.on('message', (data) => {
+        if (remoteWs.readyState === WebSocket.OPEN) remoteWs.send(data);
+      });
+      remoteWs.on('message', (data) => {
+        if (clientWs.readyState === WebSocket.OPEN) clientWs.send(data);
+      });
     });
 
     remoteWs.on('error', (err) => {
@@ -2899,24 +2790,7 @@ function startCdpProxy(browserbaseConnectUrl) {
 
 function stopCdpProxy() {
   cdpProxyWsTarget = null;
-  if (_warmRemoteWs) { try { _warmRemoteWs.terminate(); } catch {} _warmRemoteWs = null; }
   // Don't close the server — reuse for next session
-}
-
-// Pre-warm a WebSocket connection to Browserbase so the first CDP request
-// from the gateway doesn't pay the full TLS + handshake cost (2-5s savings).
-function preWarmBrowserbaseWs() {
-  if (!cdpProxyWsTarget) return;
-  if (_warmRemoteWs) { try { _warmRemoteWs.terminate(); } catch {} _warmRemoteWs = null; }
-  _warmRemoteWs = new WebSocket(cdpProxyWsTarget);
-  _warmRemoteWs.on('open', () => {
-    console.log('[cdp-proxy] Pre-warmed WebSocket connection to Browserbase');
-  });
-  _warmRemoteWs.on('error', (err) => {
-    console.warn(`[cdp-proxy] Pre-warm WS error: ${err.message}`);
-    _warmRemoteWs = null;
-  });
-  _warmRemoteWs.on('close', () => { _warmRemoteWs = null; });
 }
 
 // ── Browserbase Integration ─────────────────────────────────────────
@@ -2958,22 +2832,14 @@ function writeBrowserbaseProfile(connectUrl) {
     if (!config.browser.profiles) config.browser.profiles = {};
     config.browser.profiles.browserbase = { cdpUrl: localCdpUrl, color: '#00AA00' };
     config.browser.defaultProfile = 'browserbase';
-    // Browserbase cloud sessions have higher latency than local Chrome.
-    // The default 1500/3000ms is for local Chrome on loopback.
-    // These MUST fit within the gateway's 20s browser-tool client timeout.
-    // HTTP check (~1-3s) + WS handshake (~2-5s) + operation leaves ~8-12s headroom.
-    config.browser.remoteCdpTimeoutMs = 8000;
-    config.browser.remoteCdpHandshakeTimeoutMs = 10000;
+    config.browser.remoteCdpTimeoutMs = 5000;
+    config.browser.remoteCdpHandshakeTimeoutMs = 8000;
     writeFileSync(configPath, JSON.stringify(config, null, 2));
     try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
     // Touch file from INSIDE container to trigger chokidar inotify (host writes may not propagate)
     // Container volume: /opt/openclaw-data/config (host) → /home/node/.openclaw (container)
     try { execSync('docker exec openclaw-openclaw-gateway-1 touch /home/node/.openclaw/openclaw.json', { timeout: 3000 }); } catch {}
     console.log(`[browserbase] Config updated: defaultProfile=browserbase, cdpUrl=${localCdpUrl}`);
-
-    // Pre-warm a WebSocket connection to Browserbase so the first browser tool
-    // call from the gateway doesn't pay the full handshake cost.
-    preWarmBrowserbaseWs();
   } catch (e) {
     console.error('[browserbase] Failed to update openclaw.json:', e.message);
   }
