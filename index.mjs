@@ -831,7 +831,11 @@ async function handleIncomingTask(req, res) {
  if (isBrowserbaseConfigured()) {
    try {
      const bbSession = await acquireBrowserbaseSession();
-     if (bbSession) browserbaseAcquired = true;
+     if (bbSession) {
+       browserbaseAcquired = true;
+       // Wait for gateway to hot-reload config after inotify touch
+       await new Promise(r => setTimeout(r, 1500));
+     }
    } catch (e) {
      console.warn(`[browserbase] On-demand session failed: ${e.message}`);
      // Browserbase failed — ensure built-in Chrome proxy is healthy
@@ -922,6 +926,8 @@ async function handleIncomingTaskStream(req, res) {
      const bbSession = await acquireBrowserbaseSession();
      if (bbSession) {
        browserbaseAcquired = true;
+       // Wait for gateway to hot-reload config after inotify touch
+       await new Promise(r => setTimeout(r, 1500));
        console.log(`[browserbase] Session acquired — browser tools will use Browserbase`);
      } else {
        console.log(`[browserbase] acquireBrowserbaseSession() returned null — using built-in Chrome`);
@@ -2831,7 +2837,8 @@ function writeBrowserbaseProfile(connectUrl) {
     writeFileSync(configPath, JSON.stringify(config, null, 2));
     try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
     // Touch file from INSIDE container to trigger chokidar inotify (host writes may not propagate)
-    try { execSync('docker exec openclaw-openclaw-gateway-1 touch /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
+    // Container volume: /opt/openclaw-data/config (host) → /home/node/.openclaw (container)
+    try { execSync('docker exec openclaw-openclaw-gateway-1 touch /home/node/.openclaw/openclaw.json', { timeout: 3000 }); } catch {}
     console.log(`[browserbase] Config updated: defaultProfile=browserbase, cdpUrl=${localCdpUrl}`);
   } catch (e) {
     console.error('[browserbase] Failed to update openclaw.json:', e.message);
@@ -2849,7 +2856,8 @@ function revertToBuiltinBrowser() {
       writeFileSync(configPath, JSON.stringify(config, null, 2));
       try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
       // Touch file from INSIDE container to trigger chokidar inotify (host writes may not propagate)
-      try { execSync('docker exec openclaw-openclaw-gateway-1 touch /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
+      // Container volume: /opt/openclaw-data/config (host) → /home/node/.openclaw (container)
+      try { execSync('docker exec openclaw-openclaw-gateway-1 touch /home/node/.openclaw/openclaw.json', { timeout: 3000 }); } catch {}
       console.log('[browserbase] Reverted to built-in Chrome profile');
     }
   } catch (e) { /* ignore */ }
@@ -2928,7 +2936,11 @@ async function releaseBrowserbaseSession() {
 
   console.log(`[browserbase] Releasing session ${sessionId}`);
   try {
-    await browserbaseApiRequest('POST', `/sessions/${sessionId}/stop`, {});
+    // Browserbase API: update session status to REQUEST_RELEASE (no /stop endpoint)
+    await browserbaseApiRequest('POST', `/sessions/${sessionId}`, {
+      status: 'REQUEST_RELEASE',
+      projectId: BROWSERBASE_PROJECT_ID,
+    });
   } catch (e) {
     console.warn(`[browserbase] Failed to stop session: ${e.message}`);
   }
