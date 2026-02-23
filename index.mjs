@@ -36,6 +36,60 @@ function isVNCAvailable() {
   } catch { return false; }
 }
 
+// ── Chrome Proxy Health Check ─────────────────────────────────────────
+// When falling back from Browserbase to built-in Chrome, the chrome-wrapper
+// may route ALL traffic through a 2Captcha residential proxy. If the proxy
+// credentials are invalid/expired, Chrome fails with ERR_INVALID_AUTH_CREDENTIALS.
+// This function ensures the wrapper has proxy validation and patches it if not.
+let _proxyHealthChecked = false;
+
+async function ensureChromeProxyHealthy() {
+  if (_proxyHealthChecked) return;
+  _proxyHealthChecked = true;
+
+  const wrapperPath = '/opt/openclaw-data/chrome-wrapper.sh';
+  try {
+    const wrapper = readFileSync(wrapperPath, 'utf8');
+    if (!wrapper.includes('proxy-server')) return; // No proxy configured
+
+    // Check if wrapper already has proxy validation (our fix)
+    if (wrapper.includes('Proxy validated OK') || wrapper.includes('Proxy validation')) {
+      console.log('[browser] Chrome wrapper already has proxy validation');
+      return;
+    }
+
+    // Patch the wrapper to add proxy validation before the exec line
+    const patchedWrapper = wrapper.replace(
+      /^(exec \/usr\/bin\/google-chrome-stable \\)$/m,
+      `# ── Proxy validation (patched by bridge) ──
+# If proxy rejects credentials, ALL Chrome traffic fails with ERR_INVALID_AUTH_CREDENTIALS.
+# Better to browse without proxy than not at all.
+if [ -n "$PROXY_ARGS" ]; then
+  if curl -x "http://\${PROXY_USER}:\${PROXY_PASS}@na.proxy.2captcha.com:2334" \\
+       -sf -o /dev/null --max-time 10 "http://httpbin.org/ip" 2>/dev/null; then
+    echo "[chrome-wrapper] Proxy validated OK" >&2
+  else
+    echo "[chrome-wrapper] WARNING: Proxy auth failed — launching without proxy" >&2
+    PROXY_ARGS=""
+    EXT_DIRS="/opt/openclaw-data/2captcha-extension"
+  fi
+fi
+
+$1`
+    );
+
+    if (patchedWrapper !== wrapper) {
+      writeFileSync(wrapperPath, patchedWrapper, { mode: 0o755 });
+      console.log('[browser] Patched chrome-wrapper.sh with proxy validation (live fix)');
+    }
+  } catch (e) {
+    // Wrapper doesn't exist or isn't writable — not a fatal error
+    if (e.code !== 'ENOENT') {
+      console.warn(`[browser] Could not patch chrome-wrapper: ${e.message}`);
+    }
+  }
+}
+
 // ── Device Identity (ed25519 keypair for gateway auth) ───────────────────────
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 const IDENTITY_PATH = '/opt/openclaw-bridge/device-identity.json';
@@ -780,6 +834,8 @@ async function handleIncomingTask(req, res) {
      if (bbSession) browserbaseAcquired = true;
    } catch (e) {
      console.warn(`[browserbase] On-demand session failed: ${e.message}`);
+     // Browserbase failed — ensure built-in Chrome proxy is healthy
+     ensureChromeProxyHealthy().catch(err => console.warn(`[browser] Proxy health check failed: ${err.message}`));
    }
  }
 
@@ -872,6 +928,8 @@ async function handleIncomingTaskStream(req, res) {
      }
    } catch (e) {
      console.warn(`[browserbase] On-demand session failed, falling back to built-in Chrome: ${e.message}`);
+     // Browserbase failed — ensure built-in Chrome proxy is healthy
+     ensureChromeProxyHealthy().catch(err => console.warn(`[browser] Proxy health check failed: ${err.message}`));
    }
  }
 
