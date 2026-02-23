@@ -18,8 +18,8 @@ function isBrowserTool(tool) {
 }
 
 // ── VNC Live View ─────────────────────────────────────────────────────
-// When Xvnc + noVNC/websockify are running (2captcha mode), send the client
-// a live VNC URL instead of polling screenshots. Caddy proxies /vnc/* → websockify:6080.
+// When Xvnc + noVNC/websockify are running, send the client a live VNC URL
+// instead of polling screenshots. Caddy proxies /vnc/* → websockify:6080.
 function getVNCLiveViewUrl() {
   const orgId = process.env.ORG_ID || '';
   if (!orgId) return null;
@@ -2880,8 +2880,8 @@ function writeBrowserbaseProfile(connectUrl) {
     if (!config.browser.profiles) config.browser.profiles = {};
     config.browser.profiles.browserbase = { cdpUrl: localCdpUrl, color: '#00AA00' };
     config.browser.defaultProfile = 'browserbase';
-    config.browser.remoteCdpTimeoutMs = 8000;
-    config.browser.remoteCdpHandshakeTimeoutMs = 15000;
+    config.browser.remoteCdpTimeoutMs = 5000;
+    config.browser.remoteCdpHandshakeTimeoutMs = 8000;
     writeFileSync(configPath, JSON.stringify(config, null, 2));
     try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
     // Touch file from INSIDE container to trigger chokidar inotify (host writes may not propagate)
