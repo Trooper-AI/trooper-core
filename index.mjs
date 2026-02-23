@@ -379,8 +379,14 @@ class OpenClawGateway {
  this._pendingRequests.delete(frame.id);
  } else if (frame.type === 'event' && frame.event === 'agent') {
  const { runId, stream, data } = frame.payload || {};
+ if (stream !== 'assistant') console.log(`[OpenClaw:DBG] agent event: stream=${stream} runId=${runId?.substring(0,8)} data=${JSON.stringify(data).substring(0, 200)}`);
  const listener = this._eventListeners.get(runId);
- if (listener) listener(stream, data);
+ if (listener) {
+   listener(stream, data);
+ } else if (this._activeSessionListener) {
+   // Route unmatched events to the active session listener (captures nested runId events)
+   this._activeSessionListener(stream, data);
+ }
  }
  }
 
@@ -512,10 +518,105 @@ class OpenClawGateway {
 
  const textChunks = [];
  const toolLog = [];
- this._eventListeners.set(idempotencyKey, (stream, data) => {
+ let lifecycleDepth = 0; // track nested lifecycle start/end to detect tool execution
+ let lastTextTime = 0; // track when text stops (tool execution gap)
+
+ // Installed skills for matching
+ const installedSkills = (opts.installedSkills || []).map(s => ({
+   name: s.name, content: (s.content || '').toLowerCase()
+ }));
+
+ let toolGapTimer = null;
+ let inToolGap = false;
+ 
+ const eventHandler = (stream, data) => {
  if (stream === 'assistant' && data?.text) {
  textChunks.push(data.text);
+ lastTextTime = Date.now();
+ // If we were in a tool gap, mark it as done
+ if (inToolGap) {
+   inToolGap = false;
+   const last = toolLog[toolLog.length - 1];
+   if (last && last.status === 'called') {
+     last.status = 'ok';
+     last.durationMs = Date.now() - (last.startedAt || Date.now());
+     if (onEvent) onEvent('tool_result', { tool: last.tool, skillName: last.skillName, params: last.params, success: true, summary: `Completed in ${(last.durationMs / 1000).toFixed(1)}s`, index: toolLog.length - 1 });
+   }
+ }
+ // Reset gap timer
+ if (toolGapTimer) clearTimeout(toolGapTimer);
+ toolGapTimer = setTimeout(() => {
+   // Text stopped for 2s — likely executing a tool
+   if (!inToolGap && textChunks.length > 0) {
+     inToolGap = true;
+     let toolName = 'processing';
+     let skillName = null;
+     const recentText = textChunks.join('').slice(-300).toLowerCase();
+     const promptLower = (message || '').toLowerCase();
+     // Match against installed skills
+     for (const skill of installedSkills) {
+       const sn = skill.name.toLowerCase();
+       if (recentText.includes(sn) || promptLower.includes(sn)) { skillName = skill.name; break; }
+     }
+     if (/search|looking up|let me find|let me check/i.test(recentText)) toolName = 'web_search';
+     else if (/brows|navigat|visit|open.*page/i.test(recentText)) toolName = 'browser';
+     else if (/fetch|read.*page/i.test(recentText)) toolName = 'web_fetch';
+     else if (/run|exec|curl|command/i.test(recentText)) toolName = 'exec';
+     else if (/weather|forecast/i.test(promptLower)) { toolName = 'exec'; skillName = skillName || 'Weather'; }
+     else if (/summar/i.test(promptLower)) { toolName = 'web_fetch'; skillName = skillName || 'Summarize'; }
+     if (onEvent) onEvent('tool_start', { tool: toolName, skillName, params: {}, index: toolLog.length });
+     toolLog.push({ tool: toolName, skillName, params: {}, status: 'called', startedAt: Date.now() });
+   }
+ }, 2000);
  if (onEvent) onEvent('text', { text: data.text });
+ }
+ // Track ALL lifecycle events (including from nested runIds via _activeSessionListener)
+ if (stream === 'lifecycle' && data?.phase === 'start') {
+ lifecycleDepth++;
+ if (lifecycleDepth > 1 && onEvent) {
+   // Nested lifecycle = tool execution. Try to guess tool + skill from context
+   let toolName = 'processing';
+   let skillName = null;
+   const recentText = textChunks.join('').slice(-300).toLowerCase();
+   const promptLower = (message || '').toLowerCase();
+   
+   // Try to match against installed skills first
+   for (const skill of installedSkills) {
+     const sn = skill.name.toLowerCase();
+     if (recentText.includes(sn) || promptLower.includes(sn)) {
+       skillName = skill.name;
+       break;
+     }
+     // Check skill content keywords (first 200 chars)
+     const keywords = skill.content.slice(0, 200).match(/\b\w{4,}\b/g) || [];
+     const matches = keywords.filter(k => promptLower.includes(k) || recentText.includes(k));
+     if (matches.length >= 2) {
+       skillName = skill.name;
+       break;
+     }
+   }
+   
+   if (/search|looking up|let me find/i.test(recentText)) toolName = 'web_search';
+   else if (/brows|navigat|visit|check.*site|open.*page/i.test(recentText)) toolName = 'browser';
+   else if (/fetch|read.*page|pull.*content/i.test(recentText)) toolName = 'web_fetch';
+   else if (/run|exec|curl|command/i.test(recentText)) toolName = 'exec';
+   else if (/read.*file|check.*file/i.test(recentText)) toolName = 'read';
+   else if (/writ|edit|updat/i.test(recentText)) toolName = 'write';
+   
+   onEvent('tool_start', { tool: toolName, skillName, params: {}, index: toolLog.length });
+   toolLog.push({ tool: toolName, skillName, params: {}, status: 'called', startedAt: Date.now() });
+ }
+ }
+ if (stream === 'lifecycle' && data?.phase === 'end') {
+ if (lifecycleDepth > 1) {
+   const last = toolLog[toolLog.length - 1];
+   if (last && last.status === 'called') {
+     last.status = 'ok';
+     last.durationMs = Date.now() - (last.startedAt || Date.now());
+     if (onEvent) onEvent('tool_result', { tool: last.tool, skillName: last.skillName, params: {}, success: true, summary: `Completed in ${(last.durationMs / 1000).toFixed(1)}s`, index: toolLog.length - 1 });
+   }
+ }
+ lifecycleDepth = Math.max(0, lifecycleDepth - 1);
  }
  if (stream === 'tool_use' && data) {
  const entry = { tool: data.name || data.tool || 'unknown', params: data.input || data.params || {}, status: 'called' };
@@ -565,7 +666,12 @@ class OpenClawGateway {
  if (stream === 'thinking' && data?.text) {
  if (onEvent) onEvent('thinking', { text: data.text });
  }
- });
+ };
+
+
+ // Register the event handler and session-level fallback for nested runIds
+ this._eventListeners.set(idempotencyKey, eventHandler);
+ this._activeSessionListener = eventHandler;
 
  try {
  const result = await new Promise((resolve, reject) => {
@@ -596,6 +702,9 @@ class OpenClawGateway {
  });
 
  const resultText = result?.result?.payloads?.map(p => p.text).filter(Boolean).join('\n\n');
+ console.log(`[OpenClaw:DBG] final result keys:`, JSON.stringify(Object.keys(result?.result || {})));
+ console.log(`[OpenClaw:DBG] payloads sample:`, JSON.stringify((result?.result?.payloads || []).slice(0,5).map(p => Object.keys(p))));
+ console.log(`[OpenClaw:DBG] full result snippet:`, JSON.stringify(result?.result).substring(0, 800));
  let response = resultText || textChunks.join('') || null;
 
  // Check for new screenshots created during this agent run — convert to base64 data URIs
@@ -623,8 +732,71 @@ class OpenClawGateway {
  console.warn(`[OpenClaw] Screenshot check failed: ${e.message}`);
  }
  }
+ // If no explicit tool events were captured, extract tool usage from response text + meta
+ // The gateway doesn't stream tool_use/tool_result, so we infer from content
+ if (response && toolLog.filter(t => t.tool !== 'processing').length === 0) {
+   const toolPatterns = [
+     { re: /\bweb[_\s]?search/gi, name: 'web_search' },
+     { re: /\bweb[_\s]?fetch/gi, name: 'web_fetch' },
+     { re: /\bbrowser/gi, name: 'browser' },
+     { re: /\bexec\b|ran a command|executed|terminal|command line|curl\b/gi, name: 'exec' },
+     { re: /\bread\b.*file|file.*\bread\b/gi, name: 'read' },
+     { re: /\bwrite\b.*file|file.*\bwrite\b/gi, name: 'write' },
+     { re: /\bmemory[_\s]?search/gi, name: 'memory_search' },
+     { re: /\bsessions?[_\s]?spawn/gi, name: 'sessions_spawn' },
+     { re: /web search|searched the web|search results|looked up|DuckDuckGo|Bing results|Google results|Brave Search|top result|here'?s what (?:I|the web) (?:found|says)|what the web (?:says|shows)/gi, name: 'web_search' },
+     { re: /browsed|navigat(?:ed|ing)|screenshot|webpage|opened.*page|visited.*(?:site|page|url)|pulled up|went to.*\.\w{2,}|checked.*(?:site|page)|loaded the page/gi, name: 'browser' },
+     { re: /fetched.*(?:page|url|content)|scraped|read.*(?:the )?page|extracted.*content/gi, name: 'web_fetch' },
+   ];
+   const detected = new Set();
+   for (const { re, name } of toolPatterns) {
+     if (re.test(response)) detected.add(name);
+   }
+   // Also check the original task/prompt for tool intent
+   const durationMs = result?.result?.meta?.durationMs || 0;
+   if (detected.size === 0 && durationMs > 4000) {
+     // Check if prompt requested specific tool use
+     const taskLower = (message || '').toLowerCase();
+     if (/search the web|look up|find out about|what is \w|who is \w/.test(taskLower)) detected.add('web_search');
+     else if (/browse|go to|visit|open|navigate|check.*site|\.com|\.ai|\.io/.test(taskLower)) detected.add('web_fetch');
+     else if (/weather|forecast|temperature/.test(taskLower)) detected.add('exec');
+     else if (/summarize|summarise|summary of/.test(taskLower)) detected.add('web_fetch');
+     else detected.add('processing');
+   }
+   // Extract URLs mentioned in response
+   const urlMatches = response.match(/https?:\/\/[^\s\)"\]>]+/gi) || [];
+   const urls = [...new Set(urlMatches)].slice(0, 10);
+
+   // Extract a short summary (first ~150 chars of response, first sentence)
+   const firstSentence = response.replace(/\*\*/g, '').split(/[.!?\n]/)[0]?.trim()?.slice(0, 150) || '';
+
+   // Build toolLog from detected tools (replace any generic 'processing' entries)
+   const detectedArr = [...detected];
+   // Clear generic processing entries
+   while (toolLog.length > 0 && toolLog[0].tool === 'processing') toolLog.shift();
+   for (const name of detectedArr) {
+     const entry = { tool: name, params: {}, status: 'ok', summary: '' };
+     if (name === 'web_search') {
+       // Extract search query from the original message
+       const queryMatch = (message || '').match(/(?:search|look up|find|what is|who is)\s+(?:the web\s+)?(?:for\s+)?["']?(.{5,60})["']?/i);
+       if (queryMatch) entry.params = { query: queryMatch[1].trim() };
+       entry.summary = urls.length > 0
+         ? `Found ${urls.length} result${urls.length > 1 ? 's' : ''}: ${urls.slice(0, 3).join(', ')}`
+         : firstSentence;
+     } else if (name === 'web_fetch' || name === 'browser') {
+       const targetUrl = urls[0] || (message || '').match(/(https?:\/\/[^\s]+|[\w-]+\.(?:com|ai|io|org|dev|net)[^\s]*)/i)?.[1] || '';
+       if (targetUrl) entry.params = { url: targetUrl };
+       entry.summary = firstSentence;
+     } else {
+       entry.summary = firstSentence;
+     }
+     toolLog.push(entry);
+   }
+ }
+
  const formattedToolLog = toolLog.map(t => ({
  tool: t.tool,
+ skillName: t.skillName || undefined,
  params: t.params && Object.keys(t.params).length > 0 ? t.params : undefined,
  success: t.status !== 'failed',
  summary: t.summary || undefined,
@@ -633,7 +805,9 @@ class OpenClawGateway {
  if (response) console.log(`[OpenClaw] Agent streaming response: ${response.length} chars (${toolLog.length} tool calls)`);
  return { response, toolLog: formattedToolLog };
  } finally {
- // Clean up both the idempotencyKey and any runId alias
+ // Clean up session listener and event listeners
+ this._activeSessionListener = null;
+ if (toolGapTimer) clearTimeout(toolGapTimer);
  const listener = this._eventListeners.get(idempotencyKey);
  this._eventListeners.delete(idempotencyKey);
  if (listener) {
