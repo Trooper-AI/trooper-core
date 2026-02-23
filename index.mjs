@@ -1879,6 +1879,8 @@ app.get('/config/api-keys', (req, res) => {
  const tavilyKey = getEnvVal('TAVILY_API_KEY');
  const serpapiKey = getEnvVal('SERPAPI_API_KEY');
  const searchapiKey = getEnvVal('SEARCHAPI_API_KEY');
+ const browserbaseKey = getEnvVal('BROWSERBASE_API_KEY');
+ const browserbaseProjectId = getEnvVal('BROWSERBASE_PROJECT_ID');
  res.json({ keys: {
  anthropic: { present: !!anthropicKey, masked: mask(anthropicKey) },
  openai: { present: !!openaiKey, masked: mask(openaiKey) },
@@ -1892,6 +1894,8 @@ app.get('/config/api-keys', (req, res) => {
  tavily: { present: !!tavilyKey, masked: mask(tavilyKey) },
  serpapi: { present: !!serpapiKey, masked: mask(serpapiKey) },
  searchapi: { present: !!searchapiKey, masked: mask(searchapiKey) },
+ browserbase: { present: !!browserbaseKey, masked: mask(browserbaseKey) },
+ browserbaseProjectId: { present: !!browserbaseProjectId, masked: mask(browserbaseProjectId) },
  }});
  } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1901,8 +1905,8 @@ app.post('/config/api-keys', async (req, res) => {
  if (keysUpdateInProgress) return res.status(409).json({ error: 'Key update already in progress' });
  keysUpdateInProgress = true;
  try {
- const { anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, defaultModel } = req.body;
- const hasAnyKey = [anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, defaultModel].some(k => k !== undefined);
+ const { anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, browserbaseKey, browserbaseProjectId, defaultModel } = req.body;
+ const hasAnyKey = [anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, browserbaseKey, browserbaseProjectId, defaultModel].some(k => k !== undefined);
  if (!hasAnyKey) {
  keysUpdateInProgress = false;
  return res.status(400).json({ error: 'No keys provided' });
@@ -1935,6 +1939,8 @@ app.post('/config/api-keys', async (req, res) => {
  setEnvVar('TAVILY_API_KEY', tavilyKey);
  setEnvVar('SERPAPI_API_KEY', serpapiKey);
  setEnvVar('SEARCHAPI_API_KEY', searchapiKey);
+ setEnvVar('BROWSERBASE_API_KEY', browserbaseKey);
+ setEnvVar('BROWSERBASE_PROJECT_ID', browserbaseProjectId);
 
  writeFileSync('/opt/openclaw/.env', envContent);
 
