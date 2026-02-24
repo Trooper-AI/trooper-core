@@ -559,14 +559,46 @@ class OpenClawGateway {
        const sn = skill.name.toLowerCase();
        if (recentText.includes(sn) || promptLower.includes(sn)) { skillName = skill.name; break; }
      }
-     if (/search|looking up|let me find|let me check/i.test(recentText)) toolName = 'web_search';
-     else if (/brows|navigat|visit|open.*page/i.test(recentText)) toolName = 'browser';
-     else if (/fetch|read.*page/i.test(recentText)) toolName = 'web_fetch';
-     else if (/run|exec|curl|command/i.test(recentText)) toolName = 'exec';
+     let params = {};
+     if (/search|looking up|let me find|let me check/i.test(recentText)) {
+       toolName = 'web_search';
+       const qm = recentText.match(/(?:search(?:ing)?\s+(?:for\s+)?|looking up\s+|find\s+)[""]?([^"".\n]{5,60})/i);
+       if (qm) params.query = qm[1].trim();
+     }
+     else if (/brows|navigat|visit|open.*page/i.test(recentText)) {
+       toolName = 'browser';
+       const um = recentText.match(/(https?:\/\/[^\s"'<>]{5,80})/i);
+       if (um) params.url = um[1];
+     }
+     else if (/fetch|read.*page/i.test(recentText)) {
+       toolName = 'web_fetch';
+       const um = recentText.match(/(https?:\/\/[^\s"'<>]{5,80})/i);
+       if (um) params.url = um[1];
+     }
+     else if (/memory.*search|search.*memory|recall|remember/i.test(recentText)) {
+       toolName = 'memory_search';
+       const mm = recentText.match(/(?:memory|search|recall|remember).*?[""]([^""]{3,60})[""]/i);
+       if (mm) params.query = mm[1];
+     }
+     else if (/read.*(?:file|MEMORY|SOUL|AGENTS|\.md|\.json|\.txt)/i.test(recentText)) {
+       toolName = 'read';
+       const fm = recentText.match(/(?:read|open|check)\s+(?:the\s+)?(?:file\s+)?[""`]?([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|yml))/i);
+       if (fm) params.path = fm[1];
+     }
+     else if (/run|exec|curl|command/i.test(recentText)) {
+       toolName = 'exec';
+       const cm = recentText.match(/(?:run|exec|execute)\s+[`""]([^`""]{3,60})[`""]/i);
+       if (cm) params.command = cm[1];
+     }
+     else if (/writ|edit|updat/i.test(recentText)) {
+       toolName = 'write';
+       const fm = recentText.match(/(?:writ|edit|updat)\w*\s+(?:to\s+)?[""`]?([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|yml|jsx|tsx))/i);
+       if (fm) params.path = fm[1];
+     }
      else if (/weather|forecast/i.test(promptLower)) { toolName = 'exec'; skillName = skillName || 'Weather'; }
      else if (/summar/i.test(promptLower)) { toolName = 'web_fetch'; skillName = skillName || 'Summarize'; }
-     if (onEvent) onEvent('tool_start', { tool: toolName, skillName, params: {}, index: toolLog.length });
-     toolLog.push({ tool: toolName, skillName, params: {}, status: 'called', startedAt: Date.now() });
+     if (onEvent) onEvent('tool_start', { tool: toolName, skillName, params, index: toolLog.length });
+     toolLog.push({ tool: toolName, skillName, params, status: 'called', startedAt: Date.now() });
    }
  }, 2000);
  if (onEvent) onEvent('text', { text: data.text });
@@ -597,15 +629,21 @@ class OpenClawGateway {
      }
    }
    
-   if (/search|looking up|let me find/i.test(recentText)) toolName = 'web_search';
-   else if (/brows|navigat|visit|check.*site|open.*page/i.test(recentText)) toolName = 'browser';
-   else if (/fetch|read.*page|pull.*content/i.test(recentText)) toolName = 'web_fetch';
-   else if (/run|exec|curl|command/i.test(recentText)) toolName = 'exec';
-   else if (/read.*file|check.*file/i.test(recentText)) toolName = 'read';
-   else if (/writ|edit|updat/i.test(recentText)) toolName = 'write';
+   let heuristicParams = {};
+   if (/search|looking up|let me find/i.test(recentText)) {
+     toolName = 'web_search';
+     const qm = recentText.match(/(?:search(?:ing)?\s+(?:for\s+)?|looking up\s+|find\s+)[""]?([^"".\n]{5,60})/i);
+     if (qm) heuristicParams.query = qm[1].trim();
+   }
+   else if (/brows|navigat|visit|check.*site|open.*page/i.test(recentText)) { toolName = 'browser'; const um = recentText.match(/(https?:\/\/[^\s]{5,80})/i); if (um) heuristicParams.url = um[1]; }
+   else if (/fetch|read.*page|pull.*content/i.test(recentText)) { toolName = 'web_fetch'; const um = recentText.match(/(https?:\/\/[^\s]{5,80})/i); if (um) heuristicParams.url = um[1]; }
+   else if (/memory.*search|search.*memory/i.test(recentText)) { toolName = 'memory_search'; const mm = recentText.match(/[""]([^""]{3,60})[""]/i); if (mm) heuristicParams.query = mm[1]; }
+   else if (/read.*(?:file|\.md|\.json)/i.test(recentText)) { toolName = 'read'; const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py))/i); if (fm) heuristicParams.path = fm[1]; }
+   else if (/run|exec|curl|command/i.test(recentText)) { toolName = 'exec'; const cm = recentText.match(/[`""]([^`""]{3,60})[`""]/i); if (cm) heuristicParams.command = cm[1]; }
+   else if (/writ|edit|updat/i.test(recentText)) { toolName = 'write'; const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|jsx))/i); if (fm) heuristicParams.path = fm[1]; }
    
-   onEvent('tool_start', { tool: toolName, skillName, params: {}, index: toolLog.length });
-   toolLog.push({ tool: toolName, skillName, params: {}, status: 'called', startedAt: Date.now() });
+   onEvent('tool_start', { tool: toolName, skillName, params: heuristicParams, index: toolLog.length });
+   toolLog.push({ tool: toolName, skillName, params: heuristicParams, status: 'called', startedAt: Date.now() });
  }
  }
  if (stream === 'lifecycle' && data?.phase === 'end') {
