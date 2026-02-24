@@ -1206,14 +1206,19 @@ app.get('/files', (req, res) => {
       if (!name || name === '.' || name === '..') continue;
       const fullPath = dirPath.endsWith('/') ? dirPath + name : dirPath + '/' + name;
       let type = 'file';
+      let size = 0;
+      let modified = null;
       try {
         const statOut = execSync(
-          `docker exec openclaw-openclaw-gateway-1 stat -c "%F" "${fullPath.replace(/"/g, '')}" 2>/dev/null`,
+          `docker exec openclaw-openclaw-gateway-1 stat -c "%F|%s|%Y" "${fullPath.replace(/"/g, '')}" 2>/dev/null`,
           { encoding: 'utf8', timeout: 2000 }
         );
-        if (statOut.trim() === 'directory') type = 'dir';
+        const [fileType, fileSize, mtime] = statOut.trim().split('|');
+        if (fileType === 'directory') type = 'dir';
+        size = parseInt(fileSize) || 0;
+        if (mtime) modified = parseInt(mtime) * 1000; // convert seconds to ms
       } catch {}
-      entries.push({ name, type, path: fullPath, size: 0 });
+      entries.push({ name, type, path: fullPath, size, modified });
     }
     res.json({ files: entries });
   } catch (e) {
