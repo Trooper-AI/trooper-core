@@ -2189,6 +2189,8 @@ function normalizeModelId(model) {
  return m;
 }
 
+ const _syncWarnings = [];
+
  // Update default model in openclaw.json
  if (defaultModel) {
  try {
@@ -2201,7 +2203,7 @@ function normalizeModelId(model) {
  console.log(`[bridge] Updating default model to: ${normalizedModel}`);
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
  await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json');
- } catch (e) { console.error('Failed to update default model in openclaw.json:', e.message); }
+ } catch (e) { console.error('Failed to update default model in openclaw.json:', e.message); _syncWarnings.push(`Default model update failed: ${e.message}`); }
  }
 
  // Update auth-profiles.json for ALL providers
@@ -2232,10 +2234,10 @@ function normalizeModelId(model) {
    // Treat sk-ant-* keys as API keys; only use token type for non-key credentials
    const isApiKey = key.startsWith('sk-ant-');
    auth.profiles[profileId] = isApiKey
-    ? { type: 'api_key', provider: 'anthropic', key }
+    ? { type: 'key', provider: 'anthropic', key }
     : { type: 'token', provider: 'anthropic', token: key };
  } else {
-   auth.profiles[profileId] = { type: 'api_key', provider, key };
+   auth.profiles[profileId] = { type: 'key', provider, key };
  }
  auth.lastGood[provider] = profileId;
  }
@@ -2258,7 +2260,7 @@ function normalizeModelId(model) {
    }
  }
  } catch (e) { console.error('Failed to propagate auth to sub-agents:', e.message); }
- } catch (e) { console.error('Failed to update auth-profiles.json:', e.message); }
+ } catch (e) { console.error('Failed to update auth-profiles.json:', e.message); _syncWarnings.push(`Auth profiles update failed: ${e.message}`); }
  }
  }
 
@@ -2339,8 +2341,21 @@ function normalizeModelId(model) {
  }
 
  console.log('Restarting OpenClaw containers after key update...');
- res.json({ status: 'updating', message: 'API keys updated — restarting services' });
- await run('cd /opt/openclaw && docker compose down && docker compose up -d', { timeout: 60000 });
+ const warnings = [..._syncWarnings];
+ 
+ let restartOk = true;
+ try {
+   await run('cd /opt/openclaw && docker compose down && docker compose up -d', { timeout: 60000 });
+ } catch (restartErr) {
+   warnings.push(`Container restart failed: ${restartErr.message}`);
+   restartOk = false;
+   console.error('Container restart failed:', restartErr.message);
+ }
+ 
+ const response = { status: 'updating', message: 'API keys updated — restarting services' };
+ if (warnings.length > 0) response.warnings = warnings;
+ if (!restartOk) response.status = 'partial';
+ res.json(response);
  } catch (err) {
  console.error('API key update failed:', err.message);
  if (!res.headersSent) res.status(500).json({ error: err.message });
