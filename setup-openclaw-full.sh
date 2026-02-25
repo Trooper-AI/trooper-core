@@ -254,6 +254,9 @@ ${HTTPS_DOMAIN} {
  handle_path /vnc/* {
  reverse_proxy 127.0.0.1:6080
  }
+ handle_path /desktop-vnc/* {
+ reverse_proxy 127.0.0.1:6081
+ }
  handle {
  reverse_proxy 127.0.0.1:${GATEWAY_PORT}
  }
