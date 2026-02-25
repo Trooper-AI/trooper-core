@@ -1209,6 +1209,11 @@ cat > /usr/local/bin/crabhq-desktop-start << 'DSTART'
 # Start LXQt on display :1 + x11vnc + websockify on port 6081
 # Display :99 is reserved for AI browser live view
 
+# Required for dbus-run-session
+export XDG_RUNTIME_DIR=/tmp/runtime-root
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+
 # Start Xvfb on display :1
 if ! pgrep -f 'Xvfb :1' > /dev/null 2>&1; then
   nohup Xvfb :1 -screen 0 1280x800x24 > /var/log/xvfb.log 2>&1 &
