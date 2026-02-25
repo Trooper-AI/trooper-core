@@ -383,10 +383,10 @@ class OpenClawGateway {
  if (stream !== 'assistant') console.log(`[OpenClaw:DBG] agent event: stream=${stream} runId=${runId?.substring(0,8)} data=${JSON.stringify(data).substring(0, 200)}`);
  const listener = this._eventListeners.get(runId);
  if (listener) {
-   listener(stream, data);
+   listener(stream, data, runId);
  } else if (this._activeSessionListener) {
    // Route unmatched events to the active session listener (captures nested runId events)
-   this._activeSessionListener(stream, data);
+   this._activeSessionListener(stream, data, runId);
  }
  }
  }
@@ -529,8 +529,52 @@ class OpenClawGateway {
 
  let toolGapTimer = null;
  let inToolGap = false;
- 
- const eventHandler = (stream, data) => {
+
+ // Sub-agent tracking: distinguish main agent events from sub-agent events
+ let mainRunId = null;
+ const activeSubAgents = new Map(); // runId → { name, task, startedAt }
+ let pendingSubAgentSpawn = null; // set when sessions_spawn tool_use is seen, consumed when new runId appears
+
+ const eventHandler = (stream, data, runId) => {
+ // Track main runId from first event
+ if (!mainRunId && runId) mainRunId = runId;
+ const isSubAgent = mainRunId && runId && runId !== mainRunId;
+
+ // Associate new runIds with pending sub-agent spawns
+ if (isSubAgent && !activeSubAgents.has(runId)) {
+   const info = pendingSubAgentSpawn || { name: 'Sub-agent', task: '' };
+   activeSubAgents.set(runId, { ...info, startedAt: Date.now(), toolCount: 0 });
+   pendingSubAgentSpawn = null;
+   if (onEvent) onEvent('subagent_start', { subAgentRunId: runId, name: info.name, task: info.task });
+ }
+
+ // Forward sub-agent events with subAgent tagging
+ if (isSubAgent) {
+   const subInfo = activeSubAgents.get(runId) || { name: 'Sub-agent' };
+   if (stream === 'tool_use' && data) {
+     subInfo.toolCount = (subInfo.toolCount || 0) + 1;
+     if (onEvent) onEvent('subagent_tool_start', {
+       tool: data.name || data.tool || 'unknown',
+       params: data.input || data.params || {},
+       subAgentRunId: runId,
+       subAgentName: subInfo.name,
+     });
+   } else if (stream === 'tool_result' && data) {
+     const summary = typeof data.content === 'string' ? data.content.substring(0, 500) : (data.output || '').substring(0, 500);
+     if (onEvent) onEvent('subagent_tool_result', {
+       tool: data.name || 'unknown',
+       success: !data.is_error,
+       summary,
+       subAgentRunId: runId,
+       subAgentName: subInfo.name,
+     });
+   } else if (stream === 'assistant' && data?.text) {
+     if (onEvent) onEvent('subagent_text', { text: data.text, subAgentRunId: runId, subAgentName: subInfo.name });
+   } else if (stream === 'thinking' && data?.text) {
+     if (onEvent) onEvent('subagent_thinking', { text: data.text, subAgentRunId: runId, subAgentName: subInfo.name });
+   }
+   return; // Don't process sub-agent events as main agent events
+ }
  if (stream === 'assistant' && data?.text) {
  textChunks.push(data.text);
  lastTextTime = Date.now();
@@ -661,12 +705,30 @@ class OpenClawGateway {
  const entry = { tool: data.name || data.tool || 'unknown', params: data.input || data.params || {}, status: 'called' };
  toolLog.push(entry);
  if (onEvent) onEvent('tool_start', { tool: entry.tool, params: entry.params, index: toolLog.length - 1 });
+ // Track sub-agent spawning so we can associate the next new runId with this spawn
+ const toolLower = (entry.tool || '').toLowerCase();
+ if (toolLower === 'sessions_spawn' || toolLower === 'task' || toolLower === 'spawn' || toolLower.includes('subagent')) {
+   const params = entry.params || {};
+   pendingSubAgentSpawn = {
+     name: params.name || params.agentName || params.description?.substring(0, 40) || 'Sub-agent',
+     task: params.task || params.prompt || params.message || params.description || '',
+   };
+ }
  }
  if (stream === 'tool_result' && data) {
  const last = toolLog[toolLog.length - 1];
  if (last && last.status === 'called') {
  last.status = data.is_error ? 'failed' : 'ok';
- last.summary = typeof data.content === 'string' ? data.content.substring(0, 300) : (data.output || '').substring(0, 300);
+ // Larger summary limit for exec (show command output) and sessions_spawn (show sub-agent result)
+ const summaryLimit = (last.tool === 'exec' || last.tool === 'sessions_spawn') ? 1000 : 300;
+ last.summary = typeof data.content === 'string' ? data.content.substring(0, summaryLimit) : (data.output || '').substring(0, summaryLimit);
+ }
+ // When sessions_spawn completes, emit subagent_done for all active sub-agents
+ if (last?.tool === 'sessions_spawn' || last?.tool === 'Task') {
+   for (const [subRunId, subInfo] of activeSubAgents) {
+     if (onEvent) onEvent('subagent_done', { subAgentRunId: subRunId, subAgentName: subInfo.name, summary: last?.summary || '' });
+   }
+   activeSubAgents.clear();
  }
  if (onEvent) onEvent('tool_result', {
  tool: last?.tool || 'unknown',
