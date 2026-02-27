@@ -530,33 +530,39 @@ class OpenClawGateway {
  let toolGapTimer = null;
  let inToolGap = false;
 
- // Sub-agent tracking: distinguish main agent events from sub-agent events
+ // Sub-agent tracking: tree-based for nested sub-agents
  let mainRunId = null;
- const activeSubAgents = new Map(); // runId → { name, task, startedAt }
+ const activeSubAgents = new Map(); // runId → { name, task, startedAt, parentRunId, depth }
  let pendingSubAgentSpawn = null; // set when sessions_spawn tool_use is seen, consumed when new runId appears
+ let pendingSpawnRunId = null; // which runId initiated the sessions_spawn
 
  const eventHandler = (stream, data, runId) => {
  // Track main runId from first event
  if (!mainRunId && runId) mainRunId = runId;
  const isSubAgent = mainRunId && runId && runId !== mainRunId;
 
- // Associate new runIds with pending sub-agent spawns
+ // Associate new runIds with pending sub-agent spawns (tree-based)
  if (isSubAgent && !activeSubAgents.has(runId)) {
+   const parentRunId = pendingSpawnRunId || mainRunId;
+   const parentDepth = parentRunId === mainRunId ? 0 : (activeSubAgents.get(parentRunId)?.depth || 0);
    const info = pendingSubAgentSpawn || { name: 'Sub-agent', task: '' };
-   activeSubAgents.set(runId, { ...info, startedAt: Date.now(), toolCount: 0 });
+   activeSubAgents.set(runId, { ...info, startedAt: Date.now(), toolCount: 0, parentRunId, depth: parentDepth + 1 });
    pendingSubAgentSpawn = null;
-   if (onEvent) onEvent('subagent_start', { subAgentRunId: runId, name: info.name, task: info.task });
+   pendingSpawnRunId = null;
+   if (onEvent) onEvent('subagent_start', { subAgentRunId: runId, parentRunId, depth: parentDepth + 1, name: info.name, task: info.task });
  }
 
- // Forward sub-agent events with subAgent tagging
+ // Forward sub-agent events with subAgent tagging (includes parent/depth for tree rendering)
  if (isSubAgent) {
-   const subInfo = activeSubAgents.get(runId) || { name: 'Sub-agent' };
+   const subInfo = activeSubAgents.get(runId) || { name: 'Sub-agent', parentRunId: mainRunId, depth: 1 };
    if (stream === 'tool_use' && data) {
      subInfo.toolCount = (subInfo.toolCount || 0) + 1;
      if (onEvent) onEvent('subagent_tool_start', {
        tool: data.name || data.tool || 'unknown',
        params: data.input || data.params || {},
        subAgentRunId: runId,
+       parentRunId: subInfo.parentRunId,
+       depth: subInfo.depth,
        subAgentName: subInfo.name,
      });
    } else if (stream === 'tool_result' && data) {
@@ -566,12 +572,14 @@ class OpenClawGateway {
        success: !data.is_error,
        summary,
        subAgentRunId: runId,
+       parentRunId: subInfo.parentRunId,
+       depth: subInfo.depth,
        subAgentName: subInfo.name,
      });
    } else if (stream === 'assistant' && data?.text) {
-     if (onEvent) onEvent('subagent_text', { text: data.text, subAgentRunId: runId, subAgentName: subInfo.name });
+     if (onEvent) onEvent('subagent_text', { text: data.text, subAgentRunId: runId, parentRunId: subInfo.parentRunId, depth: subInfo.depth, subAgentName: subInfo.name });
    } else if (stream === 'thinking' && data?.text) {
-     if (onEvent) onEvent('subagent_thinking', { text: data.text, subAgentRunId: runId, subAgentName: subInfo.name });
+     if (onEvent) onEvent('subagent_thinking', { text: data.text, subAgentRunId: runId, parentRunId: subInfo.parentRunId, depth: subInfo.depth, subAgentName: subInfo.name });
    }
    return; // Don't process sub-agent events as main agent events
  }
@@ -713,6 +721,7 @@ class OpenClawGateway {
      name: params.name || params.agentName || params.description?.substring(0, 40) || 'Sub-agent',
      task: params.task || params.prompt || params.message || params.description || '',
    };
+   pendingSpawnRunId = runId; // Track which runId initiated this spawn for parent→child tree
  }
  }
  if (stream === 'tool_result' && data) {
@@ -723,10 +732,10 @@ class OpenClawGateway {
  const summaryLimit = (last.tool === 'exec' || last.tool === 'sessions_spawn') ? 1000 : 300;
  last.summary = typeof data.content === 'string' ? data.content.substring(0, summaryLimit) : (data.output || '').substring(0, summaryLimit);
  }
- // When sessions_spawn completes, emit subagent_done for all active sub-agents
+ // When sessions_spawn completes, emit subagent_done with parent/depth for tree rendering
  if (last?.tool === 'sessions_spawn' || last?.tool === 'Task') {
    for (const [subRunId, subInfo] of activeSubAgents) {
-     if (onEvent) onEvent('subagent_done', { subAgentRunId: subRunId, subAgentName: subInfo.name, summary: last?.summary || '' });
+     if (onEvent) onEvent('subagent_done', { subAgentRunId: subRunId, parentRunId: subInfo.parentRunId, depth: subInfo.depth, subAgentName: subInfo.name, summary: last?.summary || '' });
    }
    activeSubAgents.clear();
  }
@@ -1014,6 +1023,60 @@ function loadAgentRegistry() {
 
 // Load registry on startup
 loadAgentRegistry();
+
+// ── Startup migration: ensure sandbox agents can use host browser ──────────
+try {
+ const configPath = '/opt/openclaw-data/config/openclaw.json';
+ const config = JSON.parse(readFileSync(configPath, 'utf8'));
+ let changed = false;
+ const sandbox = config?.agents?.defaults?.sandbox;
+ if (sandbox && (!sandbox.browser || !sandbox.browser.allowHostControl)) {
+   if (!sandbox.browser) sandbox.browser = {};
+   sandbox.browser.allowHostControl = true;
+   changed = true;
+   console.log('[bridge] Migrated sandbox browser config: allowHostControl=true');
+ }
+ // Startup migration: add security config if missing
+ if (!config.security) {
+   config.security = { trust_model: 'restricted', audit: { enabled: true, logBlocked: true } };
+   changed = true;
+   console.log('[bridge] Migrated: added security config');
+ }
+ // Startup migration: add maxSpawnDepth if missing
+ if (config.agents?.defaults?.subagents && !config.agents.defaults.subagents.maxSpawnDepth) {
+   config.agents.defaults.subagents.maxSpawnDepth = 3;
+   changed = true;
+   console.log('[bridge] Migrated: added subagents.maxSpawnDepth=3');
+ }
+ // Startup migration: add logging.maxFileBytes if missing
+ if (config.logging && !config.logging.maxFileBytes) {
+   config.logging.maxFileBytes = 100000000;
+   changed = true;
+   console.log('[bridge] Migrated: added logging.maxFileBytes=100MB');
+ }
+ // Startup migration: add heartbeat.directPolicy if missing
+ if (config.agents?.defaults?.heartbeat && !config.agents.defaults.heartbeat.directPolicy) {
+   config.agents.defaults.heartbeat.directPolicy = 'allow';
+   changed = true;
+   console.log('[bridge] Migrated: added heartbeat.directPolicy=allow');
+ }
+ // Startup migration: add autoReply stop keywords if missing
+ if (config.agents?.defaults && !config.agents.defaults.autoReply) {
+   config.agents.defaults.autoReply = { stopKeywords: ['stop', 'cancel', 'wait', 'hold on', 'pause', 'enough'] };
+   changed = true;
+   console.log('[bridge] Migrated: added autoReply.stopKeywords');
+ }
+ // Startup migration: add bootstrap caching if missing
+ if (config.agents?.defaults && !config.agents.defaults.bootstrap) {
+   config.agents.defaults.bootstrap = { cacheRetention: 'session' };
+   changed = true;
+   console.log('[bridge] Migrated: added bootstrap.cacheRetention=session');
+ }
+ if (changed) {
+   writeFileSync(configPath, JSON.stringify(config, null, 2));
+   try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
+ }
+} catch (e) { /* config not available yet */ }
 
 // Helper: slugify agent name to valid OpenClaw agentId
 function agentSlug(name) {
@@ -1616,13 +1679,18 @@ app.post('/agents', (req, res) => {
  execSync(`chown -R 1000:1000 ${agentDir}`, { timeout: 5000 });
 
  // Add agent to openclaw.json agents.list
+ const { fallbacks, params } = req.body;
  updateOpenClawConfig((config) => {
  if (!config.agents.list) config.agents.list = [];
  // Remove existing entry if any
  config.agents.list = config.agents.list.filter(a => a.id !== agentId);
  config.agents.list.push({
  id: agentId,
- ...(model ? { model: { primary: normalizeModelId(model) } } : {}),
+ ...(model ? { model: {
+ primary: normalizeModelId(model),
+ ...(fallbacks?.length ? { fallbacks: fallbacks.map(normalizeModelId) } : {}),
+ } } : {}),
+ ...(params ? { params } : {}),
  });
  });
 
@@ -1682,10 +1750,21 @@ app.put('/agents/:name', (req, res) => {
  saveAgentRegistry();
  }
 
- if (model) {
+ const { fallbacks: updateFallbacks, params: updateParams } = req.body;
+ if (model || updateFallbacks || updateParams) {
  updateOpenClawConfig((config) => {
  const entry = (config.agents.list || []).find(a => a.id === agent.agentId);
- if (entry) entry.model = { primary: normalizeModelId(model) };
+ if (entry) {
+ if (model) {
+   entry.model = {
+    primary: normalizeModelId(model),
+    ...(updateFallbacks?.length ? { fallbacks: updateFallbacks.map(normalizeModelId) } : (entry.model?.fallbacks ? { fallbacks: entry.model.fallbacks } : {})),
+   };
+ } else if (updateFallbacks?.length && entry.model) {
+   entry.model.fallbacks = updateFallbacks.map(normalizeModelId);
+ }
+ if (updateParams) entry.params = updateParams;
+ }
  });
  }
 
@@ -2556,11 +2635,14 @@ function normalizeModelId(model) {
 
  for (const { key, profileId, provider } of keysToUpdate) {
  if (provider === 'anthropic') {
-   // Treat sk-ant-* keys as API keys; only use token type for non-key credentials
-   const isApiKey = key.startsWith('sk-ant-');
+   // Distinguish API keys from OAuth tokens: sk-ant-oat-* are OAuth, sk-ant-api* are API keys
+   const isOAuthToken = key.startsWith('sk-ant-oat');
+   const isApiKey = key.startsWith('sk-ant-') && !isOAuthToken;
    auth.profiles[profileId] = isApiKey
     ? { type: 'key', provider: 'anthropic', key }
-    : { type: 'token', provider: 'anthropic', token: key };
+    : isOAuthToken
+    ? { type: 'token', provider: 'anthropic', token: key }
+    : { type: 'key', provider: 'anthropic', key };
  } else {
    auth.profiles[profileId] = { type: 'key', provider, key };
  }
