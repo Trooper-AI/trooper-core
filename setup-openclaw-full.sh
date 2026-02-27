@@ -504,23 +504,31 @@ cat > /opt/openclaw-data/config/openclaw.json << OCCONFIG
  "thinkingDefault": "low",
  "heartbeat": {
  "every": "30m",
- "target": "none"
+ "target": "none",
+ "directPolicy": "allow"
+ },
+ "params": {
+ "context1m": true
  },
  "sandbox": {
  "mode": "all",
  "scope": "agent",
  "workspaceAccess": "rw",
  "docker": {
- "setupCommand": "apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1"
+ "setupCommand": "apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1",
+ "namespaceJoin": false,
+ "user": "1000:1000"
  },
  "browser": {
- "allowHostControl": true
+ "allowHostControl": true,
+ "binds": ["/opt/openclaw-data/workspace:/workspace:rw"]
  }
  },
  "subagents": {
  "model": "${RESOLVED_MODEL}",
  "thinking": "low",
  "maxConcurrent": 8,
+ "maxSpawnDepth": 3,
  "archiveAfterMinutes": 30
  },
  "compaction": {
@@ -531,6 +539,12 @@ cat > /opt/openclaw-data/config/openclaw.json << OCCONFIG
  "systemPrompt": "Session nearing compaction. Store durable memories now.",
  "prompt": "Write any lasting notes to memory/ as YYYY-MM-DD.md; reply with NO_REPLY if nothing to store."
  }
+ },
+ "autoReply": {
+ "stopKeywords": ["stop", "cancel", "wait", "hold on", "pause", "enough", "halt"]
+ },
+ "bootstrap": {
+ "cacheRetention": "session"
  },
  ${MEMORY_SEARCH_JSON}
  }
@@ -596,7 +610,19 @@ ${MODELS_PROVIDERS}
  "allowedAgentIds": ["*"]
  },
  "logging": {
- "redactSensitive": "tools"
+ "redactSensitive": "tools",
+ "maxFileBytes": 100000000
+ },
+ "security": {
+ "trust_model": "restricted",
+ "audit": {
+ "enabled": true,
+ "logBlocked": true
+ },
+ "ssrf": {
+ "denyPolicy": "private",
+ "allowedUrls": []
+ }
  },
  "session": {
  "dmScope": "per-channel-peer"
@@ -604,8 +630,25 @@ ${MODELS_PROVIDERS}
  "discovery": {
  "mdns": { "mode": "off" }
  },
+ "channels": {
+ "telegram": {
+ "enabled": true,
+ "streaming": "partial",
+ "nativeCommands": true,
+ "groupPolicy": "allowlist"
+ }
+ },
  "cron": {
- "enabled": true
+ "enabled": true,
+ "maxConcurrentRuns": 3,
+ "stagger": { "enabled": true, "maxDelaySeconds": 120 },
+ "delivery": {
+ "webhook": {
+ "enabled": true,
+ "url": "http://127.0.0.1:${BRIDGE_PORT}/webhook/cron",
+ "token": "oc-hook-HOOK_TOKEN_PLACEHOLDER"
+ }
+ }
  },
  "gateway": {
  "mode": "local",
@@ -614,9 +657,9 @@ ${MODELS_PROVIDERS}
  "trustedProxies": ["127.0.0.1", "172.16.0.0/12"],
  "controlUi": {
  "enabled": true,
- "allowInsecureAuth": true,
- "dangerouslyAllowHostHeaderOriginFallback": true,
- "dangerouslyDisableDeviceAuth": true
+ "allowInsecureAuth": false,
+ "dangerouslyAllowHostHeaderOriginFallback": false,
+ "dangerouslyDisableDeviceAuth": false
  },
  "http": {
  "endpoints": {
