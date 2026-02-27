@@ -512,6 +512,9 @@ cat > /opt/openclaw-data/config/openclaw.json << OCCONFIG
  "workspaceAccess": "rw",
  "docker": {
  "setupCommand": "apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1"
+ },
+ "browser": {
+ "allowHostControl": true
  }
  },
  "subagents": {

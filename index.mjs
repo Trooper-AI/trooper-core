@@ -1015,6 +1015,20 @@ function loadAgentRegistry() {
 // Load registry on startup
 loadAgentRegistry();
 
+// ── Startup migration: ensure sandbox agents can use host browser ──────────
+try {
+ const configPath = '/opt/openclaw-data/config/openclaw.json';
+ const config = JSON.parse(readFileSync(configPath, 'utf8'));
+ const sandbox = config?.agents?.defaults?.sandbox;
+ if (sandbox && (!sandbox.browser || !sandbox.browser.allowHostControl)) {
+   if (!sandbox.browser) sandbox.browser = {};
+   sandbox.browser.allowHostControl = true;
+   writeFileSync(configPath, JSON.stringify(config, null, 2));
+   try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
+   console.log('[bridge] Migrated sandbox browser config: allowHostControl=true');
+ }
+} catch (e) { /* config not available yet */ }
+
 // Helper: slugify agent name to valid OpenClaw agentId
 function agentSlug(name) {
  return (name || 'default').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
