@@ -569,7 +569,21 @@ class OpenClawGateway {
  let pendingSubAgentSpawn = null; // set when sessions_spawn tool_use is seen, consumed when new runId appears
  let pendingSpawnRunId = null; // which runId initiated the sessions_spawn
 
+ // Debug logging: capture recent raw events for troubleshooting
+ const _debugEvents = [];
+ const _debugLog = (type, payload) => {
+   _debugEvents.push({ t: Date.now(), type, ...payload });
+   if (_debugEvents.length > 100) _debugEvents.shift();
+ };
+
  const eventHandler = (stream, data, runId) => {
+ // Debug: log ALL raw gateway events to global buffer + console
+ if (stream === 'tool_use' || stream === 'tool_result' || stream === 'lifecycle') {
+   const rawStr = JSON.stringify(data || {}).substring(0, 300);
+   logDebugEvent('raw_gateway', { stream, runId, isSubAgent: !!(mainRunId && runId && runId !== mainRunId), data: rawStr });
+   console.log(`[TOOL:DBG] stream=${stream} runId=${runId} data=${rawStr.substring(0, 200)}`);
+ }
+
  // Track main runId from first event
  if (!mainRunId && runId) mainRunId = runId;
  const isSubAgent = mainRunId && runId && runId !== mainRunId;
@@ -590,9 +604,13 @@ class OpenClawGateway {
    const subInfo = activeSubAgents.get(runId) || { name: 'Sub-agent', parentRunId: mainRunId, depth: 1 };
    if (stream === 'tool_use' && data) {
      subInfo.toolCount = (subInfo.toolCount || 0) + 1;
+     const subToolName = data.name || data.tool || 'unknown';
+     const subToolParams = data.input || data.params || {};
+     logDebugEvent('subagent_tool_use', { subAgent: subInfo.name, tool: subToolName, params: subToolParams, rawKeys: Object.keys(data) });
+     console.log(`[SUBAGENT:tool_use] ${subInfo.name} → ${subToolName} params=${JSON.stringify(subToolParams).substring(0, 200)}`);
      if (onEvent) onEvent('subagent_tool_start', {
-       tool: data.name || data.tool || 'unknown',
-       params: data.input || data.params || {},
+       tool: subToolName,
+       params: subToolParams,
        subAgentRunId: runId,
        parentRunId: subInfo.parentRunId,
        depth: subInfo.depth,
@@ -645,43 +663,59 @@ class OpenClawGateway {
        if (recentText.includes(sn) || promptLower.includes(sn)) { skillName = skill.name; break; }
      }
      let params = {};
-     if (/search|looking up|let me find|let me check/i.test(recentText)) {
+     // Extract URLs and domains from recent text
+     const _um = recentText.match(/(https?:\/\/[^\s"'<>,]{5,120})/i);
+     const _eu = _um ? _um[1] : '';
+     const _dm = recentText.match(/\b([a-z0-9][-a-z0-9]*\.(?:com|io|ai|org|net|co|app|dev|xyz|me|info|gg|so|sh|cc)(?:\/[^\s"'<>,]{0,60})?)\b/i);
+     const _ed = _dm ? _dm[1] : '';
+     const _qm = recentText.match(/[""]([^""]{3,80})[""]/i) || recentText.match(/[`]([^`]{3,80})[`]/i);
+     const _eq = _qm ? _qm[1].trim() : '';
+
+     if (/search(?:ing)?|looking up|let me (?:find|look|check)|querying/i.test(recentText)) {
        toolName = 'web_search';
-       const qm = recentText.match(/(?:search(?:ing)?\s+(?:for\s+)?|looking up\s+|find\s+)[""]?([^"".\n]{5,60})/i);
-       if (qm) params.query = qm[1].trim();
+       const qm = recentText.match(/(?:search(?:ing)?\s+(?:for\s+|the web for\s+)?|looking (?:up|for)\s+|find(?:ing)?\s+|querying?\s+)[""]?([^"".\n]{5,80})/i);
+       if (qm) params.query = qm[1].trim().replace(/[.!?]$/, '');
+       else if (_eq) params.query = _eq;
+       else { const ctx = recentText.match(/(?:search|look(?:ing)?\s+(?:up|for|into))\s+(.{5,60}?)(?:\.|$|\n|to\s)/i); if (ctx) params.query = ctx[1].trim(); }
      }
-     else if (/brows|navigat|visit|open.*page/i.test(recentText)) {
+     else if (/brows|navigat|visit|check.*(?:site|page|website)|open.*(?:page|site|url)|go(?:ing)?\s+to\s/i.test(recentText)) {
        toolName = 'browser';
-       const um = recentText.match(/(https?:\/\/[^\s"'<>]{5,80})/i);
-       if (um) params.url = um[1];
+       if (_eu) params.url = _eu;
+       else if (_ed) params.url = 'https://' + _ed;
      }
-     else if (/fetch|read.*page/i.test(recentText)) {
+     else if (/fetch|read.*page|pull.*content|scrape|extract.*content/i.test(recentText)) {
        toolName = 'web_fetch';
-       const um = recentText.match(/(https?:\/\/[^\s"'<>]{5,80})/i);
-       if (um) params.url = um[1];
+       if (_eu) params.url = _eu;
+       else if (_ed) params.url = 'https://' + _ed;
      }
      else if (/memory.*search|search.*memory|recall|remember/i.test(recentText)) {
        toolName = 'memory_search';
-       const mm = recentText.match(/(?:memory|search|recall|remember).*?[""]([^""]{3,60})[""]/i);
-       if (mm) params.query = mm[1];
+       if (_eq) params.query = _eq;
      }
-     else if (/read.*(?:file|MEMORY|SOUL|AGENTS|\.md|\.json|\.txt)/i.test(recentText)) {
+     else if (/read(?:ing)?.*(?:file|MEMORY|SOUL|AGENTS|\.md|\.json|\.txt)/i.test(recentText)) {
        toolName = 'read';
-       const fm = recentText.match(/(?:read|open|check)\s+(?:the\s+)?(?:file\s+)?[""`]?([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|yml))/i);
+       const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|yml|yaml|toml|ts|jsx|tsx))/i);
        if (fm) params.path = fm[1];
      }
-     else if (/run|exec|curl|command/i.test(recentText)) {
+     else if (/run(?:ning)?|exec|curl|command|shell|terminal|bash/i.test(recentText)) {
        toolName = 'exec';
-       const cm = recentText.match(/(?:run|exec|execute)\s+[`""]([^`""]{3,60})[`""]/i);
+       const cm = recentText.match(/[`""]([^`""]{3,80})[`""]/i);
        if (cm) params.command = cm[1];
      }
-     else if (/writ|edit|updat/i.test(recentText)) {
+     else if (/writ(?:ing)?|edit(?:ing)?|updat(?:ing)?|creat(?:ing)?/i.test(recentText)) {
        toolName = 'write';
-       const fm = recentText.match(/(?:writ|edit|updat)\w*\s+(?:to\s+)?[""`]?([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|yml|jsx|tsx))/i);
+       const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|jsx|tsx|ts|yml|yaml|toml|css|html))/i);
        if (fm) params.path = fm[1];
      }
      else if (/weather|forecast/i.test(promptLower)) { toolName = 'exec'; skillName = skillName || 'Weather'; }
      else if (/summar/i.test(promptLower)) { toolName = 'web_fetch'; skillName = skillName || 'Summarize'; }
+     // Last resort: URL/domain found but no tool match
+     else if (_eu || _ed) {
+       toolName = 'web_fetch';
+       params.url = _eu || ('https://' + _ed);
+     }
+     logDebugEvent('heuristic_gap', { tool: toolName, params, textSnippet: recentText.substring(recentText.length - 100) });
+     console.log(`[HEURISTIC:gap] tool=${toolName} params=${JSON.stringify(params)} text="${recentText.substring(recentText.length - 80)}"`);
      if (onEvent) onEvent('tool_start', { tool: toolName, skillName, params, index: toolLog.length });
      toolLog.push({ tool: toolName, skillName, params, status: 'called', startedAt: Date.now() });
    }
@@ -715,18 +749,67 @@ class OpenClawGateway {
    }
    
    let heuristicParams = {};
-   if (/search|looking up|let me find/i.test(recentText)) {
+   // Extract any URLs from recent text (useful for all web tools)
+   const _urlMatch = recentText.match(/(https?:\/\/[^\s"'<>,]{5,120})/i);
+   const _extractedUrl = _urlMatch ? _urlMatch[1] : '';
+   // Extract domain-like strings (e.g., linear.app, trustradius.com)
+   const _domainMatch = recentText.match(/\b([a-z0-9][-a-z0-9]*\.(?:com|io|ai|org|net|co|app|dev|xyz|me|info|gg|so|sh|cc)(?:\/[^\s"'<>,]{0,60})?)\b/i);
+   const _extractedDomain = _domainMatch ? _domainMatch[1] : '';
+   // Extract quoted strings as potential queries/labels
+   const _quotedMatch = recentText.match(/[""]([^""]{3,80})[""]/i) || recentText.match(/[`]([^`]{3,80})[`]/i);
+   const _extractedQuote = _quotedMatch ? _quotedMatch[1].trim() : '';
+
+   if (/search(?:ing)?|looking up|let me (?:find|look|check)|querying/i.test(recentText)) {
      toolName = 'web_search';
-     const qm = recentText.match(/(?:search(?:ing)?\s+(?:for\s+)?|looking up\s+|find\s+)[""]?([^"".\n]{5,60})/i);
-     if (qm) heuristicParams.query = qm[1].trim();
+     // Try multiple patterns for search queries
+     const qm = recentText.match(/(?:search(?:ing)?\s+(?:for\s+|the web for\s+)?|looking (?:up|for)\s+|find(?:ing)?\s+|querying?\s+)[""]?([^"".\n]{5,80})/i);
+     if (qm) heuristicParams.query = qm[1].trim().replace(/[.!?]$/, '');
+     else if (_extractedQuote) heuristicParams.query = _extractedQuote;
+     else {
+       // Try to extract query from context: "search" + nearby meaningful text
+       const ctx = recentText.match(/(?:search|look(?:ing)?\s+(?:up|for|into))\s+(.{5,60}?)(?:\.|$|\n|to\s)/i);
+       if (ctx) heuristicParams.query = ctx[1].trim().replace(/[.!?]$/, '');
+     }
    }
-   else if (/brows|navigat|visit|check.*site|open.*page/i.test(recentText)) { toolName = 'browser'; const um = recentText.match(/(https?:\/\/[^\s]{5,80})/i); if (um) heuristicParams.url = um[1]; }
-   else if (/fetch|read.*page|pull.*content/i.test(recentText)) { toolName = 'web_fetch'; const um = recentText.match(/(https?:\/\/[^\s]{5,80})/i); if (um) heuristicParams.url = um[1]; }
-   else if (/memory.*search|search.*memory/i.test(recentText)) { toolName = 'memory_search'; const mm = recentText.match(/[""]([^""]{3,60})[""]/i); if (mm) heuristicParams.query = mm[1]; }
-   else if (/read.*(?:file|\.md|\.json)/i.test(recentText)) { toolName = 'read'; const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py))/i); if (fm) heuristicParams.path = fm[1]; }
-   else if (/run|exec|curl|command/i.test(recentText)) { toolName = 'exec'; const cm = recentText.match(/[`""]([^`""]{3,60})[`""]/i); if (cm) heuristicParams.command = cm[1]; }
-   else if (/writ|edit|updat/i.test(recentText)) { toolName = 'write'; const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|jsx))/i); if (fm) heuristicParams.path = fm[1]; }
-   
+   else if (/brows|navigat|visit|check.*(?:site|page|website)|open.*(?:page|site|url)|go(?:ing)?\s+to\s/i.test(recentText)) {
+     toolName = 'browser';
+     if (_extractedUrl) heuristicParams.url = _extractedUrl;
+     else if (_extractedDomain) heuristicParams.url = 'https://' + _extractedDomain;
+   }
+   else if (/fetch|read.*page|pull.*content|scrape|extract.*content/i.test(recentText)) {
+     toolName = 'web_fetch';
+     if (_extractedUrl) heuristicParams.url = _extractedUrl;
+     else if (_extractedDomain) heuristicParams.url = 'https://' + _extractedDomain;
+   }
+   else if (/memory.*search|search.*memory|recall|remember/i.test(recentText)) {
+     toolName = 'memory_search';
+     if (_extractedQuote) heuristicParams.query = _extractedQuote;
+   }
+   else if (/read(?:ing)?.*(?:file|\.md|\.json|\.txt|\.js|\.py|\.yml|document)/i.test(recentText)) {
+     toolName = 'read';
+     const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|yml|yaml|toml|ts|jsx|tsx))/i);
+     if (fm) heuristicParams.path = fm[1];
+   }
+   else if (/run(?:ning)?|exec|curl|command|shell|terminal|bash/i.test(recentText)) {
+     toolName = 'exec';
+     const cm = recentText.match(/[`""]([^`""]{3,80})[`""]/i);
+     if (cm) heuristicParams.command = cm[1];
+   }
+   else if (/writ(?:ing)?|edit(?:ing)?|updat(?:ing)?|creat(?:ing)?/i.test(recentText)) {
+     toolName = 'write';
+     const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|jsx|tsx|ts|yml|yaml|toml|css|html))/i);
+     if (fm) heuristicParams.path = fm[1];
+   }
+   // Last resort: if we found a URL/domain but no tool match, it's probably web_fetch
+   else if (_extractedUrl || _extractedDomain) {
+     toolName = 'web_fetch';
+     heuristicParams.url = _extractedUrl || ('https://' + _extractedDomain);
+   }
+
+   // Log heuristic result for debugging
+   logDebugEvent('heuristic_lifecycle', { tool: toolName, params: heuristicParams, textSnippet: recentText.substring(recentText.length - 100) });
+   console.log(`[HEURISTIC] tool=${toolName} params=${JSON.stringify(heuristicParams)} text="${recentText.substring(recentText.length - 80)}"`);
+
    onEvent('tool_start', { tool: toolName, skillName, params: heuristicParams, index: toolLog.length });
    toolLog.push({ tool: toolName, skillName, params: heuristicParams, status: 'called', startedAt: Date.now() });
  }
@@ -744,6 +827,8 @@ class OpenClawGateway {
  }
  if (stream === 'tool_use' && data) {
  const entry = { tool: data.name || data.tool || 'unknown', params: data.input || data.params || {}, status: 'called' };
+ logDebugEvent('tool_use', { tool: entry.tool, params: entry.params, rawKeys: Object.keys(data) });
+ console.log(`[TOOL_USE] ${entry.tool} params=${JSON.stringify(entry.params).substring(0, 200)} raw_keys=${Object.keys(data).join(',')}`);
  toolLog.push(entry);
  if (onEvent) onEvent('tool_start', { tool: entry.tool, params: entry.params, index: toolLog.length - 1 });
  // Track sub-agent spawning so we can associate the next new runId with this spawn
@@ -1021,6 +1106,15 @@ class OpenClawGateway {
 
 // Initialize the gateway client (connects on startup)
 const gateway = new OpenClawGateway(OPENCLAW_URL, OPENCLAW_GATEWAY_TOKEN);
+
+// ── Debug Event Buffer (for /debug/events endpoint) ─────────────────
+// Stores recent raw + mapped tool events for troubleshooting label accuracy
+const _recentDebugEvents = [];
+const MAX_DEBUG_EVENTS = 200;
+function logDebugEvent(category, payload) {
+  _recentDebugEvents.push({ t: Date.now(), ts: new Date().toISOString(), category, ...payload });
+  if (_recentDebugEvents.length > MAX_DEBUG_EVENTS) _recentDebugEvents.splice(0, _recentDebugEvents.length - MAX_DEBUG_EVENTS);
+}
 
 // ── Legacy Poller Support (fallback if WebSocket is unavailable) ─────
 const pendingRequests = new Map();
@@ -1589,6 +1683,21 @@ app.get('/ready', (req, res) => {
 });
 app.get('/readyz', (req, res) => {
  res.status(gateway.isReady ? 200 : 503).json({ status: gateway.isReady ? 'ready' : 'not_ready' });
+});
+
+// ── Debug endpoint: view raw/mapped tool events for troubleshooting ──
+app.get('/debug/events', (req, res) => {
+ const limit = Math.min(parseInt(req.query.limit) || 50, MAX_DEBUG_EVENTS);
+ const category = req.query.category || null; // filter by category
+ let events = _recentDebugEvents;
+ if (category) events = events.filter(e => e.category === category);
+ res.json({
+   total: _recentDebugEvents.length,
+   showing: Math.min(events.length, limit),
+   categories: [...new Set(_recentDebugEvents.map(e => e.category))],
+   help: 'Filter: ?category=raw_gateway|tool_use|heuristic_lifecycle|heuristic_gap|subagent_tool_use',
+   events: events.slice(-limit),
+ });
 });
 
 // ── Write files to agent workspace (supports subdirectories) ─────────
