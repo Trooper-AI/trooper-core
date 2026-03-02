@@ -200,6 +200,16 @@ class OpenClawGateway {
  // Start ping/pong heartbeat to keep connection alive
  this._startPing();
  console.log('[OpenClaw] Connected — native protocol (full workspace + tools)');
+ // Auto-approve bridge device so sessions_spawn works after gateway restarts
+ (async () => {
+   try {
+     const { promisify: _promisify } = await import('util');
+     const { exec: _execCb } = await import('child_process');
+     const _run = _promisify(_execCb);
+     await _run(`docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`, { timeout: 15000 });
+     console.log('[OpenClaw] Bridge device auto-approved for sessions_spawn');
+   } catch { /* device approve not available or already approved */ }
+ })();
  // Reconcile ACP sessions on connect — discover active sessions that survived bridge restart
  (async () => {
    try {
@@ -2524,13 +2534,41 @@ app.get('/skills/installed', (req, res) => {
  }
 });
 
+// ── Desktop API Proxy (port 4567 on VPS) ─────────────────────────────
+// The desktop control API runs on localhost:4567, normally accessed via Caddy.
+// This proxy allows the CrabsHQ server to reach it via the bridge (port 3002)
+// even when gatewayUrl (Caddy) is not set.
+
+app.all('/desktop-api/*', async (req, res) => {
+  const path = req.path.replace('/desktop-api', '');
+  try {
+    const fetchOpts = {
+      method: req.method,
+      headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(15000),
+    };
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      fetchOpts.body = JSON.stringify(req.body);
+    }
+    const resp = await fetch(`http://127.0.0.1:4567${path}`, fetchOpts);
+    const data = await resp.json();
+    res.status(resp.status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: `Desktop API unreachable: ${e.message}` });
+  }
+});
+
 // ── Gateway Management ───────────────────────────────────────────────
 
 app.post('/gateway/restart', (req, res) => {
  try {
  console.log('Restarting OpenClaw gateway container...');
  execSync('docker restart openclaw-gateway 2>&1', { timeout: 30000 });
- setTimeout(() => gateway.connect(), 5000);
+ // Re-approve device and reconnect after restart
+ setTimeout(async () => {
+   try { execSync(`docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`, { timeout: 15000 }); } catch {}
+   gateway.connect();
+ }, 5000);
  res.json({ success: true, message: 'Gateway container restarted' });
  } catch (err) {
  res.status(500).json({ error: 'Failed to restart gateway', details: err.stderr?.toString() || err.message });
@@ -2916,6 +2954,17 @@ function normalizeModelId(model) {
      console.log('[keys] Secrets applied and reloaded via openclaw secrets');
    } catch (e) { console.warn('[keys] openclaw secrets apply/reload not available (pre-v2026.2.24?):', e.message); }
  }
+
+ // Re-approve bridge device after restart so sessions_spawn works
+ if (restartOk) {
+   try {
+     await run(`docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`, { timeout: 15000 });
+     console.log('[keys] Bridge device re-approved after restart');
+   } catch (e) { console.warn('[keys] Device auto-approve failed (will retry on connect):', e.message); }
+ }
+
+ // Reconnect bridge WebSocket to the restarted gateway
+ setTimeout(() => gateway.connect(), 5000);
 
  const response = { status: 'updating', message: 'API keys updated — restarting services' };
  if (warnings.length > 0) response.warnings = warnings;
