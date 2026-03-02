@@ -574,8 +574,19 @@ ${MODELS_PROVIDERS}
  "entries": {
  "lobster": { "enabled": true },
  "llm-task": { "enabled": true },
- "diffs": { "enabled": true }
+ "diffs": { "enabled": true },
+ "acpx": { "enabled": true }
  }
+ },
+ "acp": {
+ "enabled": true,
+ "backend": "acpx",
+ "defaultAgent": "claude",
+ "allowedAgents": ["claude", "codex", "gemini", "opencode"],
+ "maxConcurrentSessions": 3,
+ "dispatch": { "enabled": true, "prefix": "/acp" },
+ "permissions": "approve-reads",
+ "sessionTimeout": "30m"
  },
  "browser": {
  "enabled": true,

@@ -200,6 +200,29 @@ class OpenClawGateway {
  // Start ping/pong heartbeat to keep connection alive
  this._startPing();
  console.log('[OpenClaw] Connected — native protocol (full workspace + tools)');
+ // Reconcile ACP sessions on connect — discover active sessions that survived bridge restart
+ (async () => {
+   try {
+     const { stdout } = await runAcpCmd('sessions --json', 10000);
+     const sessions = JSON.parse(stdout || '[]');
+     let restored = 0;
+     for (const s of sessions) {
+       const sid = s.sessionId || s.id;
+       if (sid && !acpSessionRegistry.has(sid)) {
+         acpSessionRegistry.set(sid, {
+           agent: s.agent || 'unknown',
+           status: s.status || 'running',
+           spawnedAt: s.startedAt ? new Date(s.startedAt).getTime() : Date.now(),
+           lastActivity: Date.now(),
+           permissions: s.permissions || 'approve-reads',
+           output: '',
+         });
+         restored++;
+       }
+     }
+     if (restored > 0) console.log(`[ACP] Reconciled ${restored} active session(s) from gateway`);
+   } catch { /* ACP not available or no sessions */ }
+ })();
  resolve(true);
  })
  .catch((err) => {
@@ -723,6 +746,15 @@ class OpenClawGateway {
    };
    pendingSpawnRunId = runId; // Track which runId initiated this spawn for parent→child tree
  }
+ // Detect ACP agent spawn via tool name or exec command
+ if (toolLower === 'acp_spawn' || toolLower === 'acp' ||
+     (toolLower === 'exec' && /openclaw\s+acp\s+spawn/i.test(JSON.stringify(entry.params)))) {
+   if (onEvent) onEvent('acp_session_start', {
+     agent: entry.params.agent || entry.params.name || 'claude',
+     sessionId: null,
+     permissions: entry.params.permissions || 'approve-reads',
+   });
+ }
  }
  if (stream === 'tool_result' && data) {
  const last = toolLog[toolLog.length - 1];
@@ -792,6 +824,30 @@ class OpenClawGateway {
        });
      }
    } catch (e) { /* ignore diff artifact extraction errors */ }
+ }
+ // Detect ACP session started from spawn result
+ if (last?.tool === 'acp_spawn' || last?.tool === 'acp' ||
+     (last?.tool === 'exec' && /openclaw\s+acp\s+spawn/i.test(JSON.stringify(last.params || {})))) {
+   try {
+     const content = typeof data.content === 'string' ? data.content : JSON.stringify(data.content || '');
+     const sessionMatch = content.match(/session[:\s]+([a-f0-9-]+)/i);
+     if (sessionMatch && onEvent) {
+       const acpSessionId = sessionMatch[1];
+       acpSessionRegistry.set(acpSessionId, {
+         agent: last.params?.agent || 'claude',
+         status: 'running',
+         spawnedAt: Date.now(),
+         lastActivity: Date.now(),
+         permissions: last.params?.permissions || 'approve-reads',
+         output: (last.summary || '').substring(0, 500),
+       });
+       onEvent('acp_session_started', {
+         sessionId: acpSessionId,
+         agent: last.params?.agent || 'claude',
+         summary: (last.summary || '').substring(0, 200),
+       });
+     }
+   } catch {}
  }
  }
  if (stream === 'thinking' && data?.text) {
@@ -984,6 +1040,21 @@ async function forwardToMissionControl(taskId, agentName, result, requestId) {
  } catch (err) { console.error(`Failed to forward to CrabsHQ:`, err.message); }
 }
 
+// ── ACP Session Registry (tracks active ACP agent sessions) ─────────
+const acpSessionRegistry = new Map(); // sessionId -> { agent, sessionKey, status, spawnedAt, lastActivity, permissions, output }
+
+// Garbage-collect stale ACP sessions every 60 seconds
+setInterval(() => {
+  const now = Date.now();
+  const staleMs = 30 * 60 * 1000; // 30 minutes
+  for (const [sid, info] of acpSessionRegistry) {
+    if (info.status === 'closed' || (now - info.lastActivity > staleMs)) {
+      acpSessionRegistry.delete(sid);
+      console.log(`[ACP] GC: removed stale session ${sid} (agent=${info.agent})`);
+    }
+  }
+}, 60000);
+
 // ── Agent Registry (maps CrabsHQ agent names to OpenClaw agentIds) ───
 const agentRegistry = new Map(); // agentName -> { agentId, role, title, soul, name }
 const AGENT_REGISTRY_PATH = '/opt/openclaw-bridge/agent-registry.json';
@@ -1120,6 +1191,29 @@ try {
  if (config.cron?.stagger) { delete config.cron.stagger; changed = true; console.log('[bridge] Migrated: removed unrecognized "cron.stagger" key'); }
  if (config.cron?.delivery) { delete config.cron.delivery; changed = true; console.log('[bridge] Migrated: removed unrecognized "cron.delivery" key'); }
  if (config.channels?.telegram?.nativeCommands !== undefined) { delete config.channels.telegram.nativeCommands; changed = true; console.log('[bridge] Migrated: removed unrecognized "channels.telegram.nativeCommands" key'); }
+ // Startup migration: enable ACP (Agent Client Protocol) support with acpx backend
+ if (!config.acp) {
+   config.acp = {
+     enabled: true,
+     backend: 'acpx',
+     defaultAgent: 'claude',
+     allowedAgents: ['claude', 'codex', 'gemini', 'opencode'],
+     maxConcurrentSessions: 3,
+     dispatch: { enabled: true, prefix: '/acp' },
+     permissions: 'approve-reads',
+     sessionTimeout: '30m',
+   };
+   changed = true;
+   console.log('[bridge] Migrated: enabled ACP with acpx backend');
+ }
+ // Startup migration: ensure acpx plugin entry exists
+ if (!config.plugins?.entries?.acpx) {
+   if (!config.plugins) config.plugins = {};
+   if (!config.plugins.entries) config.plugins.entries = {};
+   config.plugins.entries.acpx = { enabled: true };
+   changed = true;
+   console.log('[bridge] Migrated: enabled acpx plugin');
+ }
  if (changed) {
    writeFileSync(configPath, JSON.stringify(config, null, 2));
    try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
@@ -2877,6 +2971,278 @@ app.post('/config/secrets/reload', async (req, res) => {
    console.log('[secrets] Reloaded:', stdout.trim());
    res.json({ status: 'ok', output: stdout.trim() });
  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── ACP (Agent Client Protocol) Endpoints ──────────────────────────────
+
+// Helper: run openclaw acp CLI commands inside gateway container
+async function runAcpCmd(args, timeoutMs = 15000) {
+  const { promisify } = await import('util');
+  const { exec } = await import('child_process');
+  const run = promisify(exec);
+  const { stdout, stderr } = await run(
+    `docker exec openclaw-openclaw-gateway-1 openclaw acp ${args} 2>&1`,
+    { timeout: timeoutMs }
+  );
+  return { stdout: stdout.trim(), stderr: stderr?.trim() || '' };
+}
+
+// GET /acp/sessions — List active ACP sessions
+app.get('/acp/sessions', async (req, res) => {
+  try {
+    const { stdout } = await runAcpCmd('sessions --json');
+    const sessions = JSON.parse(stdout || '[]');
+    // Merge local registry metadata
+    const enriched = sessions.map(s => ({
+      ...s,
+      ...(acpSessionRegistry.get(s.sessionId || s.id) || {}),
+    }));
+    res.json(enriched);
+  } catch (e) {
+    if (/not found|unknown command|No such/i.test(e.message || '')) {
+      res.json({ available: false, message: 'ACP not available (requires acpx plugin)' });
+    } else {
+      res.status(500).json({ error: e.message });
+    }
+  }
+});
+
+// POST /acp/spawn — Spawn a new ACP agent session
+app.post('/acp/spawn', async (req, res) => {
+  try {
+    const { agent, cwd, model, permissions, message } = req.body || {};
+    let args = 'spawn';
+    if (agent) args += ` ${agent}`;
+    if (cwd) args += ` --cwd "${cwd}"`;
+    if (model) args += ` --model ${model}`;
+    if (permissions) args += ` --permissions ${permissions}`;
+    const { stdout } = await runAcpCmd(args, 30000);
+    // Parse session ID from output
+    const sessionMatch = stdout.match(/session[:\s]+([a-f0-9-]+)/i);
+    const sessionId = sessionMatch ? sessionMatch[1] : null;
+    if (sessionId) {
+      acpSessionRegistry.set(sessionId, {
+        agent: agent || 'claude',
+        status: 'running',
+        spawnedAt: Date.now(),
+        lastActivity: Date.now(),
+        permissions: permissions || 'approve-reads',
+        output: stdout,
+      });
+    }
+    // If initial message provided, steer immediately
+    if (sessionId && message) {
+      try {
+        const escaped = message.replace(/"/g, '\\"');
+        const { stdout: steerOut } = await runAcpCmd(`steer --session ${sessionId} "${escaped}"`, 60000);
+        if (acpSessionRegistry.has(sessionId)) {
+          acpSessionRegistry.get(sessionId).lastActivity = Date.now();
+          acpSessionRegistry.get(sessionId).output = steerOut;
+        }
+        res.json({ sessionId, agent: agent || 'claude', output: steerOut, spawned: true });
+      } catch (steerErr) {
+        res.json({ sessionId, agent: agent || 'claude', output: stdout, spawned: true, steerError: steerErr.message });
+      }
+    } else {
+      res.json({ sessionId, agent: agent || 'claude', output: stdout, spawned: true });
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /acp/sessions/:sessionId/steer — Send message to ACP session
+app.post('/acp/sessions/:sessionId/steer', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const { message } = req.body || {};
+    if (!message) return res.status(400).json({ error: 'message required' });
+    const escaped = message.replace(/"/g, '\\"');
+    const { stdout } = await runAcpCmd(`steer --session ${sessionId} "${escaped}"`, 120000);
+    if (acpSessionRegistry.has(sessionId)) {
+      acpSessionRegistry.get(sessionId).lastActivity = Date.now();
+      acpSessionRegistry.get(sessionId).output = stdout;
+    }
+    res.json({ sessionId, output: stdout });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /acp/sessions/:sessionId/stream — Stream ACP session response as SSE
+app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
+  const { sessionId } = req.params;
+  const { message } = req.body || {};
+  if (!message) return res.status(400).json({ error: 'message required' });
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+
+  try {
+    const { spawn } = await import('child_process');
+    const escaped = message.replace(/"/g, '\\"');
+    const child = spawn('docker', [
+      'exec', 'openclaw-openclaw-gateway-1',
+      'openclaw', 'acp', 'steer', '--session', sessionId, escaped,
+    ], { timeout: 120000 });
+
+    let buffer = '';
+    child.stdout.on('data', (chunk) => {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // keep incomplete line
+      for (const line of lines) {
+        if (line.trim()) {
+          res.write(`data: ${JSON.stringify({ type: 'chunk', content: line })}\n\n`);
+        }
+      }
+    });
+    child.stderr.on('data', (chunk) => {
+      res.write(`data: ${JSON.stringify({ type: 'error', content: chunk.toString() })}\n\n`);
+    });
+    child.on('close', (code) => {
+      if (buffer.trim()) {
+        res.write(`data: ${JSON.stringify({ type: 'chunk', content: buffer })}\n\n`);
+      }
+      res.write(`data: ${JSON.stringify({ type: 'done', exitCode: code })}\n\n`);
+      res.end();
+      if (acpSessionRegistry.has(sessionId)) {
+        acpSessionRegistry.get(sessionId).lastActivity = Date.now();
+      }
+    });
+    child.on('error', (err) => {
+      res.write(`data: ${JSON.stringify({ type: 'error', content: err.message })}\n\n`);
+      res.end();
+    });
+
+    req.on('close', () => {
+      try { child.kill(); } catch {}
+    });
+  } catch (e) {
+    res.write(`data: ${JSON.stringify({ type: 'error', content: e.message })}\n\n`);
+    res.end();
+  }
+});
+
+// POST /acp/sessions/:sessionId/cancel — Cancel running ACP operation
+app.post('/acp/sessions/:sessionId/cancel', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const { stdout } = await runAcpCmd(`cancel --session ${sessionId}`);
+    if (acpSessionRegistry.has(sessionId)) {
+      acpSessionRegistry.get(sessionId).lastActivity = Date.now();
+      acpSessionRegistry.get(sessionId).status = 'cancelled';
+    }
+    res.json({ sessionId, status: 'cancelled', output: stdout });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /acp/sessions/:sessionId — Close ACP session
+app.delete('/acp/sessions/:sessionId', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const { stdout } = await runAcpCmd(`close --session ${sessionId}`);
+    if (acpSessionRegistry.has(sessionId)) {
+      acpSessionRegistry.get(sessionId).status = 'closed';
+    }
+    acpSessionRegistry.delete(sessionId);
+    res.json({ sessionId, status: 'closed', output: stdout });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /acp/sessions/:sessionId — Get single ACP session status
+app.get('/acp/sessions/:sessionId', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const { stdout } = await runAcpCmd(`status --session ${sessionId} --json`);
+    const status = JSON.parse(stdout || '{}');
+    const local = acpSessionRegistry.get(sessionId) || {};
+    res.json({ ...status, ...local });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PUT /acp/sessions/:sessionId/permissions — Update ACP session permissions
+app.put('/acp/sessions/:sessionId/permissions', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const { permissions } = req.body || {};
+    if (!permissions || !['approve-all', 'approve-reads', 'deny-all'].includes(permissions)) {
+      return res.status(400).json({ error: 'permissions must be approve-all, approve-reads, or deny-all' });
+    }
+    const { stdout } = await runAcpCmd(`permissions --session ${sessionId} ${permissions}`);
+    if (acpSessionRegistry.has(sessionId)) {
+      acpSessionRegistry.get(sessionId).permissions = permissions;
+      acpSessionRegistry.get(sessionId).lastActivity = Date.now();
+    }
+    res.json({ sessionId, permissions, output: stdout });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /acp/doctor — ACP diagnostics
+app.get('/acp/doctor', async (req, res) => {
+  try {
+    const { stdout } = await runAcpCmd('doctor --json', 20000);
+    try {
+      res.json(JSON.parse(stdout));
+    } catch {
+      res.json({ raw: stdout, available: true });
+    }
+  } catch (e) {
+    if (/not found|unknown command|No such/i.test(e.message || '')) {
+      res.json({ available: false, message: 'ACP not available (requires acpx plugin)' });
+    } else {
+      res.status(500).json({ error: e.message });
+    }
+  }
+});
+
+// GET /acp/agents — List available ACP agent harnesses
+app.get('/acp/agents', async (req, res) => {
+  try {
+    const { stdout } = await runAcpCmd('doctor --json', 20000);
+    try {
+      const doctor = JSON.parse(stdout);
+      const agents = doctor.agents || doctor.harnesses || [];
+      res.json({ agents, available: true });
+    } catch {
+      // Fallback: return known harnesses
+      res.json({
+        agents: [
+          { name: 'claude', label: 'Claude Code', installed: null },
+          { name: 'codex', label: 'Codex CLI', installed: null },
+          { name: 'gemini', label: 'Gemini CLI', installed: null },
+          { name: 'opencode', label: 'OpenCode', installed: null },
+          { name: 'pi', label: 'Pi', installed: null },
+        ],
+        available: true,
+        raw: stdout,
+      });
+    }
+  } catch (e) {
+    res.json({
+      available: false,
+      agents: [
+        { name: 'claude', label: 'Claude Code', installed: null },
+        { name: 'codex', label: 'Codex CLI', installed: null },
+        { name: 'gemini', label: 'Gemini CLI', installed: null },
+        { name: 'opencode', label: 'OpenCode', installed: null },
+        { name: 'pi', label: 'Pi', installed: null },
+      ],
+      error: e.message,
+    });
+  }
 });
 
 // ── Deep Research (Librarium) ─────────────────────────────────────────
