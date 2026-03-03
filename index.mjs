@@ -1690,8 +1690,12 @@ app.get('/deploy-logs-raw', (req, res) => {
 });
 
 app.get('/health', (req, res) => {
+ // During initial provisioning, return 'installing' so provision.js keeps polling
+ // and streaming raw logs. The marker file is created at the end of setup-openclaw-full.sh.
+ const setupDone = existsSync('/tmp/openclaw-setup-complete');
  res.json({
- status: 'ok', service: 'openclaw-bridge',
+ status: setupDone ? 'ok' : 'installing',
+ service: 'openclaw-bridge',
  openclawConnected: gateway.isReady,
  mode: gateway.isReady ? 'websocket' : 'poller-fallback',
  pending: pendingRequests.size, skills: skillRegistry.size,

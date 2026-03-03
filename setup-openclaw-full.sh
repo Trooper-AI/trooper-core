@@ -1813,4 +1813,7 @@ else
  journalctl -u caddy --no-pager -n 10
 fi
 
+# Signal to bridge that setup is complete (bridge /health transitions from 'installing' → 'ok')
+touch /tmp/openclaw-setup-complete
+
 echo done
