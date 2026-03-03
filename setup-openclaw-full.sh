@@ -1758,6 +1758,9 @@ dlog "Starting services..."
 # Kill the temporary log server so the real bridge can use the port
 kill $LOG_SERVER_PID 2>/dev/null; sleep 1
 
+# Start bridge immediately — binds in ~5s, minimizes log gap (provision.js polls port 3002)
+systemctl start openclaw-bridge
+
 # Start docker containers
 systemctl start openclaw-docker
 
@@ -1777,8 +1780,7 @@ if [ "$_gw_alive" -eq 0 ]; then
  docker compose logs --tail 20 openclaw-gateway 2>/dev/null || true
 fi
 
-# Start bridge, poller, caddy (bridge has pre-approved identity, connects on first try)
-systemctl start openclaw-bridge
+# Start poller, VNC, desktop API, playwright (bridge already running)
 systemctl start openclaw-poller
 systemctl start openclaw-vnc
 systemctl start crabhq-desktop-api
