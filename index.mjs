@@ -845,11 +845,25 @@ class OpenClawGateway {
  lifecycleDepth = Math.max(0, lifecycleDepth - 1);
  }
  if (stream === 'tool_use' && data) {
- const entry = { tool: data.name || data.tool || 'unknown', params: data.input || data.params || {}, status: 'called' };
+ // Cancel any pending heuristic gap timer — we have real data now
+ if (toolGapTimer) { clearTimeout(toolGapTimer); toolGapTimer = null; }
+ inToolGap = false;
+ const entry = { tool: data.name || data.tool || 'unknown', params: data.input || data.params || {}, status: 'called', startedAt: Date.now() };
  logDebugEvent('tool_use', { tool: entry.tool, params: entry.params, rawKeys: Object.keys(data) });
  console.log(`[TOOL_USE] ${entry.tool} params=${JSON.stringify(entry.params).substring(0, 200)} raw_keys=${Object.keys(data).join(',')}`);
+ // Replace any pending heuristic entry (guessed "processing"/"web_search"/etc.) with real data
+ const lastEntry = toolLog[toolLog.length - 1];
+ if (lastEntry && lastEntry.status === 'called' && !lastEntry._fromGateway) {
+ // Heuristic entry — replace it with the real tool info
+ lastEntry.tool = entry.tool;
+ lastEntry.params = entry.params;
+ lastEntry._fromGateway = true;
+ if (onEvent) onEvent('tool_update', { tool: entry.tool, params: entry.params, index: toolLog.length - 1 });
+ } else {
+ entry._fromGateway = true;
  toolLog.push(entry);
  if (onEvent) onEvent('tool_start', { tool: entry.tool, params: entry.params, index: toolLog.length - 1 });
+ }
  // Track sub-agent spawning so we can associate the next new runId with this spawn
  const toolLower = (entry.tool || '').toLowerCase();
  if (toolLower === 'sessions_spawn' || toolLower === 'task' || toolLower === 'spawn' || toolLower.includes('subagent')) {
@@ -871,9 +885,12 @@ class OpenClawGateway {
  }
  }
  if (stream === 'tool_result' && data) {
+ if (toolGapTimer) { clearTimeout(toolGapTimer); toolGapTimer = null; }
+ inToolGap = false;
  const last = toolLog[toolLog.length - 1];
  if (last && last.status === 'called') {
  last.status = data.is_error ? 'failed' : 'ok';
+ last.durationMs = Date.now() - (last.startedAt || Date.now());
  // Larger summary limit for exec (show command output) and sessions_spawn (show sub-agent result)
  const summaryLimit = (last.tool === 'exec' || last.tool === 'sessions_spawn') ? 1000 : 300;
  last.summary = typeof data.content === 'string' ? data.content.substring(0, summaryLimit) : (data.output || '').substring(0, summaryLimit);
