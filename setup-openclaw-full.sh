@@ -1813,4 +1813,9 @@ else
  journalctl -u caddy --no-pager -n 10
 fi
 
+# Signal to bridge that setup is complete (bridge /health transitions from 'installing' → 'ok')
+# /tmp marker is ephemeral; /opt marker persists across reboots
+touch /tmp/openclaw-setup-complete
+touch /opt/openclaw-bridge/.setup-complete
+
 echo done
