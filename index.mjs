@@ -15,26 +15,26 @@ import WebSocket from 'ws';
 // Browser tool names that trigger live screenshot streaming
 const BROWSER_TOOLS = ['browser', 'browser_navigate', 'browser_click', 'browser_type', 'browser_screenshot', 'browser_read', 'browser_search', 'browser_form'];
 function isBrowserTool(tool) {
-  return tool && BROWSER_TOOLS.some(t => String(tool).toLowerCase().includes(t));
+ return tool && BROWSER_TOOLS.some(t => String(tool).toLowerCase().includes(t));
 }
 
 // ── VNC Live View ─────────────────────────────────────────────────────
 // When Xvnc + noVNC/websockify are running, send the client a live VNC URL
 // instead of polling screenshots. Caddy proxies /vnc/* → websockify:6080.
 function getVNCLiveViewUrl() {
-  const orgId = process.env.ORG_ID || '';
-  if (!orgId) return null;
-  const orgShort = orgId.toLowerCase().substring(0, 12);
-  const domain = `org-${orgShort}.crabhq.com`;
-  return `https://${domain}/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify&reconnect=true&reconnect_delay=3000`;
+ const orgId = process.env.ORG_ID || '';
+ if (!orgId) return null;
+ const orgShort = orgId.toLowerCase().substring(0, 12);
+ const domain = `org-${orgShort}.crabhq.com`;
+ return `https://${domain}/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify&reconnect=true&reconnect_delay=3000`;
 }
 
 function isVNCAvailable() {
-  try {
-    // Check if websockify is listening on port 6080 (host-side, quick TCP check)
-    execSync('ss -tlnp | grep -q ":6080"', { timeout: 2000 });
-    return true;
-  } catch { return false; }
+ try {
+ // Check if websockify is listening on port 6080 (host-side, quick TCP check)
+ execSync('ss -tlnp | grep -q ":6080"', { timeout: 2000 });
+ return true;
+ } catch { return false; }
 }
 
 // ── Skill-Reported Browser Sessions ──────────────────────────────────
@@ -44,22 +44,22 @@ function isVNCAvailable() {
 let skillBrowserSession = null; // { liveViewUrl, sessionId, provider, reportedAt }
 
 function reportBrowserSession({ liveViewUrl, sessionId, provider }) {
-  skillBrowserSession = { liveViewUrl, sessionId, provider: provider || 'skill', reportedAt: Date.now() };
-  console.log(`[browser-session] Skill reported live view: ${liveViewUrl} (provider: ${provider || 'skill'})`);
+ skillBrowserSession = { liveViewUrl, sessionId, provider: provider || 'skill', reportedAt: Date.now() };
+ console.log(`[browser-session] Skill reported live view: ${liveViewUrl} (provider: ${provider || 'skill'})`);
 }
 
 function getSkillBrowserSession() {
-  if (!skillBrowserSession) return null;
-  // Auto-expire after 15 minutes
-  if (Date.now() - skillBrowserSession.reportedAt > 15 * 60 * 1000) {
-    skillBrowserSession = null;
-    return null;
-  }
-  return skillBrowserSession;
+ if (!skillBrowserSession) return null;
+ // Auto-expire after 15 minutes
+ if (Date.now() - skillBrowserSession.reportedAt > 15 * 60 * 1000) {
+ skillBrowserSession = null;
+ return null;
+ }
+ return skillBrowserSession;
 }
 
 function clearSkillBrowserSession() {
-  skillBrowserSession = null;
+ skillBrowserSession = null;
 }
 
 // ── Device Identity (ed25519 keypair for gateway auth) ───────────────────────
@@ -132,7 +132,7 @@ app.use(express.json({ limit: '5mb' }));
 
 // Auth middleware — exempt health/deploy-logs (needed during provisioning)
 app.use((req, res, next) => {
- if (req.path === '/health' || req.path === '/deploy-logs' || req.path === '/files' || req.path === '/llm/vision' || req.path.startsWith('/api/proxy/') || req.path.startsWith('/files/')) return next();
+ if (req.path === '/health' || req.path === '/deploy-logs' || req.path === '/deploy-logs-raw' || req.path === '/files' || req.path === '/llm/vision' || req.path.startsWith('/api/proxy/') || req.path.startsWith('/files/')) return next();
  if (!BRIDGE_AUTH_TOKEN) return next();
  const token = req.headers.authorization?.replace('Bearer ', '');
  if (token !== BRIDGE_AUTH_TOKEN) return res.status(401).json({ error: 'Unauthorized' });
@@ -202,36 +202,36 @@ class OpenClawGateway {
  console.log('[OpenClaw] Connected — native protocol (full workspace + tools)');
  // Auto-approve bridge device so sessions_spawn works after gateway restarts
  (async () => {
-   try {
-     const { promisify: _promisify } = await import('util');
-     const { exec: _execCb } = await import('child_process');
-     const _run = _promisify(_execCb);
-     await _run(`docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`, { timeout: 15000 });
-     console.log('[OpenClaw] Bridge device auto-approved for sessions_spawn');
-   } catch { /* device approve not available or already approved */ }
+ try {
+ const { promisify: _promisify } = await import('util');
+ const { exec: _execCb } = await import('child_process');
+ const _run = _promisify(_execCb);
+ await _run(`docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`, { timeout: 15000 });
+ console.log('[OpenClaw] Bridge device auto-approved for sessions_spawn');
+ } catch { /* device approve not available or already approved */ }
  })();
  // Reconcile ACP sessions on connect — discover active sessions that survived bridge restart
  (async () => {
-   try {
-     const { stdout } = await runAcpCmd('sessions --json', 10000);
-     const sessions = JSON.parse(stdout || '[]');
-     let restored = 0;
-     for (const s of sessions) {
-       const sid = s.sessionId || s.id;
-       if (sid && !acpSessionRegistry.has(sid)) {
-         acpSessionRegistry.set(sid, {
-           agent: s.agent || 'unknown',
-           status: s.status || 'running',
-           spawnedAt: s.startedAt ? new Date(s.startedAt).getTime() : Date.now(),
-           lastActivity: Date.now(),
-           permissions: s.permissions || 'approve-reads',
-           output: '',
-         });
-         restored++;
-       }
-     }
-     if (restored > 0) console.log(`[ACP] Reconciled ${restored} active session(s) from gateway`);
-   } catch { /* ACP not available or no sessions */ }
+ try {
+ const { stdout } = await runAcpCmd('sessions --json', 10000);
+ const sessions = JSON.parse(stdout || '[]');
+ let restored = 0;
+ for (const s of sessions) {
+ const sid = s.sessionId || s.id;
+ if (sid && !acpSessionRegistry.has(sid)) {
+ acpSessionRegistry.set(sid, {
+ agent: s.agent || 'unknown',
+ status: s.status || 'running',
+ spawnedAt: s.startedAt ? new Date(s.startedAt).getTime() : Date.now(),
+ lastActivity: Date.now(),
+ permissions: s.permissions || 'approve-reads',
+ output: '',
+ });
+ restored++;
+ }
+ }
+ if (restored > 0) console.log(`[ACP] Reconciled ${restored} active session(s) from gateway`);
+ } catch { /* ACP not available or no sessions */ }
  })();
  resolve(true);
  })
@@ -401,10 +401,10 @@ class OpenClawGateway {
  // Re-register event listener under the actual runId so streaming events are delivered
  // (listener was registered with idempotencyKey, but events arrive with runId)
  if (pending.idempotencyKey && frame.payload.runId) {
-   const listener = this._eventListeners.get(pending.idempotencyKey);
-   if (listener) {
-     this._eventListeners.set(frame.payload.runId, listener);
-   }
+ const listener = this._eventListeners.get(pending.idempotencyKey);
+ if (listener) {
+ this._eventListeners.set(frame.payload.runId, listener);
+ }
  }
  return;
  }
@@ -416,10 +416,10 @@ class OpenClawGateway {
  if (stream !== 'assistant') console.log(`[OpenClaw:DBG] agent event: stream=${stream} runId=${runId?.substring(0,8)} data=${JSON.stringify(data).substring(0, 200)}`);
  const listener = this._eventListeners.get(runId);
  if (listener) {
-   listener(stream, data, runId);
+ listener(stream, data, runId);
  } else if (this._activeSessionListener) {
-   // Route unmatched events to the active session listener (captures nested runId events)
-   this._activeSessionListener(stream, data, runId);
+ // Route unmatched events to the active session listener (captures nested runId events)
+ this._activeSessionListener(stream, data, runId);
  }
  }
  }
@@ -497,12 +497,12 @@ class OpenClawGateway {
  if (newFiles.length > 0) {
  console.log(`[OpenClaw] Found ${newFiles.length} new screenshot(s): ${newFiles.join(', ')}`);
  const imageMarkdown = newFiles.map(f => {
-   try {
-     const b64 = execSync(`docker exec openclaw-openclaw-gateway-1 bash -c 'cat "${f}" | base64 -w0'`, { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }).toString().trim();
-     const ext = f.split('.').pop().toLowerCase();
-     const mime = ext === 'jpg' || ext === 'jpeg' ? 'jpeg' : ext === 'webp' ? 'webp' : 'png';
-     return b64.length > 100 ? `\n\n![screenshot](data:image/${mime};base64,${b64})` : '';
-   } catch { return ''; }
+ try {
+ const b64 = execSync(`docker exec openclaw-openclaw-gateway-1 bash -c 'cat "${f}" | base64 -w0'`, { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }).toString().trim();
+ const ext = f.split('.').pop().toLowerCase();
+ const mime = ext === 'jpg' || ext === 'jpeg' ? 'jpeg' : ext === 'webp' ? 'webp' : 'png';
+ return b64.length > 100 ? `\n\n![screenshot](data:image/${mime};base64,${b64})` : '';
+ } catch { return ''; }
  }).filter(Boolean).join('');
  response += imageMarkdown;
  }
@@ -527,9 +527,9 @@ class OpenClawGateway {
  const listener = this._eventListeners.get(idempotencyKey);
  this._eventListeners.delete(idempotencyKey);
  if (listener) {
-   for (const [key, val] of this._eventListeners) {
-     if (val === listener) this._eventListeners.delete(key);
-   }
+ for (const [key, val] of this._eventListeners) {
+ if (val === listener) this._eventListeners.delete(key);
+ }
  }
  }
  }
@@ -557,7 +557,7 @@ class OpenClawGateway {
 
  // Installed skills for matching
  const installedSkills = (opts.installedSkills || []).map(s => ({
-   name: s.name, content: (s.content || '').toLowerCase()
+ name: s.name, content: (s.content || '').toLowerCase()
  }));
 
  let toolGapTimer = null;
@@ -572,16 +572,16 @@ class OpenClawGateway {
  // Debug logging: capture recent raw events for troubleshooting
  const _debugEvents = [];
  const _debugLog = (type, payload) => {
-   _debugEvents.push({ t: Date.now(), type, ...payload });
-   if (_debugEvents.length > 100) _debugEvents.shift();
+ _debugEvents.push({ t: Date.now(), type, ...payload });
+ if (_debugEvents.length > 100) _debugEvents.shift();
  };
 
  const eventHandler = (stream, data, runId) => {
  // Debug: log ALL raw gateway events to global buffer + console
  if (stream === 'tool_use' || stream === 'tool_result' || stream === 'lifecycle') {
-   const rawStr = JSON.stringify(data || {}).substring(0, 300);
-   logDebugEvent('raw_gateway', { stream, runId, isSubAgent: !!(mainRunId && runId && runId !== mainRunId), data: rawStr });
-   console.log(`[TOOL:DBG] stream=${stream} runId=${runId} data=${rawStr.substring(0, 200)}`);
+ const rawStr = JSON.stringify(data || {}).substring(0, 300);
+ logDebugEvent('raw_gateway', { stream, runId, isSubAgent: !!(mainRunId && runId && runId !== mainRunId), data: rawStr });
+ console.log(`[TOOL:DBG] stream=${stream} runId=${runId} data=${rawStr.substring(0, 200)}`);
  }
 
  // Track main runId from first event
@@ -590,135 +590,135 @@ class OpenClawGateway {
 
  // Associate new runIds with pending sub-agent spawns (tree-based)
  if (isSubAgent && !activeSubAgents.has(runId)) {
-   const parentRunId = pendingSpawnRunId || mainRunId;
-   const parentDepth = parentRunId === mainRunId ? 0 : (activeSubAgents.get(parentRunId)?.depth || 0);
-   const info = pendingSubAgentSpawn || { name: 'Sub-agent', task: '' };
-   activeSubAgents.set(runId, { ...info, startedAt: Date.now(), toolCount: 0, parentRunId, depth: parentDepth + 1 });
-   pendingSubAgentSpawn = null;
-   pendingSpawnRunId = null;
-   if (onEvent) onEvent('subagent_start', { subAgentRunId: runId, parentRunId, depth: parentDepth + 1, name: info.name, task: info.task });
+ const parentRunId = pendingSpawnRunId || mainRunId;
+ const parentDepth = parentRunId === mainRunId ? 0 : (activeSubAgents.get(parentRunId)?.depth || 0);
+ const info = pendingSubAgentSpawn || { name: 'Sub-agent', task: '' };
+ activeSubAgents.set(runId, { ...info, startedAt: Date.now(), toolCount: 0, parentRunId, depth: parentDepth + 1 });
+ pendingSubAgentSpawn = null;
+ pendingSpawnRunId = null;
+ if (onEvent) onEvent('subagent_start', { subAgentRunId: runId, parentRunId, depth: parentDepth + 1, name: info.name, task: info.task });
  }
 
  // Forward sub-agent events with subAgent tagging (includes parent/depth for tree rendering)
  if (isSubAgent) {
-   const subInfo = activeSubAgents.get(runId) || { name: 'Sub-agent', parentRunId: mainRunId, depth: 1 };
-   if (stream === 'tool_use' && data) {
-     subInfo.toolCount = (subInfo.toolCount || 0) + 1;
-     const subToolName = data.name || data.tool || 'unknown';
-     const subToolParams = data.input || data.params || {};
-     logDebugEvent('subagent_tool_use', { subAgent: subInfo.name, tool: subToolName, params: subToolParams, rawKeys: Object.keys(data) });
-     console.log(`[SUBAGENT:tool_use] ${subInfo.name} → ${subToolName} params=${JSON.stringify(subToolParams).substring(0, 200)}`);
-     if (onEvent) onEvent('subagent_tool_start', {
-       tool: subToolName,
-       params: subToolParams,
-       subAgentRunId: runId,
-       parentRunId: subInfo.parentRunId,
-       depth: subInfo.depth,
-       subAgentName: subInfo.name,
-     });
-   } else if (stream === 'tool_result' && data) {
-     const summary = typeof data.content === 'string' ? data.content.substring(0, 500) : (data.output || '').substring(0, 500);
-     if (onEvent) onEvent('subagent_tool_result', {
-       tool: data.name || 'unknown',
-       success: !data.is_error,
-       summary,
-       subAgentRunId: runId,
-       parentRunId: subInfo.parentRunId,
-       depth: subInfo.depth,
-       subAgentName: subInfo.name,
-     });
-   } else if (stream === 'assistant' && data?.text) {
-     if (onEvent) onEvent('subagent_text', { text: data.text, subAgentRunId: runId, parentRunId: subInfo.parentRunId, depth: subInfo.depth, subAgentName: subInfo.name });
-   } else if (stream === 'thinking' && data?.text) {
-     if (onEvent) onEvent('subagent_thinking', { text: data.text, subAgentRunId: runId, parentRunId: subInfo.parentRunId, depth: subInfo.depth, subAgentName: subInfo.name });
-   }
-   return; // Don't process sub-agent events as main agent events
+ const subInfo = activeSubAgents.get(runId) || { name: 'Sub-agent', parentRunId: mainRunId, depth: 1 };
+ if (stream === 'tool_use' && data) {
+ subInfo.toolCount = (subInfo.toolCount || 0) + 1;
+ const subToolName = data.name || data.tool || 'unknown';
+ const subToolParams = data.input || data.params || {};
+ logDebugEvent('subagent_tool_use', { subAgent: subInfo.name, tool: subToolName, params: subToolParams, rawKeys: Object.keys(data) });
+ console.log(`[SUBAGENT:tool_use] ${subInfo.name} → ${subToolName} params=${JSON.stringify(subToolParams).substring(0, 200)}`);
+ if (onEvent) onEvent('subagent_tool_start', {
+ tool: subToolName,
+ params: subToolParams,
+ subAgentRunId: runId,
+ parentRunId: subInfo.parentRunId,
+ depth: subInfo.depth,
+ subAgentName: subInfo.name,
+ });
+ } else if (stream === 'tool_result' && data) {
+ const summary = typeof data.content === 'string' ? data.content.substring(0, 500) : (data.output || '').substring(0, 500);
+ if (onEvent) onEvent('subagent_tool_result', {
+ tool: data.name || 'unknown',
+ success: !data.is_error,
+ summary,
+ subAgentRunId: runId,
+ parentRunId: subInfo.parentRunId,
+ depth: subInfo.depth,
+ subAgentName: subInfo.name,
+ });
+ } else if (stream === 'assistant' && data?.text) {
+ if (onEvent) onEvent('subagent_text', { text: data.text, subAgentRunId: runId, parentRunId: subInfo.parentRunId, depth: subInfo.depth, subAgentName: subInfo.name });
+ } else if (stream === 'thinking' && data?.text) {
+ if (onEvent) onEvent('subagent_thinking', { text: data.text, subAgentRunId: runId, parentRunId: subInfo.parentRunId, depth: subInfo.depth, subAgentName: subInfo.name });
+ }
+ return; // Don't process sub-agent events as main agent events
  }
  if (stream === 'assistant' && data?.text) {
  textChunks.push(data.text);
  lastTextTime = Date.now();
  // If we were in a tool gap, mark it as done
  if (inToolGap) {
-   inToolGap = false;
-   const last = toolLog[toolLog.length - 1];
-   if (last && last.status === 'called') {
-     last.status = 'ok';
-     last.durationMs = Date.now() - (last.startedAt || Date.now());
-     if (onEvent) onEvent('tool_result', { tool: last.tool, skillName: last.skillName, params: last.params, success: true, summary: `Completed in ${(last.durationMs / 1000).toFixed(1)}s`, index: toolLog.length - 1 });
-   }
+ inToolGap = false;
+ const last = toolLog[toolLog.length - 1];
+ if (last && last.status === 'called') {
+ last.status = 'ok';
+ last.durationMs = Date.now() - (last.startedAt || Date.now());
+ if (onEvent) onEvent('tool_result', { tool: last.tool, skillName: last.skillName, params: last.params, success: true, summary: `Completed in ${(last.durationMs / 1000).toFixed(1)}s`, index: toolLog.length - 1 });
+ }
  }
  // Reset gap timer
  if (toolGapTimer) clearTimeout(toolGapTimer);
  toolGapTimer = setTimeout(() => {
-   // Text stopped for 2s — likely executing a tool
-   if (!inToolGap && textChunks.length > 0) {
-     inToolGap = true;
-     let toolName = 'processing';
-     let skillName = null;
-     const recentText = textChunks.join('').slice(-300).toLowerCase();
-     const promptLower = (message || '').toLowerCase();
-     // Match against installed skills
-     for (const skill of installedSkills) {
-       const sn = skill.name.toLowerCase();
-       if (recentText.includes(sn) || promptLower.includes(sn)) { skillName = skill.name; break; }
-     }
-     let params = {};
-     // Extract URLs and domains from recent text
-     const _um = recentText.match(/(https?:\/\/[^\s"'<>,]{5,120})/i);
-     const _eu = _um ? _um[1] : '';
-     const _dm = recentText.match(/\b([a-z0-9][-a-z0-9]*\.(?:com|io|ai|org|net|co|app|dev|xyz|me|info|gg|so|sh|cc)(?:\/[^\s"'<>,]{0,60})?)\b/i);
-     const _ed = _dm ? _dm[1] : '';
-     const _qm = recentText.match(/[""]([^""]{3,80})[""]/i) || recentText.match(/[`]([^`]{3,80})[`]/i);
-     const _eq = _qm ? _qm[1].trim() : '';
+ // Text stopped for 2s — likely executing a tool
+ if (!inToolGap && textChunks.length > 0) {
+ inToolGap = true;
+ let toolName = 'processing';
+ let skillName = null;
+ const recentText = textChunks.join('').slice(-300).toLowerCase();
+ const promptLower = (message || '').toLowerCase();
+ // Match against installed skills
+ for (const skill of installedSkills) {
+ const sn = skill.name.toLowerCase();
+ if (recentText.includes(sn) || promptLower.includes(sn)) { skillName = skill.name; break; }
+ }
+ let params = {};
+ // Extract URLs and domains from recent text
+ const _um = recentText.match(/(https?:\/\/[^\s"'<>,]{5,120})/i);
+ const _eu = _um ? _um[1] : '';
+ const _dm = recentText.match(/\b([a-z0-9][-a-z0-9]*\.(?:com|io|ai|org|net|co|app|dev|xyz|me|info|gg|so|sh|cc)(?:\/[^\s"'<>,]{0,60})?)\b/i);
+ const _ed = _dm ? _dm[1] : '';
+ const _qm = recentText.match(/[""]([^""]{3,80})[""]/i) || recentText.match(/[`]([^`]{3,80})[`]/i);
+ const _eq = _qm ? _qm[1].trim() : '';
 
-     if (/search(?:ing)?|looking up|let me (?:find|look|check)|querying/i.test(recentText)) {
-       toolName = 'web_search';
-       const qm = recentText.match(/(?:search(?:ing)?\s+(?:for\s+|the web for\s+)?|looking (?:up|for)\s+|find(?:ing)?\s+|querying?\s+)[""]?([^"".\n]{5,80})/i);
-       if (qm) params.query = qm[1].trim().replace(/[.!?]$/, '');
-       else if (_eq) params.query = _eq;
-       else { const ctx = recentText.match(/(?:search|look(?:ing)?\s+(?:up|for|into))\s+(.{5,60}?)(?:\.|$|\n|to\s)/i); if (ctx) params.query = ctx[1].trim(); }
-     }
-     else if (/brows|navigat|visit|check.*(?:site|page|website)|open.*(?:page|site|url)|go(?:ing)?\s+to\s/i.test(recentText)) {
-       toolName = 'browser';
-       if (_eu) params.url = _eu;
-       else if (_ed) params.url = 'https://' + _ed;
-     }
-     else if (/fetch|read.*page|pull.*content|scrape|extract.*content/i.test(recentText)) {
-       toolName = 'web_fetch';
-       if (_eu) params.url = _eu;
-       else if (_ed) params.url = 'https://' + _ed;
-     }
-     else if (/memory.*search|search.*memory|recall|remember/i.test(recentText)) {
-       toolName = 'memory_search';
-       if (_eq) params.query = _eq;
-     }
-     else if (/read(?:ing)?.*(?:file|MEMORY|SOUL|AGENTS|\.md|\.json|\.txt)/i.test(recentText)) {
-       toolName = 'read';
-       const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|yml|yaml|toml|ts|jsx|tsx))/i);
-       if (fm) params.path = fm[1];
-     }
-     else if (/run(?:ning)?|exec|curl|command|shell|terminal|bash/i.test(recentText)) {
-       toolName = 'exec';
-       const cm = recentText.match(/[`""]([^`""]{3,80})[`""]/i);
-       if (cm) params.command = cm[1];
-     }
-     else if (/writ(?:ing)?|edit(?:ing)?|updat(?:ing)?|creat(?:ing)?/i.test(recentText)) {
-       toolName = 'write';
-       const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|jsx|tsx|ts|yml|yaml|toml|css|html))/i);
-       if (fm) params.path = fm[1];
-     }
-     else if (/weather|forecast/i.test(promptLower)) { toolName = 'exec'; skillName = skillName || 'Weather'; }
-     else if (/summar/i.test(promptLower)) { toolName = 'web_fetch'; skillName = skillName || 'Summarize'; }
-     // Last resort: URL/domain found but no tool match
-     else if (_eu || _ed) {
-       toolName = 'web_fetch';
-       params.url = _eu || ('https://' + _ed);
-     }
-     logDebugEvent('heuristic_gap', { tool: toolName, params, textSnippet: recentText.substring(recentText.length - 100) });
-     console.log(`[HEURISTIC:gap] tool=${toolName} params=${JSON.stringify(params)} text="${recentText.substring(recentText.length - 80)}"`);
-     if (onEvent) onEvent('tool_start', { tool: toolName, skillName, params, index: toolLog.length });
-     toolLog.push({ tool: toolName, skillName, params, status: 'called', startedAt: Date.now() });
-   }
+ if (/search(?:ing)?|looking up|let me (?:find|look|check)|querying/i.test(recentText)) {
+ toolName = 'web_search';
+ const qm = recentText.match(/(?:search(?:ing)?\s+(?:for\s+|the web for\s+)?|looking (?:up|for)\s+|find(?:ing)?\s+|querying?\s+)[""]?([^"".\n]{5,80})/i);
+ if (qm) params.query = qm[1].trim().replace(/[.!?]$/, '');
+ else if (_eq) params.query = _eq;
+ else { const ctx = recentText.match(/(?:search|look(?:ing)?\s+(?:up|for|into))\s+(.{5,60}?)(?:\.|$|\n|to\s)/i); if (ctx) params.query = ctx[1].trim(); }
+ }
+ else if (/brows|navigat|visit|check.*(?:site|page|website)|open.*(?:page|site|url)|go(?:ing)?\s+to\s/i.test(recentText)) {
+ toolName = 'browser';
+ if (_eu) params.url = _eu;
+ else if (_ed) params.url = 'https://' + _ed;
+ }
+ else if (/fetch|read.*page|pull.*content|scrape|extract.*content/i.test(recentText)) {
+ toolName = 'web_fetch';
+ if (_eu) params.url = _eu;
+ else if (_ed) params.url = 'https://' + _ed;
+ }
+ else if (/memory.*search|search.*memory|recall|remember/i.test(recentText)) {
+ toolName = 'memory_search';
+ if (_eq) params.query = _eq;
+ }
+ else if (/read(?:ing)?.*(?:file|MEMORY|SOUL|AGENTS|\.md|\.json|\.txt)/i.test(recentText)) {
+ toolName = 'read';
+ const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|yml|yaml|toml|ts|jsx|tsx))/i);
+ if (fm) params.path = fm[1];
+ }
+ else if (/run(?:ning)?|exec|curl|command|shell|terminal|bash/i.test(recentText)) {
+ toolName = 'exec';
+ const cm = recentText.match(/[`""]([^`""]{3,80})[`""]/i);
+ if (cm) params.command = cm[1];
+ }
+ else if (/writ(?:ing)?|edit(?:ing)?|updat(?:ing)?|creat(?:ing)?/i.test(recentText)) {
+ toolName = 'write';
+ const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|jsx|tsx|ts|yml|yaml|toml|css|html))/i);
+ if (fm) params.path = fm[1];
+ }
+ else if (/weather|forecast/i.test(promptLower)) { toolName = 'exec'; skillName = skillName || 'Weather'; }
+ else if (/summar/i.test(promptLower)) { toolName = 'web_fetch'; skillName = skillName || 'Summarize'; }
+ // Last resort: URL/domain found but no tool match
+ else if (_eu || _ed) {
+ toolName = 'web_fetch';
+ params.url = _eu || ('https://' + _ed);
+ }
+ logDebugEvent('heuristic_gap', { tool: toolName, params, textSnippet: recentText.substring(recentText.length - 100) });
+ console.log(`[HEURISTIC:gap] tool=${toolName} params=${JSON.stringify(params)} text="${recentText.substring(recentText.length - 80)}"`);
+ if (onEvent) onEvent('tool_start', { tool: toolName, skillName, params, index: toolLog.length });
+ toolLog.push({ tool: toolName, skillName, params, status: 'called', startedAt: Date.now() });
+ }
  }, 2000);
  if (onEvent) onEvent('text', { text: data.text });
  }
@@ -726,102 +726,102 @@ class OpenClawGateway {
  if (stream === 'lifecycle' && data?.phase === 'start') {
  lifecycleDepth++;
  if (lifecycleDepth > 1 && onEvent) {
-   // Nested lifecycle = tool execution. Try to guess tool + skill from context
-   let toolName = 'processing';
-   let skillName = null;
-   const recentText = textChunks.join('').slice(-300).toLowerCase();
-   const promptLower = (message || '').toLowerCase();
-   
-   // Try to match against installed skills first
-   for (const skill of installedSkills) {
-     const sn = skill.name.toLowerCase();
-     if (recentText.includes(sn) || promptLower.includes(sn)) {
-       skillName = skill.name;
-       break;
-     }
-     // Check skill content keywords (first 200 chars)
-     const keywords = skill.content.slice(0, 200).match(/\b\w{4,}\b/g) || [];
-     const matches = keywords.filter(k => promptLower.includes(k) || recentText.includes(k));
-     if (matches.length >= 2) {
-       skillName = skill.name;
-       break;
-     }
-   }
-   
-   let heuristicParams = {};
-   // Extract any URLs from recent text (useful for all web tools)
-   const _urlMatch = recentText.match(/(https?:\/\/[^\s"'<>,]{5,120})/i);
-   const _extractedUrl = _urlMatch ? _urlMatch[1] : '';
-   // Extract domain-like strings (e.g., linear.app, trustradius.com)
-   const _domainMatch = recentText.match(/\b([a-z0-9][-a-z0-9]*\.(?:com|io|ai|org|net|co|app|dev|xyz|me|info|gg|so|sh|cc)(?:\/[^\s"'<>,]{0,60})?)\b/i);
-   const _extractedDomain = _domainMatch ? _domainMatch[1] : '';
-   // Extract quoted strings as potential queries/labels
-   const _quotedMatch = recentText.match(/[""]([^""]{3,80})[""]/i) || recentText.match(/[`]([^`]{3,80})[`]/i);
-   const _extractedQuote = _quotedMatch ? _quotedMatch[1].trim() : '';
+ // Nested lifecycle = tool execution. Try to guess tool + skill from context
+ let toolName = 'processing';
+ let skillName = null;
+ const recentText = textChunks.join('').slice(-300).toLowerCase();
+ const promptLower = (message || '').toLowerCase();
+ 
+ // Try to match against installed skills first
+ for (const skill of installedSkills) {
+ const sn = skill.name.toLowerCase();
+ if (recentText.includes(sn) || promptLower.includes(sn)) {
+ skillName = skill.name;
+ break;
+ }
+ // Check skill content keywords (first 200 chars)
+ const keywords = skill.content.slice(0, 200).match(/\b\w{4,}\b/g) || [];
+ const matches = keywords.filter(k => promptLower.includes(k) || recentText.includes(k));
+ if (matches.length >= 2) {
+ skillName = skill.name;
+ break;
+ }
+ }
+ 
+ let heuristicParams = {};
+ // Extract any URLs from recent text (useful for all web tools)
+ const _urlMatch = recentText.match(/(https?:\/\/[^\s"'<>,]{5,120})/i);
+ const _extractedUrl = _urlMatch ? _urlMatch[1] : '';
+ // Extract domain-like strings (e.g., linear.app, trustradius.com)
+ const _domainMatch = recentText.match(/\b([a-z0-9][-a-z0-9]*\.(?:com|io|ai|org|net|co|app|dev|xyz|me|info|gg|so|sh|cc)(?:\/[^\s"'<>,]{0,60})?)\b/i);
+ const _extractedDomain = _domainMatch ? _domainMatch[1] : '';
+ // Extract quoted strings as potential queries/labels
+ const _quotedMatch = recentText.match(/[""]([^""]{3,80})[""]/i) || recentText.match(/[`]([^`]{3,80})[`]/i);
+ const _extractedQuote = _quotedMatch ? _quotedMatch[1].trim() : '';
 
-   if (/search(?:ing)?|looking up|let me (?:find|look|check)|querying/i.test(recentText)) {
-     toolName = 'web_search';
-     // Try multiple patterns for search queries
-     const qm = recentText.match(/(?:search(?:ing)?\s+(?:for\s+|the web for\s+)?|looking (?:up|for)\s+|find(?:ing)?\s+|querying?\s+)[""]?([^"".\n]{5,80})/i);
-     if (qm) heuristicParams.query = qm[1].trim().replace(/[.!?]$/, '');
-     else if (_extractedQuote) heuristicParams.query = _extractedQuote;
-     else {
-       // Try to extract query from context: "search" + nearby meaningful text
-       const ctx = recentText.match(/(?:search|look(?:ing)?\s+(?:up|for|into))\s+(.{5,60}?)(?:\.|$|\n|to\s)/i);
-       if (ctx) heuristicParams.query = ctx[1].trim().replace(/[.!?]$/, '');
-     }
-   }
-   else if (/brows|navigat|visit|check.*(?:site|page|website)|open.*(?:page|site|url)|go(?:ing)?\s+to\s/i.test(recentText)) {
-     toolName = 'browser';
-     if (_extractedUrl) heuristicParams.url = _extractedUrl;
-     else if (_extractedDomain) heuristicParams.url = 'https://' + _extractedDomain;
-   }
-   else if (/fetch|read.*page|pull.*content|scrape|extract.*content/i.test(recentText)) {
-     toolName = 'web_fetch';
-     if (_extractedUrl) heuristicParams.url = _extractedUrl;
-     else if (_extractedDomain) heuristicParams.url = 'https://' + _extractedDomain;
-   }
-   else if (/memory.*search|search.*memory|recall|remember/i.test(recentText)) {
-     toolName = 'memory_search';
-     if (_extractedQuote) heuristicParams.query = _extractedQuote;
-   }
-   else if (/read(?:ing)?.*(?:file|\.md|\.json|\.txt|\.js|\.py|\.yml|document)/i.test(recentText)) {
-     toolName = 'read';
-     const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|yml|yaml|toml|ts|jsx|tsx))/i);
-     if (fm) heuristicParams.path = fm[1];
-   }
-   else if (/run(?:ning)?|exec|curl|command|shell|terminal|bash/i.test(recentText)) {
-     toolName = 'exec';
-     const cm = recentText.match(/[`""]([^`""]{3,80})[`""]/i);
-     if (cm) heuristicParams.command = cm[1];
-   }
-   else if (/writ(?:ing)?|edit(?:ing)?|updat(?:ing)?|creat(?:ing)?/i.test(recentText)) {
-     toolName = 'write';
-     const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|jsx|tsx|ts|yml|yaml|toml|css|html))/i);
-     if (fm) heuristicParams.path = fm[1];
-   }
-   // Last resort: if we found a URL/domain but no tool match, it's probably web_fetch
-   else if (_extractedUrl || _extractedDomain) {
-     toolName = 'web_fetch';
-     heuristicParams.url = _extractedUrl || ('https://' + _extractedDomain);
-   }
+ if (/search(?:ing)?|looking up|let me (?:find|look|check)|querying/i.test(recentText)) {
+ toolName = 'web_search';
+ // Try multiple patterns for search queries
+ const qm = recentText.match(/(?:search(?:ing)?\s+(?:for\s+|the web for\s+)?|looking (?:up|for)\s+|find(?:ing)?\s+|querying?\s+)[""]?([^"".\n]{5,80})/i);
+ if (qm) heuristicParams.query = qm[1].trim().replace(/[.!?]$/, '');
+ else if (_extractedQuote) heuristicParams.query = _extractedQuote;
+ else {
+ // Try to extract query from context: "search" + nearby meaningful text
+ const ctx = recentText.match(/(?:search|look(?:ing)?\s+(?:up|for|into))\s+(.{5,60}?)(?:\.|$|\n|to\s)/i);
+ if (ctx) heuristicParams.query = ctx[1].trim().replace(/[.!?]$/, '');
+ }
+ }
+ else if (/brows|navigat|visit|check.*(?:site|page|website)|open.*(?:page|site|url)|go(?:ing)?\s+to\s/i.test(recentText)) {
+ toolName = 'browser';
+ if (_extractedUrl) heuristicParams.url = _extractedUrl;
+ else if (_extractedDomain) heuristicParams.url = 'https://' + _extractedDomain;
+ }
+ else if (/fetch|read.*page|pull.*content|scrape|extract.*content/i.test(recentText)) {
+ toolName = 'web_fetch';
+ if (_extractedUrl) heuristicParams.url = _extractedUrl;
+ else if (_extractedDomain) heuristicParams.url = 'https://' + _extractedDomain;
+ }
+ else if (/memory.*search|search.*memory|recall|remember/i.test(recentText)) {
+ toolName = 'memory_search';
+ if (_extractedQuote) heuristicParams.query = _extractedQuote;
+ }
+ else if (/read(?:ing)?.*(?:file|\.md|\.json|\.txt|\.js|\.py|\.yml|document)/i.test(recentText)) {
+ toolName = 'read';
+ const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|yml|yaml|toml|ts|jsx|tsx))/i);
+ if (fm) heuristicParams.path = fm[1];
+ }
+ else if (/run(?:ning)?|exec|curl|command|shell|terminal|bash/i.test(recentText)) {
+ toolName = 'exec';
+ const cm = recentText.match(/[`""]([^`""]{3,80})[`""]/i);
+ if (cm) heuristicParams.command = cm[1];
+ }
+ else if (/writ(?:ing)?|edit(?:ing)?|updat(?:ing)?|creat(?:ing)?/i.test(recentText)) {
+ toolName = 'write';
+ const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|jsx|tsx|ts|yml|yaml|toml|css|html))/i);
+ if (fm) heuristicParams.path = fm[1];
+ }
+ // Last resort: if we found a URL/domain but no tool match, it's probably web_fetch
+ else if (_extractedUrl || _extractedDomain) {
+ toolName = 'web_fetch';
+ heuristicParams.url = _extractedUrl || ('https://' + _extractedDomain);
+ }
 
-   // Log heuristic result for debugging
-   logDebugEvent('heuristic_lifecycle', { tool: toolName, params: heuristicParams, textSnippet: recentText.substring(recentText.length - 100) });
-   console.log(`[HEURISTIC] tool=${toolName} params=${JSON.stringify(heuristicParams)} text="${recentText.substring(recentText.length - 80)}"`);
+ // Log heuristic result for debugging
+ logDebugEvent('heuristic_lifecycle', { tool: toolName, params: heuristicParams, textSnippet: recentText.substring(recentText.length - 100) });
+ console.log(`[HEURISTIC] tool=${toolName} params=${JSON.stringify(heuristicParams)} text="${recentText.substring(recentText.length - 80)}"`);
 
-   onEvent('tool_start', { tool: toolName, skillName, params: heuristicParams, index: toolLog.length });
-   toolLog.push({ tool: toolName, skillName, params: heuristicParams, status: 'called', startedAt: Date.now() });
+ onEvent('tool_start', { tool: toolName, skillName, params: heuristicParams, index: toolLog.length });
+ toolLog.push({ tool: toolName, skillName, params: heuristicParams, status: 'called', startedAt: Date.now() });
  }
  }
  if (stream === 'lifecycle' && data?.phase === 'end') {
  if (lifecycleDepth > 1) {
-   const last = toolLog[toolLog.length - 1];
-   if (last && last.status === 'called') {
-     last.status = 'ok';
-     last.durationMs = Date.now() - (last.startedAt || Date.now());
-     if (onEvent) onEvent('tool_result', { tool: last.tool, skillName: last.skillName, params: {}, success: true, summary: `Completed in ${(last.durationMs / 1000).toFixed(1)}s`, index: toolLog.length - 1 });
-   }
+ const last = toolLog[toolLog.length - 1];
+ if (last && last.status === 'called') {
+ last.status = 'ok';
+ last.durationMs = Date.now() - (last.startedAt || Date.now());
+ if (onEvent) onEvent('tool_result', { tool: last.tool, skillName: last.skillName, params: {}, success: true, summary: `Completed in ${(last.durationMs / 1000).toFixed(1)}s`, index: toolLog.length - 1 });
+ }
  }
  lifecycleDepth = Math.max(0, lifecycleDepth - 1);
  }
@@ -834,21 +834,21 @@ class OpenClawGateway {
  // Track sub-agent spawning so we can associate the next new runId with this spawn
  const toolLower = (entry.tool || '').toLowerCase();
  if (toolLower === 'sessions_spawn' || toolLower === 'task' || toolLower === 'spawn' || toolLower.includes('subagent')) {
-   const params = entry.params || {};
-   pendingSubAgentSpawn = {
-     name: params.name || params.agentName || params.description?.substring(0, 40) || 'Sub-agent',
-     task: params.task || params.prompt || params.message || params.description || '',
-   };
-   pendingSpawnRunId = runId; // Track which runId initiated this spawn for parent→child tree
+ const params = entry.params || {};
+ pendingSubAgentSpawn = {
+ name: params.name || params.agentName || params.description?.substring(0, 40) || 'Sub-agent',
+ task: params.task || params.prompt || params.message || params.description || '',
+ };
+ pendingSpawnRunId = runId; // Track which runId initiated this spawn for parent→child tree
  }
  // Detect ACP agent spawn via tool name or exec command
  if (toolLower === 'acp_spawn' || toolLower === 'acp' ||
-     (toolLower === 'exec' && /openclaw\s+acp\s+spawn/i.test(JSON.stringify(entry.params)))) {
-   if (onEvent) onEvent('acp_session_start', {
-     agent: entry.params.agent || entry.params.name || 'claude',
-     sessionId: null,
-     permissions: entry.params.permissions || 'approve-reads',
-   });
+ (toolLower === 'exec' && /openclaw\s+acp\s+spawn/i.test(JSON.stringify(entry.params)))) {
+ if (onEvent) onEvent('acp_session_start', {
+ agent: entry.params.agent || entry.params.name || 'claude',
+ sessionId: null,
+ permissions: entry.params.permissions || 'approve-reads',
+ });
  }
  }
  if (stream === 'tool_result' && data) {
@@ -861,10 +861,10 @@ class OpenClawGateway {
  }
  // When sessions_spawn completes, emit subagent_done with parent/depth for tree rendering
  if (last?.tool === 'sessions_spawn' || last?.tool === 'Task') {
-   for (const [subRunId, subInfo] of activeSubAgents) {
-     if (onEvent) onEvent('subagent_done', { subAgentRunId: subRunId, parentRunId: subInfo.parentRunId, depth: subInfo.depth, subAgentName: subInfo.name, summary: last?.summary || '' });
-   }
-   activeSubAgents.clear();
+ for (const [subRunId, subInfo] of activeSubAgents) {
+ if (onEvent) onEvent('subagent_done', { subAgentRunId: subRunId, parentRunId: subInfo.parentRunId, depth: subInfo.depth, subAgentName: subInfo.name, summary: last?.summary || '' });
+ }
+ activeSubAgents.clear();
  }
  if (onEvent) onEvent('tool_result', {
  tool: last?.tool || 'unknown',
@@ -876,73 +876,73 @@ class OpenClawGateway {
  // Extract screenshot from browser tool results (MEDIA: path or base64 image content)
  const isBrowserScreenshot = last && /browser|screenshot/i.test(last.tool || '');
  if (isBrowserScreenshot && !data.is_error) {
-   try {
-     // Check for MEDIA: path in content
-     const contentStr = typeof data.content === 'string' ? data.content : JSON.stringify(data.content || '');
-     const mediaMatch = contentStr.match(/MEDIA:\s*([^\s"]+)/);
-     if (mediaMatch) {
-       const mediaPath = mediaMatch[1];
-       const b64 = execSync(
-         `docker exec openclaw-openclaw-gateway-1 bash -c 'cat "${mediaPath}" | base64 -w0'`,
-         { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }
-       ).toString().trim();
-       if (b64 && b64.length > 100 && onEvent) {
-         onEvent('screenshot_frame', { base64: b64, timestamp: Date.now() });
-       }
-     }
-     // Check for base64 image block in content array
-     if (Array.isArray(data.content)) {
-       const imgBlock = data.content.find(b => b.type === 'image' && b.source?.data);
-       if (imgBlock && onEvent) {
-         onEvent('screenshot_frame', { base64: imgBlock.source.data, timestamp: Date.now() });
-       }
-     }
-   } catch (e) { /* ignore screenshot extraction errors */ }
+ try {
+ // Check for MEDIA: path in content
+ const contentStr = typeof data.content === 'string' ? data.content : JSON.stringify(data.content || '');
+ const mediaMatch = contentStr.match(/MEDIA:\s*([^\s"]+)/);
+ if (mediaMatch) {
+ const mediaPath = mediaMatch[1];
+ const b64 = execSync(
+ `docker exec openclaw-openclaw-gateway-1 bash -c 'cat "${mediaPath}" | base64 -w0'`,
+ { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }
+ ).toString().trim();
+ if (b64 && b64.length > 100 && onEvent) {
+ onEvent('screenshot_frame', { base64: b64, timestamp: Date.now() });
+ }
+ }
+ // Check for base64 image block in content array
+ if (Array.isArray(data.content)) {
+ const imgBlock = data.content.find(b => b.type === 'image' && b.source?.data);
+ if (imgBlock && onEvent) {
+ onEvent('screenshot_frame', { base64: imgBlock.source.data, timestamp: Date.now() });
+ }
+ }
+ } catch (e) { /* ignore screenshot extraction errors */ }
  }
  // Extract diff artifact from diffs tool results (v2026.3.1 diffs plugin)
  if (last && last.tool === 'diffs' && !data.is_error) {
-   try {
-     const raw = typeof data.content === 'string' ? data.content : JSON.stringify(data.content || '');
-     const parsed = typeof data.content === 'string' ? JSON.parse(data.content) : data.content;
-     const details = parsed?.details || parsed;
-     if (details && (details.viewerUrl || details.imagePath || details.artifactId)) {
-       if (onEvent) onEvent('diff_artifact', {
-         artifactId: details.artifactId || null,
-         viewerUrl: details.viewerUrl || null,
-         viewerPath: details.viewerPath || null,
-         imagePath: details.imagePath || null,
-         title: details.title || null,
-         expiresAt: details.expiresAt || null,
-         inputKind: details.inputKind || null,
-         fileCount: details.fileCount || null,
-         mode: details.mode || null,
-       });
-     }
-   } catch (e) { /* ignore diff artifact extraction errors */ }
+ try {
+ const raw = typeof data.content === 'string' ? data.content : JSON.stringify(data.content || '');
+ const parsed = typeof data.content === 'string' ? JSON.parse(data.content) : data.content;
+ const details = parsed?.details || parsed;
+ if (details && (details.viewerUrl || details.imagePath || details.artifactId)) {
+ if (onEvent) onEvent('diff_artifact', {
+ artifactId: details.artifactId || null,
+ viewerUrl: details.viewerUrl || null,
+ viewerPath: details.viewerPath || null,
+ imagePath: details.imagePath || null,
+ title: details.title || null,
+ expiresAt: details.expiresAt || null,
+ inputKind: details.inputKind || null,
+ fileCount: details.fileCount || null,
+ mode: details.mode || null,
+ });
+ }
+ } catch (e) { /* ignore diff artifact extraction errors */ }
  }
  // Detect ACP session started from spawn result
  if (last?.tool === 'acp_spawn' || last?.tool === 'acp' ||
-     (last?.tool === 'exec' && /openclaw\s+acp\s+spawn/i.test(JSON.stringify(last.params || {})))) {
-   try {
-     const content = typeof data.content === 'string' ? data.content : JSON.stringify(data.content || '');
-     const sessionMatch = content.match(/session[:\s]+([a-f0-9-]+)/i);
-     if (sessionMatch && onEvent) {
-       const acpSessionId = sessionMatch[1];
-       acpSessionRegistry.set(acpSessionId, {
-         agent: last.params?.agent || 'claude',
-         status: 'running',
-         spawnedAt: Date.now(),
-         lastActivity: Date.now(),
-         permissions: last.params?.permissions || 'approve-reads',
-         output: (last.summary || '').substring(0, 500),
-       });
-       onEvent('acp_session_started', {
-         sessionId: acpSessionId,
-         agent: last.params?.agent || 'claude',
-         summary: (last.summary || '').substring(0, 200),
-       });
-     }
-   } catch {}
+ (last?.tool === 'exec' && /openclaw\s+acp\s+spawn/i.test(JSON.stringify(last.params || {})))) {
+ try {
+ const content = typeof data.content === 'string' ? data.content : JSON.stringify(data.content || '');
+ const sessionMatch = content.match(/session[:\s]+([a-f0-9-]+)/i);
+ if (sessionMatch && onEvent) {
+ const acpSessionId = sessionMatch[1];
+ acpSessionRegistry.set(acpSessionId, {
+ agent: last.params?.agent || 'claude',
+ status: 'running',
+ spawnedAt: Date.now(),
+ lastActivity: Date.now(),
+ permissions: last.params?.permissions || 'approve-reads',
+ output: (last.summary || '').substring(0, 500),
+ });
+ onEvent('acp_session_started', {
+ sessionId: acpSessionId,
+ agent: last.params?.agent || 'claude',
+ summary: (last.summary || '').substring(0, 200),
+ });
+ }
+ } catch {}
  }
  }
  if (stream === 'thinking' && data?.text) {
@@ -999,15 +999,15 @@ class OpenClawGateway {
  if (newFiles.length > 0) {
  console.log(`[OpenClaw] Found ${newFiles.length} new screenshot(s): ${newFiles.join(', ')}`);
  for (const f of newFiles) {
-   try {
-     const b64 = execSync(`docker exec openclaw-openclaw-gateway-1 bash -c 'cat "${f}" | base64 -w0'`, { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }).toString().trim();
-     const ext = f.split('.').pop().toLowerCase();
-     const mime = ext === 'jpg' || ext === 'jpeg' ? 'jpeg' : ext === 'webp' ? 'webp' : 'png';
-     if (b64.length > 100) {
-       response += `\n\n![screenshot](data:image/${mime};base64,${b64})`;
-       if (onEvent) onEvent('screenshot_frame', { base64: b64, timestamp: Date.now() });
-     }
-   } catch { /* ignore individual screenshot errors */ }
+ try {
+ const b64 = execSync(`docker exec openclaw-openclaw-gateway-1 bash -c 'cat "${f}" | base64 -w0'`, { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }).toString().trim();
+ const ext = f.split('.').pop().toLowerCase();
+ const mime = ext === 'jpg' || ext === 'jpeg' ? 'jpeg' : ext === 'webp' ? 'webp' : 'png';
+ if (b64.length > 100) {
+ response += `\n\n![screenshot](data:image/${mime};base64,${b64})`;
+ if (onEvent) onEvent('screenshot_frame', { base64: b64, timestamp: Date.now() });
+ }
+ } catch { /* ignore individual screenshot errors */ }
  }
  }
  } catch (e) {
@@ -1017,63 +1017,63 @@ class OpenClawGateway {
  // If no explicit tool events were captured, extract tool usage from response text + meta
  // The gateway doesn't stream tool_use/tool_result, so we infer from content
  if (response && toolLog.filter(t => t.tool !== 'processing').length === 0) {
-   const toolPatterns = [
-     { re: /\bweb[_\s]?search/gi, name: 'web_search' },
-     { re: /\bweb[_\s]?fetch/gi, name: 'web_fetch' },
-     { re: /\bbrowser/gi, name: 'browser' },
-     { re: /\bexec\b|ran a command|executed|terminal|command line|curl\b/gi, name: 'exec' },
-     { re: /\bread\b.*file|file.*\bread\b/gi, name: 'read' },
-     { re: /\bwrite\b.*file|file.*\bwrite\b/gi, name: 'write' },
-     { re: /\bmemory[_\s]?search/gi, name: 'memory_search' },
-     { re: /\bsessions?[_\s]?spawn/gi, name: 'sessions_spawn' },
-     { re: /web search|searched the web|search results|looked up|DuckDuckGo|Bing results|Google results|Brave Search|top result|here'?s what (?:I|the web) (?:found|says)|what the web (?:says|shows)/gi, name: 'web_search' },
-     { re: /browsed|navigat(?:ed|ing)|screenshot|webpage|opened.*page|visited.*(?:site|page|url)|pulled up|went to.*\.\w{2,}|checked.*(?:site|page)|loaded the page/gi, name: 'browser' },
-     { re: /fetched.*(?:page|url|content)|scraped|read.*(?:the )?page|extracted.*content/gi, name: 'web_fetch' },
-   ];
-   const detected = new Set();
-   for (const { re, name } of toolPatterns) {
-     if (re.test(response)) detected.add(name);
-   }
-   // Also check the original task/prompt for tool intent
-   const durationMs = result?.result?.meta?.durationMs || 0;
-   if (detected.size === 0 && durationMs > 4000) {
-     // Check if prompt requested specific tool use
-     const taskLower = (message || '').toLowerCase();
-     if (/search the web|look up|find out about|what is \w|who is \w/.test(taskLower)) detected.add('web_search');
-     else if (/browse|go to|visit|open|navigate|check.*site|\.com|\.ai|\.io/.test(taskLower)) detected.add('web_fetch');
-     else if (/weather|forecast|temperature/.test(taskLower)) detected.add('exec');
-     else if (/summarize|summarise|summary of/.test(taskLower)) detected.add('web_fetch');
-     else detected.add('processing');
-   }
-   // Extract URLs mentioned in response
-   const urlMatches = response.match(/https?:\/\/[^\s\)"\]>]+/gi) || [];
-   const urls = [...new Set(urlMatches)].slice(0, 10);
+ const toolPatterns = [
+ { re: /\bweb[_\s]?search/gi, name: 'web_search' },
+ { re: /\bweb[_\s]?fetch/gi, name: 'web_fetch' },
+ { re: /\bbrowser/gi, name: 'browser' },
+ { re: /\bexec\b|ran a command|executed|terminal|command line|curl\b/gi, name: 'exec' },
+ { re: /\bread\b.*file|file.*\bread\b/gi, name: 'read' },
+ { re: /\bwrite\b.*file|file.*\bwrite\b/gi, name: 'write' },
+ { re: /\bmemory[_\s]?search/gi, name: 'memory_search' },
+ { re: /\bsessions?[_\s]?spawn/gi, name: 'sessions_spawn' },
+ { re: /web search|searched the web|search results|looked up|DuckDuckGo|Bing results|Google results|Brave Search|top result|here'?s what (?:I|the web) (?:found|says)|what the web (?:says|shows)/gi, name: 'web_search' },
+ { re: /browsed|navigat(?:ed|ing)|screenshot|webpage|opened.*page|visited.*(?:site|page|url)|pulled up|went to.*\.\w{2,}|checked.*(?:site|page)|loaded the page/gi, name: 'browser' },
+ { re: /fetched.*(?:page|url|content)|scraped|read.*(?:the )?page|extracted.*content/gi, name: 'web_fetch' },
+ ];
+ const detected = new Set();
+ for (const { re, name } of toolPatterns) {
+ if (re.test(response)) detected.add(name);
+ }
+ // Also check the original task/prompt for tool intent
+ const durationMs = result?.result?.meta?.durationMs || 0;
+ if (detected.size === 0 && durationMs > 4000) {
+ // Check if prompt requested specific tool use
+ const taskLower = (message || '').toLowerCase();
+ if (/search the web|look up|find out about|what is \w|who is \w/.test(taskLower)) detected.add('web_search');
+ else if (/browse|go to|visit|open|navigate|check.*site|\.com|\.ai|\.io/.test(taskLower)) detected.add('web_fetch');
+ else if (/weather|forecast|temperature/.test(taskLower)) detected.add('exec');
+ else if (/summarize|summarise|summary of/.test(taskLower)) detected.add('web_fetch');
+ else detected.add('processing');
+ }
+ // Extract URLs mentioned in response
+ const urlMatches = response.match(/https?:\/\/[^\s\)"\]>]+/gi) || [];
+ const urls = [...new Set(urlMatches)].slice(0, 10);
 
-   // Extract a short summary (first ~150 chars of response, first sentence)
-   const firstSentence = response.replace(/\*\*/g, '').split(/[.!?\n]/)[0]?.trim()?.slice(0, 150) || '';
+ // Extract a short summary (first ~150 chars of response, first sentence)
+ const firstSentence = response.replace(/\*\*/g, '').split(/[.!?\n]/)[0]?.trim()?.slice(0, 150) || '';
 
-   // Build toolLog from detected tools (replace any generic 'processing' entries)
-   const detectedArr = [...detected];
-   // Clear generic processing entries
-   while (toolLog.length > 0 && toolLog[0].tool === 'processing') toolLog.shift();
-   for (const name of detectedArr) {
-     const entry = { tool: name, params: {}, status: 'ok', summary: '' };
-     if (name === 'web_search') {
-       // Extract search query from the original message
-       const queryMatch = (message || '').match(/(?:search|look up|find|what is|who is)\s+(?:the web\s+)?(?:for\s+)?["']?(.{5,60})["']?/i);
-       if (queryMatch) entry.params = { query: queryMatch[1].trim() };
-       entry.summary = urls.length > 0
-         ? `Found ${urls.length} result${urls.length > 1 ? 's' : ''}: ${urls.slice(0, 3).join(', ')}`
-         : firstSentence;
-     } else if (name === 'web_fetch' || name === 'browser') {
-       const targetUrl = urls[0] || (message || '').match(/(https?:\/\/[^\s]+|[\w-]+\.(?:com|ai|io|org|dev|net)[^\s]*)/i)?.[1] || '';
-       if (targetUrl) entry.params = { url: targetUrl };
-       entry.summary = firstSentence;
-     } else {
-       entry.summary = firstSentence;
-     }
-     toolLog.push(entry);
-   }
+ // Build toolLog from detected tools (replace any generic 'processing' entries)
+ const detectedArr = [...detected];
+ // Clear generic processing entries
+ while (toolLog.length > 0 && toolLog[0].tool === 'processing') toolLog.shift();
+ for (const name of detectedArr) {
+ const entry = { tool: name, params: {}, status: 'ok', summary: '' };
+ if (name === 'web_search') {
+ // Extract search query from the original message
+ const queryMatch = (message || '').match(/(?:search|look up|find|what is|who is)\s+(?:the web\s+)?(?:for\s+)?["']?(.{5,60})["']?/i);
+ if (queryMatch) entry.params = { query: queryMatch[1].trim() };
+ entry.summary = urls.length > 0
+ ? `Found ${urls.length} result${urls.length > 1 ? 's' : ''}: ${urls.slice(0, 3).join(', ')}`
+ : firstSentence;
+ } else if (name === 'web_fetch' || name === 'browser') {
+ const targetUrl = urls[0] || (message || '').match(/(https?:\/\/[^\s]+|[\w-]+\.(?:com|ai|io|org|dev|net)[^\s]*)/i)?.[1] || '';
+ if (targetUrl) entry.params = { url: targetUrl };
+ entry.summary = firstSentence;
+ } else {
+ entry.summary = firstSentence;
+ }
+ toolLog.push(entry);
+ }
  }
 
  const formattedToolLog = toolLog.map(t => ({
@@ -1093,9 +1093,9 @@ class OpenClawGateway {
  const listener = this._eventListeners.get(idempotencyKey);
  this._eventListeners.delete(idempotencyKey);
  if (listener) {
-   for (const [key, val] of this._eventListeners) {
-     if (val === listener) this._eventListeners.delete(key);
-   }
+ for (const [key, val] of this._eventListeners) {
+ if (val === listener) this._eventListeners.delete(key);
+ }
  }
  }
  }
@@ -1112,8 +1112,8 @@ const gateway = new OpenClawGateway(OPENCLAW_URL, OPENCLAW_GATEWAY_TOKEN);
 const _recentDebugEvents = [];
 const MAX_DEBUG_EVENTS = 200;
 function logDebugEvent(category, payload) {
-  _recentDebugEvents.push({ t: Date.now(), ts: new Date().toISOString(), category, ...payload });
-  if (_recentDebugEvents.length > MAX_DEBUG_EVENTS) _recentDebugEvents.splice(0, _recentDebugEvents.length - MAX_DEBUG_EVENTS);
+ _recentDebugEvents.push({ t: Date.now(), ts: new Date().toISOString(), category, ...payload });
+ if (_recentDebugEvents.length > MAX_DEBUG_EVENTS) _recentDebugEvents.splice(0, _recentDebugEvents.length - MAX_DEBUG_EVENTS);
 }
 
 // ── Legacy Poller Support (fallback if WebSocket is unavailable) ─────
@@ -1149,14 +1149,14 @@ const acpSessionRegistry = new Map(); // sessionId -> { agent, sessionKey, statu
 
 // Garbage-collect stale ACP sessions every 60 seconds
 setInterval(() => {
-  const now = Date.now();
-  const staleMs = 30 * 60 * 1000; // 30 minutes
-  for (const [sid, info] of acpSessionRegistry) {
-    if (info.status === 'closed' || (now - info.lastActivity > staleMs)) {
-      acpSessionRegistry.delete(sid);
-      console.log(`[ACP] GC: removed stale session ${sid} (agent=${info.agent})`);
-    }
-  }
+ const now = Date.now();
+ const staleMs = 30 * 60 * 1000; // 30 minutes
+ for (const [sid, info] of acpSessionRegistry) {
+ if (info.status === 'closed' || (now - info.lastActivity > staleMs)) {
+ acpSessionRegistry.delete(sid);
+ console.log(`[ACP] GC: removed stale session ${sid} (agent=${info.agent})`);
+ }
+ }
 }, 60000);
 
 // ── Agent Registry (maps CrabsHQ agent names to OpenClaw agentIds) ───
@@ -1227,51 +1227,51 @@ try {
  let changed = false;
  const sandbox = config?.agents?.defaults?.sandbox;
  if (sandbox && (!sandbox.browser || !sandbox.browser.allowHostControl)) {
-   if (!sandbox.browser) sandbox.browser = {};
-   sandbox.browser.allowHostControl = true;
-   changed = true;
-   console.log('[bridge] Migrated sandbox browser config: allowHostControl=true');
+ if (!sandbox.browser) sandbox.browser = {};
+ sandbox.browser.allowHostControl = true;
+ changed = true;
+ console.log('[bridge] Migrated sandbox browser config: allowHostControl=true');
  }
  // Startup migration: add maxSpawnDepth if missing
  if (config.agents?.defaults?.subagents && !config.agents.defaults.subagents.maxSpawnDepth) {
-   config.agents.defaults.subagents.maxSpawnDepth = 3;
-   changed = true;
-   console.log('[bridge] Migrated: added subagents.maxSpawnDepth=3');
+ config.agents.defaults.subagents.maxSpawnDepth = 3;
+ changed = true;
+ console.log('[bridge] Migrated: added subagents.maxSpawnDepth=3');
  }
  // Startup migration: add logging.maxFileBytes if missing
  if (config.logging && !config.logging.maxFileBytes) {
-   config.logging.maxFileBytes = 100000000;
-   changed = true;
-   console.log('[bridge] Migrated: added logging.maxFileBytes=100MB');
+ config.logging.maxFileBytes = 100000000;
+ changed = true;
+ console.log('[bridge] Migrated: added logging.maxFileBytes=100MB');
  }
  // Startup migration: add heartbeat.directPolicy if missing
  if (config.agents?.defaults?.heartbeat && !config.agents.defaults.heartbeat.directPolicy) {
-   config.agents.defaults.heartbeat.directPolicy = 'allow';
-   changed = true;
-   console.log('[bridge] Migrated: added heartbeat.directPolicy=allow');
+ config.agents.defaults.heartbeat.directPolicy = 'allow';
+ changed = true;
+ console.log('[bridge] Migrated: added heartbeat.directPolicy=allow');
  }
  // Startup migration: enable diffs plugin if missing (v2026.3.1 new tool)
  if (!config.plugins) config.plugins = {};
  if (!config.plugins.entries) config.plugins.entries = {};
  if (!config.plugins.entries.diffs) {
-   config.plugins.entries.diffs = { enabled: true };
-   changed = true;
-   console.log('[bridge] Migrated: enabled diffs plugin');
+ config.plugins.entries.diffs = { enabled: true };
+ changed = true;
+ console.log('[bridge] Migrated: enabled diffs plugin');
  }
  // Startup migration: add diffs to tools.allow if missing
  if (Array.isArray(config.tools?.allow) && !config.tools.allow.includes('diffs')) {
-   config.tools.allow.push('diffs');
-   changed = true;
-   console.log('[bridge] Migrated: added diffs to tools.allow');
+ config.tools.allow.push('diffs');
+ changed = true;
+ console.log('[bridge] Migrated: added diffs to tools.allow');
  }
  // Startup migration: restore gateway controlUi flags required for bridge proxy model
  const controlUi = config.gateway?.controlUi;
  if (controlUi && controlUi.dangerouslyAllowHostHeaderOriginFallback === false) {
-   controlUi.allowInsecureAuth = true;
-   controlUi.dangerouslyAllowHostHeaderOriginFallback = true;
-   controlUi.dangerouslyDisableDeviceAuth = true;
-   changed = true;
-   console.log('[bridge] Migrated: restored gateway controlUi flags for bridge proxy model');
+ controlUi.allowInsecureAuth = true;
+ controlUi.dangerouslyAllowHostHeaderOriginFallback = true;
+ controlUi.dangerouslyDisableDeviceAuth = true;
+ changed = true;
+ console.log('[bridge] Migrated: restored gateway controlUi flags for bridge proxy model');
  }
  // Startup migration: remove unrecognized config keys that cause validation errors
  if (config.security) { delete config.security; changed = true; console.log('[bridge] Migrated: removed unrecognized "security" key'); }
@@ -1291,28 +1291,28 @@ try {
  if (config.session?.maxAge) { delete config.session.maxAge; changed = true; }
  // Startup migration: enable ACP (Agent Client Protocol) support with acpx backend
  if (!config.acp) {
-   config.acp = {
-     enabled: true,
-     backend: 'acpx',
-     defaultAgent: 'claude',
-     allowedAgents: ['claude', 'codex', 'gemini', 'opencode'],
-     maxConcurrentSessions: 3,
-     dispatch: { enabled: true },
-   };
-   changed = true;
-   console.log('[bridge] Migrated: enabled ACP with acpx backend');
+ config.acp = {
+ enabled: true,
+ backend: 'acpx',
+ defaultAgent: 'claude',
+ allowedAgents: ['claude', 'codex', 'gemini', 'opencode'],
+ maxConcurrentSessions: 3,
+ dispatch: { enabled: true },
+ };
+ changed = true;
+ console.log('[bridge] Migrated: enabled ACP with acpx backend');
  }
  // Startup migration: ensure acpx plugin entry exists
  if (!config.plugins?.entries?.acpx) {
-   if (!config.plugins) config.plugins = {};
-   if (!config.plugins.entries) config.plugins.entries = {};
-   config.plugins.entries.acpx = { enabled: true };
-   changed = true;
-   console.log('[bridge] Migrated: enabled acpx plugin');
+ if (!config.plugins) config.plugins = {};
+ if (!config.plugins.entries) config.plugins.entries = {};
+ config.plugins.entries.acpx = { enabled: true };
+ changed = true;
+ console.log('[bridge] Migrated: enabled acpx plugin');
  }
  if (changed) {
-   writeFileSync(configPath, JSON.stringify(config, null, 2));
-   try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
+ writeFileSync(configPath, JSON.stringify(config, null, 2));
+ try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
  }
 } catch (e) { /* config not available yet */ }
 
@@ -1428,9 +1428,9 @@ async function handleIncomingTask(req, res) {
  // Include browser session info from skill-reported sessions or VNC
  const skillSession = getSkillBrowserSession();
  const browserSession = skillSession ? {
-   liveViewUrl: skillSession.liveViewUrl,
-   sessionId: skillSession.sessionId,
-   provider: skillSession.provider,
+ liveViewUrl: skillSession.liveViewUrl,
+ sessionId: skillSession.sessionId,
+ provider: skillSession.provider,
  } : null;
  return res.json({ success: true, result, requestId: id, via: 'websocket', agentId, browserSession });
  }
@@ -1482,8 +1482,8 @@ async function handleIncomingTaskStream(req, res) {
  // Keep-alive to prevent proxy timeouts + typing indicator keepalive (v2026.3.1)
  const keepAlive = setInterval(() => {
  if (!res.writableEnded) {
-   res.write(': keepalive\n\n');
-   sendSSE('typing_keepalive', { timestamp: Date.now() });
+ res.write(': keepalive\n\n');
+ sendSSE('typing_keepalive', { timestamp: Date.now() });
  }
  }, 15000);
 
@@ -1496,8 +1496,8 @@ async function handleIncomingTaskStream(req, res) {
  const isBrowserTask = context?.browserTask === true;
  let resolvedSystemPrompt = registered ? undefined : (systemPrompt || undefined);
  if (isBrowserTask && !registered) {
-   const browserHint = 'You have a browser tool available. Use it to complete this task. Navigate to URLs, interact with pages, take screenshots, and report results. Use DuckDuckGo instead of Google for web searches (Google blocks automated browsers).';
-   resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${browserHint}` : browserHint;
+ const browserHint = 'You have a browser tool available. Use it to complete this task. Navigate to URLs, interact with pages, take screenshots, and report results. Use DuckDuckGo instead of Google for web searches (Google blocks automated browsers).';
+ resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${browserHint}` : browserHint;
  }
 
  try {
@@ -1514,54 +1514,54 @@ async function handleIncomingTaskStream(req, res) {
 
  // Start live browser view when browser tool begins
  if (event === 'tool_start' && isBrowserTool(data?.tool)) {
-   if (screenshotPollerInterval) {
-     clearInterval(screenshotPollerInterval);
-   }
+ if (screenshotPollerInterval) {
+ clearInterval(screenshotPollerInterval);
+ }
 
-   // Extract domain from browser tool params (url, query, etc.)
-   const params = data?.params || data?.input || {};
-   const navUrl = params.url || params.uri || '';
-   let domain = '';
-   try { domain = navUrl ? new URL(navUrl.startsWith('http') ? navUrl : `https://${navUrl}`).hostname : ''; } catch {}
+ // Extract domain from browser tool params (url, query, etc.)
+ const params = data?.params || data?.input || {};
+ const navUrl = params.url || params.uri || '';
+ let domain = '';
+ try { domain = navUrl ? new URL(navUrl.startsWith('http') ? navUrl : `https://${navUrl}`).hostname : ''; } catch {}
 
-   // Priority: skill-reported live view > VNC > screenshot polling
-   const skillSession = getSkillBrowserSession();
-   if (skillSession?.liveViewUrl) {
-     sendSSE('browser_session', { liveViewUrl: skillSession.liveViewUrl, sessionId: skillSession.sessionId, domain, provider: skillSession.provider });
-     console.log(`[browser-session] Sent skill-reported live view URL to client: ${skillSession.liveViewUrl}`);
-   } else if (getVNCLiveViewUrl() && isVNCAvailable()) {
-     sendSSE('browser_session', { liveViewUrl: getVNCLiveViewUrl(), domain, provider: 'vnc' });
-     console.log(`[VNC] Sent live view URL to client`);
-   } else {
-     // Emit browser_session event so frontend knows a browser session started (screenshot polling mode)
-     sendSSE('browser_session', { domain, provider: 'screenshot', sessionId: null, liveViewUrl: null });
-     console.log(`[screenshot] Browser session started — polling screenshots from container`);
-     // Fallback: poll screenshots from container every 1.5s
-     // Search both the media root and common subdirs where screenshots may be saved
-     screenshotPollerInterval = setInterval(() => {
-       if (res.writableEnded) {
-         if (screenshotPollerInterval) clearInterval(screenshotPollerInterval);
-         return;
-       }
-       try {
-         const out = execSync(
-           `docker exec openclaw-openclaw-gateway-1 bash -c 'find /home/node/.openclaw/media/ /tmp/ -maxdepth 2 -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.webp" 2>/dev/null | head -20 | xargs -r ls -t 2>/dev/null | head -1 | xargs -r base64 -w0'`,
-           { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }
-         ).toString().trim();
-         if (out && out.length > 100) {
-           sendSSE('screenshot_frame', { base64: out, timestamp: Date.now() });
-         }
-       } catch (e) { /* ignore */ }
-     }, 1500);
-   }
+ // Priority: skill-reported live view > VNC > screenshot polling
+ const skillSession = getSkillBrowserSession();
+ if (skillSession?.liveViewUrl) {
+ sendSSE('browser_session', { liveViewUrl: skillSession.liveViewUrl, sessionId: skillSession.sessionId, domain, provider: skillSession.provider });
+ console.log(`[browser-session] Sent skill-reported live view URL to client: ${skillSession.liveViewUrl}`);
+ } else if (getVNCLiveViewUrl() && isVNCAvailable()) {
+ sendSSE('browser_session', { liveViewUrl: getVNCLiveViewUrl(), domain, provider: 'vnc' });
+ console.log(`[VNC] Sent live view URL to client`);
+ } else {
+ // Emit browser_session event so frontend knows a browser session started (screenshot polling mode)
+ sendSSE('browser_session', { domain, provider: 'screenshot', sessionId: null, liveViewUrl: null });
+ console.log(`[screenshot] Browser session started — polling screenshots from container`);
+ // Fallback: poll screenshots from container every 1.5s
+ // Search both the media root and common subdirs where screenshots may be saved
+ screenshotPollerInterval = setInterval(() => {
+ if (res.writableEnded) {
+ if (screenshotPollerInterval) clearInterval(screenshotPollerInterval);
+ return;
+ }
+ try {
+ const out = execSync(
+ `docker exec openclaw-openclaw-gateway-1 bash -c 'find /home/node/.openclaw/media/ /tmp/ -maxdepth 2 -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.webp" 2>/dev/null | head -20 | xargs -r ls -t 2>/dev/null | head -1 | xargs -r base64 -w0'`,
+ { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }
+ ).toString().trim();
+ if (out && out.length > 100) {
+ sendSSE('screenshot_frame', { base64: out, timestamp: Date.now() });
+ }
+ } catch (e) { /* ignore */ }
+ }, 1500);
+ }
  }
 
  // Stop screenshot poller when stream ends (not on individual tool_result — there may be multiple browser tool calls)
  if (event === 'done' || event === 'error') {
-   if (screenshotPollerInterval) {
-     clearInterval(screenshotPollerInterval);
-     screenshotPollerInterval = null;
-   }
+ if (screenshotPollerInterval) {
+ clearInterval(screenshotPollerInterval);
+ screenshotPollerInterval = null;
+ }
  }
  });
 
@@ -1588,17 +1588,17 @@ async function handleIncomingTaskStream(req, res) {
  sendSSE('error', { message: err.message, requestId: id });
  } finally {
  if (screenshotPollerInterval) {
-   clearInterval(screenshotPollerInterval);
-   screenshotPollerInterval = null;
+ clearInterval(screenshotPollerInterval);
+ screenshotPollerInterval = null;
  }
  clearInterval(keepAlive);
  // Signal browser session end — for skill-reported or any browser task
  const endSession = getSkillBrowserSession();
  if (endSession) {
-   try { sendSSE('browser_session_end', { sessionId: endSession.sessionId }); } catch {}
-   clearSkillBrowserSession();
+ try { sendSSE('browser_session_end', { sessionId: endSession.sessionId }); } catch {}
+ clearSkillBrowserSession();
  } else if (isBrowserTask) {
-   try { sendSSE('browser_session_end', { sessionId: null }); } catch {}
+ try { sendSSE('browser_session_end', { sessionId: null }); } catch {}
  }
  res.end();
  }
@@ -1609,39 +1609,39 @@ async function handleIncomingTaskStream(req, res) {
 // List directory contents (for CrabsHQ Files browser — screenshots, media, etc.)
 const ALLOWED_LIST_PATHS = ['/tmp/', '/home/node/.openclaw/workspace/', '/home/node/.openclaw/media/', '/opt/openclaw-data/workspace/'];
 app.get('/files', (req, res) => {
-  const dirPath = (req.query.path || '/').replace(/\/$/, '') || '/';
-  if (!ALLOWED_LIST_PATHS.some(d => dirPath.startsWith(d))) {
-    return res.status(403).json({ error: 'Path not allowed' });
-  }
-  try {
-    const out = execSync(
-      `docker exec openclaw-openclaw-gateway-1 ls -1 "${dirPath.replace(/"/g, '')}" 2>/dev/null || true`,
-      { encoding: 'utf8', timeout: 5000 }
-    );
-    const names = out.trim() ? out.trim().split('\n') : [];
-    const entries = [];
-    for (const name of names) {
-      if (!name || name === '.' || name === '..') continue;
-      const fullPath = dirPath.endsWith('/') ? dirPath + name : dirPath + '/' + name;
-      let type = 'file';
-      let size = 0;
-      let modified = null;
-      try {
-        const statOut = execSync(
-          `docker exec openclaw-openclaw-gateway-1 stat -c "%F|%s|%Y" "${fullPath.replace(/"/g, '')}" 2>/dev/null`,
-          { encoding: 'utf8', timeout: 2000 }
-        );
-        const [fileType, fileSize, mtime] = statOut.trim().split('|');
-        if (fileType === 'directory') type = 'dir';
-        size = parseInt(fileSize) || 0;
-        if (mtime) modified = parseInt(mtime) * 1000; // convert seconds to ms
-      } catch {}
-      entries.push({ name, type, path: fullPath, size, modified });
-    }
-    res.json({ files: entries });
-  } catch (e) {
-    res.status(404).json({ error: 'Directory not found' });
-  }
+ const dirPath = (req.query.path || '/').replace(/\/$/, '') || '/';
+ if (!ALLOWED_LIST_PATHS.some(d => dirPath.startsWith(d))) {
+ return res.status(403).json({ error: 'Path not allowed' });
+ }
+ try {
+ const out = execSync(
+ `docker exec openclaw-openclaw-gateway-1 ls -1 "${dirPath.replace(/"/g, '')}" 2>/dev/null || true`,
+ { encoding: 'utf8', timeout: 5000 }
+ );
+ const names = out.trim() ? out.trim().split('\n') : [];
+ const entries = [];
+ for (const name of names) {
+ if (!name || name === '.' || name === '..') continue;
+ const fullPath = dirPath.endsWith('/') ? dirPath + name : dirPath + '/' + name;
+ let type = 'file';
+ let size = 0;
+ let modified = null;
+ try {
+ const statOut = execSync(
+ `docker exec openclaw-openclaw-gateway-1 stat -c "%F|%s|%Y" "${fullPath.replace(/"/g, '')}" 2>/dev/null`,
+ { encoding: 'utf8', timeout: 2000 }
+ );
+ const [fileType, fileSize, mtime] = statOut.trim().split('|');
+ if (fileType === 'directory') type = 'dir';
+ size = parseInt(fileSize) || 0;
+ if (mtime) modified = parseInt(mtime) * 1000; // convert seconds to ms
+ } catch {}
+ entries.push({ name, type, path: fullPath, size, modified });
+ }
+ res.json({ files: entries });
+ } catch (e) {
+ res.status(404).json({ error: 'Directory not found' });
+ }
 });
 
 // Serve files from inside the OpenClaw container (screenshots, workspace files, etc.)
@@ -1662,6 +1662,30 @@ app.get('/files/*', (req, res) => {
  res.send(data);
  } catch (e) {
  res.status(404).json({ error: 'File not found' });
+ }
+});
+
+// ── Deploy logs (provisioning continuity) ─────────────────────────────
+// When bridge replaces the Python log server, serve deploy logs from /tmp
+// so provision.js can fetch final logs before returning success
+app.get('/deploy-logs', (req, res) => {
+ try {
+   const data = existsSync('/tmp/deploy.log') ? readFileSync('/tmp/deploy.log', 'utf8') : '[]';
+   res.set('Content-Type', 'application/json');
+   res.set('Access-Control-Allow-Origin', '*');
+   res.send(data);
+ } catch (e) {
+   res.status(500).json([]);
+ }
+});
+app.get('/deploy-logs-raw', (req, res) => {
+ try {
+   const data = existsSync('/tmp/deploy-raw.log') ? readFileSync('/tmp/deploy-raw.log', 'utf8') : '';
+   res.set('Content-Type', 'text/plain; charset=utf-8');
+   res.set('Access-Control-Allow-Origin', '*');
+   res.send(data);
+ } catch (e) {
+   res.status(500).send('');
  }
 });
 
@@ -1692,11 +1716,11 @@ app.get('/debug/events', (req, res) => {
  let events = _recentDebugEvents;
  if (category) events = events.filter(e => e.category === category);
  res.json({
-   total: _recentDebugEvents.length,
-   showing: Math.min(events.length, limit),
-   categories: [...new Set(_recentDebugEvents.map(e => e.category))],
-   help: 'Filter: ?category=raw_gateway|tool_use|heuristic_lifecycle|heuristic_gap|subagent_tool_use',
-   events: events.slice(-limit),
+ total: _recentDebugEvents.length,
+ showing: Math.min(events.length, limit),
+ categories: [...new Set(_recentDebugEvents.map(e => e.category))],
+ help: 'Filter: ?category=raw_gateway|tool_use|heuristic_lifecycle|heuristic_gap|subagent_tool_use',
+ events: events.slice(-limit),
  });
 });
 
@@ -1704,41 +1728,41 @@ app.get('/debug/events', (req, res) => {
 app.post('/files/write', (req, res) => {
  const { agentName, files } = req.body;
  if (!files || !Array.isArray(files) || files.length === 0) {
-   return res.status(400).json({ error: 'files array required: [{ path, content }]' });
+ return res.status(400).json({ error: 'files array required: [{ path, content }]' });
  }
  const name = agentName || 'main';
  let basePath;
  if (name === 'main' || name === 'Team Lead') {
-   basePath = '/opt/openclaw-data/workspace';
+ basePath = '/opt/openclaw-data/workspace';
  } else {
-   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-   const agentId = slug.startsWith('spc-') ? slug : 'spc-' + slug;
-   basePath = `/opt/openclaw-data/config/agents/${agentId}/workspace`;
+ const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+ const agentId = slug.startsWith('spc-') ? slug : 'spc-' + slug;
+ basePath = `/opt/openclaw-data/config/agents/${agentId}/workspace`;
  }
  try {
-   let written = 0;
-   for (const file of files) {
-     const { path: filePath, content, encoding } = file;
-     if (!filePath || typeof content !== 'string') continue;
-     // Security: prevent path traversal
-     const resolved = path.resolve(basePath, filePath);
-     if (!resolved.startsWith(basePath)) continue;
-     const dir = path.dirname(resolved);
-     execSync(`mkdir -p "${dir}"`, { timeout: 5000 });
-     if (encoding === 'base64') {
-       writeFileSync(resolved, Buffer.from(content, 'base64'));
-     } else {
-       writeFileSync(resolved, content);
-     }
-     written++;
-   }
-   if (written > 0) {
-     try { execSync(`chown -R 1000:1000 "${basePath}"`, { timeout: 5000 }); } catch {}
-   }
-   console.log(`📁 Wrote ${written} files to ${name}'s workspace`);
-   res.json({ success: true, written });
+ let written = 0;
+ for (const file of files) {
+ const { path: filePath, content, encoding } = file;
+ if (!filePath || typeof content !== 'string') continue;
+ // Security: prevent path traversal
+ const resolved = path.resolve(basePath, filePath);
+ if (!resolved.startsWith(basePath)) continue;
+ const dir = path.dirname(resolved);
+ execSync(`mkdir -p "${dir}"`, { timeout: 5000 });
+ if (encoding === 'base64') {
+ writeFileSync(resolved, Buffer.from(content, 'base64'));
+ } else {
+ writeFileSync(resolved, content);
+ }
+ written++;
+ }
+ if (written > 0) {
+ try { execSync(`chown -R 1000:1000 "${basePath}"`, { timeout: 5000 }); } catch {}
+ }
+ console.log(`📁 Wrote ${written} files to ${name}'s workspace`);
+ res.json({ success: true, written });
  } catch (err) {
-   res.status(500).json({ error: err.message });
+ res.status(500).json({ error: err.message });
  }
 });
 
@@ -1749,136 +1773,136 @@ app.post('/webhook/mission-control/stream', handleIncomingTaskStream);
 // ── Screen Recording — ffmpeg x11grab on display :99 ─────────────────
 // Used by the develop → test → record → approve workflow.
 // POST /recording/start → start recording, returns sessionId
-// POST /recording/stop  → stop recording, returns file path
-// GET  /recording/download/:id → serve the recorded mp4
+// POST /recording/stop → stop recording, returns file path
+// GET /recording/download/:id → serve the recorded mp4
 
 const activeRecordings = new Map(); // sessionId → { process, filePath, startTime }
 
 app.post('/recording/start', (req, res) => {
-  const sessionId = req.body.sessionId || `rec-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+ const sessionId = req.body.sessionId || `rec-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
 
-  if (activeRecordings.has(sessionId)) {
-    return res.json({ sessionId, status: 'already_recording' });
-  }
+ if (activeRecordings.has(sessionId)) {
+ return res.json({ sessionId, status: 'already_recording' });
+ }
 
-  // Detect display geometry from Xvnc/Xvfb
-  let geometry = '1280x800';
-  try {
-    const xdpyInfo = execSync('DISPLAY=:99 xdpyinfo 2>/dev/null | grep dimensions', { encoding: 'utf8', timeout: 3000 });
-    const match = xdpyInfo.match(/(\d+x\d+)/);
-    if (match) geometry = match[1];
-  } catch {}
+ // Detect display geometry from Xvnc/Xvfb
+ let geometry = '1280x800';
+ try {
+ const xdpyInfo = execSync('DISPLAY=:99 xdpyinfo 2>/dev/null | grep dimensions', { encoding: 'utf8', timeout: 3000 });
+ const match = xdpyInfo.match(/(\d+x\d+)/);
+ if (match) geometry = match[1];
+ } catch {}
 
-  const filePath = `/tmp/recording-${sessionId}.mp4`;
-  const ffmpegArgs = [
-    '-video_size', geometry,
-    '-framerate', '15',
-    '-f', 'x11grab',
-    '-i', ':99',
-    '-c:v', 'libx264',
-    '-preset', 'ultrafast',
-    '-crf', '28',
-    '-pix_fmt', 'yuv420p',
-    '-y', // overwrite
-    filePath,
-  ];
+ const filePath = `/tmp/recording-${sessionId}.mp4`;
+ const ffmpegArgs = [
+ '-video_size', geometry,
+ '-framerate', '15',
+ '-f', 'x11grab',
+ '-i', ':99',
+ '-c:v', 'libx264',
+ '-preset', 'ultrafast',
+ '-crf', '28',
+ '-pix_fmt', 'yuv420p',
+ '-y', // overwrite
+ filePath,
+ ];
 
-  try {
-    const ffmpeg = spawn('ffmpeg', ffmpegArgs, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, DISPLAY: ':99' },
-    });
+ try {
+ const ffmpeg = spawn('ffmpeg', ffmpegArgs, {
+ stdio: ['pipe', 'pipe', 'pipe'],
+ env: { ...process.env, DISPLAY: ':99' },
+ });
 
-    ffmpeg.stderr.on('data', (data) => {
-      // ffmpeg outputs progress to stderr — only log errors
-      const msg = data.toString();
-      if (msg.includes('Error') || msg.includes('error')) {
-        console.error(`[recording:${sessionId}] ffmpeg error: ${msg.trim()}`);
-      }
-    });
+ ffmpeg.stderr.on('data', (data) => {
+ // ffmpeg outputs progress to stderr — only log errors
+ const msg = data.toString();
+ if (msg.includes('Error') || msg.includes('error')) {
+ console.error(`[recording:${sessionId}] ffmpeg error: ${msg.trim()}`);
+ }
+ });
 
-    ffmpeg.on('error', (err) => {
-      console.error(`[recording:${sessionId}] ffmpeg spawn error: ${err.message}`);
-      activeRecordings.delete(sessionId);
-    });
+ ffmpeg.on('error', (err) => {
+ console.error(`[recording:${sessionId}] ffmpeg spawn error: ${err.message}`);
+ activeRecordings.delete(sessionId);
+ });
 
-    ffmpeg.on('exit', (code) => {
-      console.log(`[recording:${sessionId}] ffmpeg exited with code ${code}`);
-    });
+ ffmpeg.on('exit', (code) => {
+ console.log(`[recording:${sessionId}] ffmpeg exited with code ${code}`);
+ });
 
-    activeRecordings.set(sessionId, { process: ffmpeg, filePath, startTime: Date.now() });
-    console.log(`[recording] Started recording ${sessionId} → ${filePath} (${geometry})`);
-    res.json({ sessionId, filePath, geometry, status: 'recording' });
-  } catch (err) {
-    console.error(`[recording] Failed to start: ${err.message}`);
-    res.status(500).json({ error: `Failed to start recording: ${err.message}` });
-  }
+ activeRecordings.set(sessionId, { process: ffmpeg, filePath, startTime: Date.now() });
+ console.log(`[recording] Started recording ${sessionId} → ${filePath} (${geometry})`);
+ res.json({ sessionId, filePath, geometry, status: 'recording' });
+ } catch (err) {
+ console.error(`[recording] Failed to start: ${err.message}`);
+ res.status(500).json({ error: `Failed to start recording: ${err.message}` });
+ }
 });
 
 app.post('/recording/stop', (req, res) => {
-  const sessionId = req.body.sessionId;
-  if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
+ const sessionId = req.body.sessionId;
+ if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
 
-  const recording = activeRecordings.get(sessionId);
-  if (!recording) return res.status(404).json({ error: 'No active recording with this sessionId' });
+ const recording = activeRecordings.get(sessionId);
+ if (!recording) return res.status(404).json({ error: 'No active recording with this sessionId' });
 
-  // Send SIGINT to ffmpeg for graceful shutdown (finalizes mp4 container)
-  try {
-    recording.process.kill('SIGINT');
-  } catch {}
+ // Send SIGINT to ffmpeg for graceful shutdown (finalizes mp4 container)
+ try {
+ recording.process.kill('SIGINT');
+ } catch {}
 
-  // Wait briefly for ffmpeg to finalize the file
-  setTimeout(() => {
-    activeRecordings.delete(sessionId);
-    const duration = Math.round((Date.now() - recording.startTime) / 1000);
-    let fileSize = 0;
-    try {
-      const stat = execSync(`stat -c %s "${recording.filePath}" 2>/dev/null`, { encoding: 'utf8', timeout: 2000 });
-      fileSize = parseInt(stat.trim()) || 0;
-    } catch {}
+ // Wait briefly for ffmpeg to finalize the file
+ setTimeout(() => {
+ activeRecordings.delete(sessionId);
+ const duration = Math.round((Date.now() - recording.startTime) / 1000);
+ let fileSize = 0;
+ try {
+ const stat = execSync(`stat -c %s "${recording.filePath}" 2>/dev/null`, { encoding: 'utf8', timeout: 2000 });
+ fileSize = parseInt(stat.trim()) || 0;
+ } catch {}
 
-    console.log(`[recording] Stopped ${sessionId} — ${duration}s, ${(fileSize / 1024 / 1024).toFixed(1)}MB`);
-    res.json({
-      sessionId,
-      filePath: recording.filePath,
-      duration,
-      fileSize,
-      downloadUrl: `/recording/download/${sessionId}`,
-      status: 'stopped',
-    });
-  }, 1500);
+ console.log(`[recording] Stopped ${sessionId} — ${duration}s, ${(fileSize / 1024 / 1024).toFixed(1)}MB`);
+ res.json({
+ sessionId,
+ filePath: recording.filePath,
+ duration,
+ fileSize,
+ downloadUrl: `/recording/download/${sessionId}`,
+ status: 'stopped',
+ });
+ }, 1500);
 });
 
 app.get('/recording/download/:id', (req, res) => {
-  const sessionId = req.params.id;
-  const filePath = `/tmp/recording-${sessionId}.mp4`;
+ const sessionId = req.params.id;
+ const filePath = `/tmp/recording-${sessionId}.mp4`;
 
-  try {
-    if (!existsSync(filePath)) {
-      return res.status(404).json({ error: 'Recording not found' });
-    }
-    const data = readFileSync(filePath);
-    res.set('Content-Type', 'video/mp4');
-    res.set('Content-Disposition', `inline; filename="recording-${sessionId}.mp4"`);
-    res.set('Cache-Control', 'public, max-age=3600');
-    res.send(data);
-  } catch (err) {
-    res.status(500).json({ error: `Failed to serve recording: ${err.message}` });
-  }
+ try {
+ if (!existsSync(filePath)) {
+ return res.status(404).json({ error: 'Recording not found' });
+ }
+ const data = readFileSync(filePath);
+ res.set('Content-Type', 'video/mp4');
+ res.set('Content-Disposition', `inline; filename="recording-${sessionId}.mp4"`);
+ res.set('Cache-Control', 'public, max-age=3600');
+ res.send(data);
+ } catch (err) {
+ res.status(500).json({ error: `Failed to serve recording: ${err.message}` });
+ }
 });
 
 // List active recordings
 app.get('/recording/status', (req, res) => {
-  const recordings = [];
-  for (const [sessionId, rec] of activeRecordings) {
-    recordings.push({
-      sessionId,
-      filePath: rec.filePath,
-      duration: Math.round((Date.now() - rec.startTime) / 1000),
-      status: 'recording',
-    });
-  }
-  res.json({ recordings });
+ const recordings = [];
+ for (const [sessionId, rec] of activeRecordings) {
+ recordings.push({
+ sessionId,
+ filePath: rec.filePath,
+ duration: Math.round((Date.now() - rec.startTime) / 1000),
+ status: 'recording',
+ });
+ }
+ res.json({ recordings });
 });
 
 // ── Agent CRUD — Create/Update/Delete SPC agents on OpenClaw ─────────
@@ -2024,12 +2048,12 @@ app.put('/agents/:name', (req, res) => {
  const entry = (config.agents.list || []).find(a => a.id === agent.agentId);
  if (entry) {
  if (model) {
-   entry.model = {
-    primary: normalizeModelId(model),
-    ...(updateFallbacks?.length ? { fallbacks: updateFallbacks.map(normalizeModelId) } : (entry.model?.fallbacks ? { fallbacks: entry.model.fallbacks } : {})),
-   };
+ entry.model = {
+ primary: normalizeModelId(model),
+ ...(updateFallbacks?.length ? { fallbacks: updateFallbacks.map(normalizeModelId) } : (entry.model?.fallbacks ? { fallbacks: entry.model.fallbacks } : {})),
+ };
  } else if (updateFallbacks?.length && entry.model) {
-   entry.model.fallbacks = updateFallbacks.map(normalizeModelId);
+ entry.model.fallbacks = updateFallbacks.map(normalizeModelId);
  }
  if (updateParams) entry.params = updateParams;
  }
@@ -2253,28 +2277,28 @@ app.post('/agents/sync-knowledge', (req, res) => {
  // Group by type for structured markdown
  const grouped = {};
  knowledge.forEach(k => {
-  const type = k.type || 'general';
-  if (!grouped[type]) grouped[type] = [];
-  grouped[type].push(k);
+ const type = k.type || 'general';
+ if (!grouped[type]) grouped[type] = [];
+ grouped[type].push(k);
  });
 
  const typeLabels = {
-  decision: 'Decisions',
-  fact: 'Facts & Context',
-  preference: 'Preferences & Guidelines',
-  lesson: 'Lessons Learned',
-  general: 'General Knowledge',
+ decision: 'Decisions',
+ fact: 'Facts & Context',
+ preference: 'Preferences & Guidelines',
+ lesson: 'Lessons Learned',
+ general: 'General Knowledge',
  };
 
  let content = '# Team Knowledge\n\n_Auto-synced durable knowledge extracted from agent work. Reference this for context on decisions, facts, and lessons._\n\n';
  for (const [type, entries] of Object.entries(grouped)) {
-  content += `## ${typeLabels[type] || type.charAt(0).toUpperCase() + type.slice(1)}\n`;
-  entries.forEach(k => {
-   const source = k.agentName ? ` _(from ${k.agentName})_` : '';
-   const tags = k.tags?.length ? ` [${k.tags.join(', ')}]` : '';
-   content += `- ${k.content}${source}${tags}\n`;
-  });
-  content += '\n';
+ content += `## ${typeLabels[type] || type.charAt(0).toUpperCase() + type.slice(1)}\n`;
+ entries.forEach(k => {
+ const source = k.agentName ? ` _(from ${k.agentName})_` : '';
+ const tags = k.tags?.length ? ` [${k.tags.join(', ')}]` : '';
+ content += `- ${k.content}${source}${tags}\n`;
+ });
+ content += '\n';
  }
 
  // Write to LEAD workspace
@@ -2285,14 +2309,14 @@ app.post('/agents/sync-knowledge', (req, res) => {
  const agentsDir = '/opt/openclaw-data/config/agents';
  let spcCount = 0;
  try {
-  const agents = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
-  for (const agent of agents) {
-   const spcWs = `${agentsDir}/${agent}/workspace`;
-   mkdirSync(spcWs, { recursive: true });
-   writeFileSync(`${spcWs}/KNOWLEDGE.md`, content);
-   execSync(`chown -R 1000:1000 ${agentsDir}/${agent}`, { timeout: 5000 });
-   spcCount++;
-  }
+ const agents = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
+ for (const agent of agents) {
+ const spcWs = `${agentsDir}/${agent}/workspace`;
+ mkdirSync(spcWs, { recursive: true });
+ writeFileSync(`${spcWs}/KNOWLEDGE.md`, content);
+ execSync(`chown -R 1000:1000 ${agentsDir}/${agent}`, { timeout: 5000 });
+ spcCount++;
+ }
  } catch {}
  console.log(`📋 Synced ${knowledge.length} knowledge entries to main + ${spcCount} SPCs`);
  res.json({ success: true, synced: spcCount + 1, entries: knowledge.length });
@@ -2344,29 +2368,29 @@ app.post('/webhook/background', async (req, res) => {
 // LLM Vision — routes through OpenClaw gateway (uses its configured API key)
 app.post('/llm/vision', async (req, res) => {
  try {
-   const { messages, model } = req.body;
-   if (!messages || !messages.length) return res.status(400).json({ error: 'messages required' });
+ const { messages, model } = req.body;
+ if (!messages || !messages.length) return res.status(400).json({ error: 'messages required' });
 
-   const gatewayUrl = process.env.OPENCLAW_URL || 'http://127.0.0.1:18789';
-   const gatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN || '';
+ const gatewayUrl = process.env.OPENCLAW_URL || 'http://127.0.0.1:18789';
+ const gatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN || '';
 
-   const resp = await fetch(`${gatewayUrl}/v1/chat/completions`, {
-     method: 'POST',
-     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${gatewayToken}` },
-     body: JSON.stringify({ model: model || 'claude-3-5-sonnet-20241022', messages, max_tokens: 400 }),
-   });
+ const resp = await fetch(`${gatewayUrl}/v1/chat/completions`, {
+ method: 'POST',
+ headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${gatewayToken}` },
+ body: JSON.stringify({ model: model || 'claude-3-5-sonnet-20241022', messages, max_tokens: 400 }),
+ });
 
-   if (!resp.ok) {
-     const errText = await resp.text().catch(() => '');
-     console.error('[llm/vision] Gateway error:', resp.status, errText.substring(0, 100));
-     return res.status(resp.status).json({ error: `Gateway error: ${resp.status}` });
-   }
+ if (!resp.ok) {
+ const errText = await resp.text().catch(() => '');
+ console.error('[llm/vision] Gateway error:', resp.status, errText.substring(0, 100));
+ return res.status(resp.status).json({ error: `Gateway error: ${resp.status}` });
+ }
 
-   const data = await resp.json();
-   return res.json({ content: data.choices?.[0]?.message?.content?.trim() || '' });
+ const data = await resp.json();
+ return res.json({ content: data.choices?.[0]?.message?.content?.trim() || '' });
  } catch (err) {
-   console.error('[llm/vision] Error:', err.message);
-   res.status(500).json({ error: err.message });
+ console.error('[llm/vision] Error:', err.message);
+ res.status(500).json({ error: err.message });
  }
 });
 
@@ -2649,22 +2673,22 @@ app.get('/skills/installed', (req, res) => {
 // even when gatewayUrl (Caddy) is not set.
 
 app.all('/desktop-api/*', async (req, res) => {
-  const path = req.path.replace('/desktop-api', '');
-  try {
-    const fetchOpts = {
-      method: req.method,
-      headers: { 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(15000),
-    };
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      fetchOpts.body = JSON.stringify(req.body);
-    }
-    const resp = await fetch(`http://127.0.0.1:4567${path}`, fetchOpts);
-    const data = await resp.json();
-    res.status(resp.status).json(data);
-  } catch (e) {
-    res.status(502).json({ error: `Desktop API unreachable: ${e.message}` });
-  }
+ const path = req.path.replace('/desktop-api', '');
+ try {
+ const fetchOpts = {
+ method: req.method,
+ headers: { 'Content-Type': 'application/json' },
+ signal: AbortSignal.timeout(15000),
+ };
+ if (req.method !== 'GET' && req.method !== 'HEAD') {
+ fetchOpts.body = JSON.stringify(req.body);
+ }
+ const resp = await fetch(`http://127.0.0.1:4567${path}`, fetchOpts);
+ const data = await resp.json();
+ res.status(resp.status).json(data);
+ } catch (e) {
+ res.status(502).json({ error: `Desktop API unreachable: ${e.message}` });
+ }
 });
 
 // ── Gateway Management ───────────────────────────────────────────────
@@ -2675,8 +2699,8 @@ app.post('/gateway/restart', (req, res) => {
  execSync('docker restart openclaw-gateway 2>&1', { timeout: 30000 });
  // Re-approve device and reconnect after restart
  setTimeout(async () => {
-   try { execSync(`docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`, { timeout: 15000 }); } catch {}
-   gateway.connect();
+ try { execSync(`docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`, { timeout: 15000 }); } catch {}
+ gateway.connect();
  }, 5000);
  res.json({ success: true, message: 'Gateway container restarted' });
  } catch (err) {
@@ -2873,7 +2897,7 @@ app.post('/config/api-keys', async (req, res) => {
  config.tools.web.search.apiKey = braveKey;
  // Ensure web_search is in the tools.allow list
  if (Array.isArray(config.tools.allow) && !config.tools.allow.includes('web_search')) {
-   config.tools.allow.push('web_search');
+ config.tools.allow.push('web_search');
  }
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
  await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json');
@@ -2894,7 +2918,7 @@ function normalizeModelId(model) {
  // Update default model in openclaw.json
  if (defaultModel) {
  try {
-  const normalizedModel = normalizeModelId(defaultModel);
+ const normalizedModel = normalizeModelId(defaultModel);
  const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
  if (!config.agents) config.agents = {};
  if (!config.agents.defaults) config.agents.defaults = {};
@@ -2931,16 +2955,16 @@ function normalizeModelId(model) {
 
  for (const { key, profileId, provider } of keysToUpdate) {
  if (provider === 'anthropic') {
-   // Distinguish API keys from OAuth tokens: sk-ant-oat-* are OAuth, sk-ant-api* are API keys
-   const isOAuthToken = key.startsWith('sk-ant-oat');
-   const isApiKey = key.startsWith('sk-ant-') && !isOAuthToken;
-   auth.profiles[profileId] = isApiKey
-    ? { type: 'key', provider: 'anthropic', key }
-    : isOAuthToken
-    ? { type: 'token', provider: 'anthropic', token: key }
-    : { type: 'key', provider: 'anthropic', key };
+ // Distinguish API keys from OAuth tokens: sk-ant-oat-* are OAuth, sk-ant-api* are API keys
+ const isOAuthToken = key.startsWith('sk-ant-oat');
+ const isApiKey = key.startsWith('sk-ant-') && !isOAuthToken;
+ auth.profiles[profileId] = isApiKey
+ ? { type: 'key', provider: 'anthropic', key }
+ : isOAuthToken
+ ? { type: 'token', provider: 'anthropic', token: key }
+ : { type: 'key', provider: 'anthropic', key };
  } else {
-   auth.profiles[profileId] = { type: 'key', provider, key };
+ auth.profiles[profileId] = { type: 'key', provider, key };
  }
  auth.lastGood[provider] = profileId;
  }
@@ -2953,14 +2977,14 @@ function normalizeModelId(model) {
  try {
  const agentsDir = '/opt/openclaw-data/config/agents';
  const agentDirs = readdirSync(agentsDir, { withFileTypes: true })
-   .filter(d => d.isDirectory() && d.name !== 'main');
+ .filter(d => d.isDirectory() && d.name !== 'main');
  const updatedAuth = readFileSync(authPath, 'utf8');
  for (const dir of agentDirs) {
-   const subAuthPath = `${agentsDir}/${dir.name}/agent/auth-profiles.json`;
-   if (existsSync(subAuthPath)) {
-    writeFileSync(subAuthPath, updatedAuth);
-    await run(`chown 1000:1000 ${subAuthPath} && chmod 600 ${subAuthPath}`);
-   }
+ const subAuthPath = `${agentsDir}/${dir.name}/agent/auth-profiles.json`;
+ if (existsSync(subAuthPath)) {
+ writeFileSync(subAuthPath, updatedAuth);
+ await run(`chown 1000:1000 ${subAuthPath} && chmod 600 ${subAuthPath}`);
+ }
  }
  } catch (e) { console.error('Failed to propagate auth to sub-agents:', e.message); }
  } catch (e) { console.error('Failed to update auth-profiles.json:', e.message); _syncWarnings.push(`Auth profiles update failed: ${e.message}`); }
@@ -2971,38 +2995,38 @@ function normalizeModelId(model) {
  {
  const providerConfigs = {
  anthropic: { key: anthropicKey, config: {
-   baseUrl: 'https://api.anthropic.com', api: 'anthropic-messages',
-   models: [
-    { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', contextWindow: 200000 },
-    { id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5', contextWindow: 200000 },
-    { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', contextWindow: 200000 },
-    { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', contextWindow: 200000 },
-   ] }},
+ baseUrl: 'https://api.anthropic.com', api: 'anthropic-messages',
+ models: [
+ { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', contextWindow: 200000 },
+ { id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5', contextWindow: 200000 },
+ { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', contextWindow: 200000 },
+ { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', contextWindow: 200000 },
+ ] }},
  openai: { key: openaiKey, config: {
-   baseUrl: 'https://api.openai.com/v1', api: 'openai-completions',
-   models: [
-    { id: 'gpt-5.2', name: 'GPT-5.2', contextWindow: 128000 },
-    { id: 'gpt-5.0', name: 'GPT-5.0', contextWindow: 128000 },
-   ] }},
+ baseUrl: 'https://api.openai.com/v1', api: 'openai-completions',
+ models: [
+ { id: 'gpt-5.2', name: 'GPT-5.2', contextWindow: 128000 },
+ { id: 'gpt-5.0', name: 'GPT-5.0', contextWindow: 128000 },
+ ] }},
  google: { key: geminiKey, config: {
-   baseUrl: 'https://generativelanguage.googleapis.com/v1beta', api: 'google-generative-ai',
-   models: [
-    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', contextWindow: 1000000 },
-    { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', contextWindow: 1000000 },
-   ] }},
+ baseUrl: 'https://generativelanguage.googleapis.com/v1beta', api: 'google-generative-ai',
+ models: [
+ { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', contextWindow: 1000000 },
+ { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', contextWindow: 1000000 },
+ ] }},
  openrouter: { key: openrouterKey, config: {
-   baseUrl: 'https://openrouter.ai/api/v1', api: 'openai-completions',
-   models: [
-    { id: 'anthropic/claude-sonnet-4-5', name: 'Claude Sonnet 4.5 (OR)', contextWindow: 200000 },
-    { id: 'openai/gpt-5.2', name: 'GPT-5.2 (OR)', contextWindow: 128000 },
-    { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro (OR)', contextWindow: 1000000 },
-   ] }},
+ baseUrl: 'https://openrouter.ai/api/v1', api: 'openai-completions',
+ models: [
+ { id: 'anthropic/claude-sonnet-4-5', name: 'Claude Sonnet 4.5 (OR)', contextWindow: 200000 },
+ { id: 'openai/gpt-5.2', name: 'GPT-5.2 (OR)', contextWindow: 128000 },
+ { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro (OR)', contextWindow: 1000000 },
+ ] }},
  mistral: { key: mistralKey, config: {
-   baseUrl: 'https://api.mistral.ai/v1', api: 'openai-completions',
-   models: [
-    { id: 'mistral-large-latest', name: 'Mistral Large', contextWindow: 128000 },
-    { id: 'mistral-medium-latest', name: 'Mistral Medium', contextWindow: 32000 },
-   ] }},
+ baseUrl: 'https://api.mistral.ai/v1', api: 'openai-completions',
+ models: [
+ { id: 'mistral-large-latest', name: 'Mistral Large', contextWindow: 128000 },
+ { id: 'mistral-medium-latest', name: 'Mistral Medium', contextWindow: 32000 },
+ ] }},
  };
  const newProviders = Object.entries(providerConfigs).filter(([, entry]) => entry.key !== undefined);
  if (newProviders.length > 0) {
@@ -3013,15 +3037,15 @@ function normalizeModelId(model) {
  if (!config.models.providers) config.models.providers = {};
  let changed = false;
  for (const [providerName, entry] of newProviders) {
-   if (!config.models.providers[providerName]) {
-    config.models.providers[providerName] = entry.config;
-    changed = true;
-    console.log(`[bridge] Added models.providers.${providerName} to openclaw.json`);
-   }
+ if (!config.models.providers[providerName]) {
+ config.models.providers[providerName] = entry.config;
+ changed = true;
+ console.log(`[bridge] Added models.providers.${providerName} to openclaw.json`);
+ }
  }
  if (changed) {
-   writeFileSync(configPath, JSON.stringify(config, null, 2));
-   await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json');
+ writeFileSync(configPath, JSON.stringify(config, null, 2));
+ await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json');
  }
  } catch (e) { console.error('Failed to update openclaw.json providers:', e.message); }
  }
@@ -3029,18 +3053,18 @@ function normalizeModelId(model) {
 
  // Ensure MISTRAL_API_KEY is passed through docker-compose override
  if (mistralKey !== undefined) {
-  try {
-   const overridePath = '/opt/openclaw/docker-compose.override.yml';
-   let override = readFileSync(overridePath, 'utf8');
-   if (!override.includes('MISTRAL_API_KEY')) {
-    override = override.replace(
-     /(OPENROUTER_API_KEY:[^\n]*\n)/,
-     `$1      MISTRAL_API_KEY: \${MISTRAL_API_KEY:-}\n`
-    );
-    writeFileSync(overridePath, override);
-    console.log('[bridge] Added MISTRAL_API_KEY to docker-compose.override.yml');
-   }
-  } catch (e) { console.error('Failed to patch docker-compose override:', e.message); }
+ try {
+ const overridePath = '/opt/openclaw/docker-compose.override.yml';
+ let override = readFileSync(overridePath, 'utf8');
+ if (!override.includes('MISTRAL_API_KEY')) {
+ override = override.replace(
+ /(OPENROUTER_API_KEY:[^\n]*\n)/,
+ `$1 MISTRAL_API_KEY: \${MISTRAL_API_KEY:-}\n`
+ );
+ writeFileSync(overridePath, override);
+ console.log('[bridge] Added MISTRAL_API_KEY to docker-compose.override.yml');
+ }
+ } catch (e) { console.error('Failed to patch docker-compose override:', e.message); }
  }
 
  console.log('Restarting OpenClaw containers after key update...');
@@ -3048,28 +3072,28 @@ function normalizeModelId(model) {
  
  let restartOk = true;
  try {
-   await run('cd /opt/openclaw && docker compose down && docker compose up -d', { timeout: 60000 });
+ await run('cd /opt/openclaw && docker compose down && docker compose up -d', { timeout: 60000 });
  } catch (restartErr) {
-   warnings.push(`Container restart failed: ${restartErr.message}`);
-   restartOk = false;
-   console.error('Container restart failed:', restartErr.message);
+ warnings.push(`Container restart failed: ${restartErr.message}`);
+ restartOk = false;
+ console.error('Container restart failed:', restartErr.message);
  }
 
  // Apply secrets through OpenClaw's native secrets management (v2026.2.24+)
  if (restartOk) {
-   try {
-     await run('sleep 3 && docker exec openclaw-openclaw-gateway-1 openclaw secrets apply 2>/dev/null', { timeout: 20000 });
-     await run('docker exec openclaw-openclaw-gateway-1 openclaw secrets reload 2>/dev/null', { timeout: 15000 });
-     console.log('[keys] Secrets applied and reloaded via openclaw secrets');
-   } catch (e) { console.warn('[keys] openclaw secrets apply/reload not available (pre-v2026.2.24?):', e.message); }
+ try {
+ await run('sleep 3 && docker exec openclaw-openclaw-gateway-1 openclaw secrets apply 2>/dev/null', { timeout: 20000 });
+ await run('docker exec openclaw-openclaw-gateway-1 openclaw secrets reload 2>/dev/null', { timeout: 15000 });
+ console.log('[keys] Secrets applied and reloaded via openclaw secrets');
+ } catch (e) { console.warn('[keys] openclaw secrets apply/reload not available (pre-v2026.2.24?):', e.message); }
  }
 
  // Re-approve bridge device after restart so sessions_spawn works
  if (restartOk) {
-   try {
-     await run(`docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`, { timeout: 15000 });
-     console.log('[keys] Bridge device re-approved after restart');
-   } catch (e) { console.warn('[keys] Device auto-approve failed (will retry on connect):', e.message); }
+ try {
+ await run(`docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`, { timeout: 15000 });
+ console.log('[keys] Bridge device re-approved after restart');
+ } catch (e) { console.warn('[keys] Device auto-approve failed (will retry on connect):', e.message); }
  }
 
  // Reconnect bridge WebSocket to the restarted gateway
@@ -3089,39 +3113,39 @@ function normalizeModelId(model) {
 
 app.get('/config/secrets/audit', async (req, res) => {
  try {
-   const { promisify } = await import('util');
-   const { exec } = await import('child_process');
-   const run = promisify(exec);
-   const { stdout } = await run('docker exec openclaw-openclaw-gateway-1 openclaw secrets audit --json 2>/dev/null', { timeout: 15000 });
-   res.json(JSON.parse(stdout));
+ const { promisify } = await import('util');
+ const { exec } = await import('child_process');
+ const run = promisify(exec);
+ const { stdout } = await run('docker exec openclaw-openclaw-gateway-1 openclaw secrets audit --json 2>/dev/null', { timeout: 15000 });
+ res.json(JSON.parse(stdout));
  } catch (e) {
-   if (/not found|unknown command|No such/i.test(e.message || e.stderr || '')) {
-     res.json({ available: false, message: 'openclaw secrets not available (requires v2026.2.24+)' });
-   } else {
-     res.status(500).json({ error: e.message });
-   }
+ if (/not found|unknown command|No such/i.test(e.message || e.stderr || '')) {
+ res.json({ available: false, message: 'openclaw secrets not available (requires v2026.2.24+)' });
+ } else {
+ res.status(500).json({ error: e.message });
+ }
  }
 });
 
 app.post('/config/secrets/apply', async (req, res) => {
  try {
-   const { promisify } = await import('util');
-   const { exec } = await import('child_process');
-   const run = promisify(exec);
-   const { stdout } = await run('docker exec openclaw-openclaw-gateway-1 openclaw secrets apply 2>&1', { timeout: 20000 });
-   console.log('[secrets] Applied:', stdout.trim());
-   res.json({ status: 'ok', output: stdout.trim() });
+ const { promisify } = await import('util');
+ const { exec } = await import('child_process');
+ const run = promisify(exec);
+ const { stdout } = await run('docker exec openclaw-openclaw-gateway-1 openclaw secrets apply 2>&1', { timeout: 20000 });
+ console.log('[secrets] Applied:', stdout.trim());
+ res.json({ status: 'ok', output: stdout.trim() });
  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/config/secrets/reload', async (req, res) => {
  try {
-   const { promisify } = await import('util');
-   const { exec } = await import('child_process');
-   const run = promisify(exec);
-   const { stdout } = await run('docker exec openclaw-openclaw-gateway-1 openclaw secrets reload 2>&1', { timeout: 15000 });
-   console.log('[secrets] Reloaded:', stdout.trim());
-   res.json({ status: 'ok', output: stdout.trim() });
+ const { promisify } = await import('util');
+ const { exec } = await import('child_process');
+ const run = promisify(exec);
+ const { stdout } = await run('docker exec openclaw-openclaw-gateway-1 openclaw secrets reload 2>&1', { timeout: 15000 });
+ console.log('[secrets] Reloaded:', stdout.trim());
+ res.json({ status: 'ok', output: stdout.trim() });
  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -3129,429 +3153,429 @@ app.post('/config/secrets/reload', async (req, res) => {
 
 // Helper: run openclaw acp CLI commands inside gateway container
 async function runAcpCmd(args, timeoutMs = 15000) {
-  const { promisify } = await import('util');
-  const { exec } = await import('child_process');
-  const run = promisify(exec);
-  const { stdout, stderr } = await run(
-    `docker exec openclaw-openclaw-gateway-1 openclaw acp ${args} 2>&1`,
-    { timeout: timeoutMs }
-  );
-  return { stdout: stdout.trim(), stderr: stderr?.trim() || '' };
+ const { promisify } = await import('util');
+ const { exec } = await import('child_process');
+ const run = promisify(exec);
+ const { stdout, stderr } = await run(
+ `docker exec openclaw-openclaw-gateway-1 openclaw acp ${args} 2>&1`,
+ { timeout: timeoutMs }
+ );
+ return { stdout: stdout.trim(), stderr: stderr?.trim() || '' };
 }
 
 // GET /acp/sessions — List active ACP sessions
 app.get('/acp/sessions', async (req, res) => {
-  try {
-    const { stdout } = await runAcpCmd('sessions --json');
-    const sessions = JSON.parse(stdout || '[]');
-    // Merge local registry metadata
-    const enriched = sessions.map(s => ({
-      ...s,
-      ...(acpSessionRegistry.get(s.sessionId || s.id) || {}),
-    }));
-    res.json(enriched);
-  } catch (e) {
-    if (/not found|unknown command|No such/i.test(e.message || '')) {
-      res.json({ available: false, message: 'ACP not available (requires acpx plugin)' });
-    } else {
-      res.status(500).json({ error: e.message });
-    }
-  }
+ try {
+ const { stdout } = await runAcpCmd('sessions --json');
+ const sessions = JSON.parse(stdout || '[]');
+ // Merge local registry metadata
+ const enriched = sessions.map(s => ({
+ ...s,
+ ...(acpSessionRegistry.get(s.sessionId || s.id) || {}),
+ }));
+ res.json(enriched);
+ } catch (e) {
+ if (/not found|unknown command|No such/i.test(e.message || '')) {
+ res.json({ available: false, message: 'ACP not available (requires acpx plugin)' });
+ } else {
+ res.status(500).json({ error: e.message });
+ }
+ }
 });
 
 // POST /acp/spawn — Spawn a new ACP agent session
 app.post('/acp/spawn', async (req, res) => {
-  try {
-    const { agent, cwd, model, permissions, message } = req.body || {};
-    let args = 'spawn';
-    if (agent) args += ` ${agent}`;
-    if (cwd) args += ` --cwd "${cwd}"`;
-    if (model) args += ` --model ${model}`;
-    if (permissions) args += ` --permissions ${permissions}`;
-    const { stdout } = await runAcpCmd(args, 30000);
-    // Parse session ID from output
-    const sessionMatch = stdout.match(/session[:\s]+([a-f0-9-]+)/i);
-    const sessionId = sessionMatch ? sessionMatch[1] : null;
-    if (sessionId) {
-      acpSessionRegistry.set(sessionId, {
-        agent: agent || 'claude',
-        status: 'running',
-        spawnedAt: Date.now(),
-        lastActivity: Date.now(),
-        permissions: permissions || 'approve-reads',
-        output: stdout,
-      });
-    }
-    // If initial message provided, steer immediately
-    if (sessionId && message) {
-      try {
-        const escaped = message.replace(/"/g, '\\"');
-        const { stdout: steerOut } = await runAcpCmd(`steer --session ${sessionId} "${escaped}"`, 60000);
-        if (acpSessionRegistry.has(sessionId)) {
-          acpSessionRegistry.get(sessionId).lastActivity = Date.now();
-          acpSessionRegistry.get(sessionId).output = steerOut;
-        }
-        res.json({ sessionId, agent: agent || 'claude', output: steerOut, spawned: true });
-      } catch (steerErr) {
-        res.json({ sessionId, agent: agent || 'claude', output: stdout, spawned: true, steerError: steerErr.message });
-      }
-    } else {
-      res.json({ sessionId, agent: agent || 'claude', output: stdout, spawned: true });
-    }
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+ try {
+ const { agent, cwd, model, permissions, message } = req.body || {};
+ let args = 'spawn';
+ if (agent) args += ` ${agent}`;
+ if (cwd) args += ` --cwd "${cwd}"`;
+ if (model) args += ` --model ${model}`;
+ if (permissions) args += ` --permissions ${permissions}`;
+ const { stdout } = await runAcpCmd(args, 30000);
+ // Parse session ID from output
+ const sessionMatch = stdout.match(/session[:\s]+([a-f0-9-]+)/i);
+ const sessionId = sessionMatch ? sessionMatch[1] : null;
+ if (sessionId) {
+ acpSessionRegistry.set(sessionId, {
+ agent: agent || 'claude',
+ status: 'running',
+ spawnedAt: Date.now(),
+ lastActivity: Date.now(),
+ permissions: permissions || 'approve-reads',
+ output: stdout,
+ });
+ }
+ // If initial message provided, steer immediately
+ if (sessionId && message) {
+ try {
+ const escaped = message.replace(/"/g, '\\"');
+ const { stdout: steerOut } = await runAcpCmd(`steer --session ${sessionId} "${escaped}"`, 60000);
+ if (acpSessionRegistry.has(sessionId)) {
+ acpSessionRegistry.get(sessionId).lastActivity = Date.now();
+ acpSessionRegistry.get(sessionId).output = steerOut;
+ }
+ res.json({ sessionId, agent: agent || 'claude', output: steerOut, spawned: true });
+ } catch (steerErr) {
+ res.json({ sessionId, agent: agent || 'claude', output: stdout, spawned: true, steerError: steerErr.message });
+ }
+ } else {
+ res.json({ sessionId, agent: agent || 'claude', output: stdout, spawned: true });
+ }
+ } catch (e) {
+ res.status(500).json({ error: e.message });
+ }
 });
 
 // POST /acp/sessions/:sessionId/steer — Send message to ACP session
 app.post('/acp/sessions/:sessionId/steer', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    const { message } = req.body || {};
-    if (!message) return res.status(400).json({ error: 'message required' });
-    const escaped = message.replace(/"/g, '\\"');
-    const { stdout } = await runAcpCmd(`steer --session ${sessionId} "${escaped}"`, 120000);
-    if (acpSessionRegistry.has(sessionId)) {
-      acpSessionRegistry.get(sessionId).lastActivity = Date.now();
-      acpSessionRegistry.get(sessionId).output = stdout;
-    }
-    res.json({ sessionId, output: stdout });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+ try {
+ const { sessionId } = req.params;
+ const { message } = req.body || {};
+ if (!message) return res.status(400).json({ error: 'message required' });
+ const escaped = message.replace(/"/g, '\\"');
+ const { stdout } = await runAcpCmd(`steer --session ${sessionId} "${escaped}"`, 120000);
+ if (acpSessionRegistry.has(sessionId)) {
+ acpSessionRegistry.get(sessionId).lastActivity = Date.now();
+ acpSessionRegistry.get(sessionId).output = stdout;
+ }
+ res.json({ sessionId, output: stdout });
+ } catch (e) {
+ res.status(500).json({ error: e.message });
+ }
 });
 
 // POST /acp/sessions/:sessionId/stream — Stream ACP session response as SSE
 app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
-  const { sessionId } = req.params;
-  const { message } = req.body || {};
-  if (!message) return res.status(400).json({ error: 'message required' });
+ const { sessionId } = req.params;
+ const { message } = req.body || {};
+ if (!message) return res.status(400).json({ error: 'message required' });
 
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    Connection: 'keep-alive',
-    'X-Accel-Buffering': 'no',
-  });
+ res.writeHead(200, {
+ 'Content-Type': 'text/event-stream',
+ 'Cache-Control': 'no-cache',
+ Connection: 'keep-alive',
+ 'X-Accel-Buffering': 'no',
+ });
 
-  try {
-    const { spawn } = await import('child_process');
-    const escaped = message.replace(/"/g, '\\"');
-    const child = spawn('docker', [
-      'exec', 'openclaw-openclaw-gateway-1',
-      'openclaw', 'acp', 'steer', '--session', sessionId, escaped,
-    ], { timeout: 120000 });
+ try {
+ const { spawn } = await import('child_process');
+ const escaped = message.replace(/"/g, '\\"');
+ const child = spawn('docker', [
+ 'exec', 'openclaw-openclaw-gateway-1',
+ 'openclaw', 'acp', 'steer', '--session', sessionId, escaped,
+ ], { timeout: 120000 });
 
-    let buffer = '';
-    child.stdout.on('data', (chunk) => {
-      buffer += chunk.toString();
-      const lines = buffer.split('\n');
-      buffer = lines.pop(); // keep incomplete line
-      for (const line of lines) {
-        if (line.trim()) {
-          res.write(`data: ${JSON.stringify({ type: 'chunk', content: line })}\n\n`);
-        }
-      }
-    });
-    child.stderr.on('data', (chunk) => {
-      res.write(`data: ${JSON.stringify({ type: 'error', content: chunk.toString() })}\n\n`);
-    });
-    child.on('close', (code) => {
-      if (buffer.trim()) {
-        res.write(`data: ${JSON.stringify({ type: 'chunk', content: buffer })}\n\n`);
-      }
-      res.write(`data: ${JSON.stringify({ type: 'done', exitCode: code })}\n\n`);
-      res.end();
-      if (acpSessionRegistry.has(sessionId)) {
-        acpSessionRegistry.get(sessionId).lastActivity = Date.now();
-      }
-    });
-    child.on('error', (err) => {
-      res.write(`data: ${JSON.stringify({ type: 'error', content: err.message })}\n\n`);
-      res.end();
-    });
+ let buffer = '';
+ child.stdout.on('data', (chunk) => {
+ buffer += chunk.toString();
+ const lines = buffer.split('\n');
+ buffer = lines.pop(); // keep incomplete line
+ for (const line of lines) {
+ if (line.trim()) {
+ res.write(`data: ${JSON.stringify({ type: 'chunk', content: line })}\n\n`);
+ }
+ }
+ });
+ child.stderr.on('data', (chunk) => {
+ res.write(`data: ${JSON.stringify({ type: 'error', content: chunk.toString() })}\n\n`);
+ });
+ child.on('close', (code) => {
+ if (buffer.trim()) {
+ res.write(`data: ${JSON.stringify({ type: 'chunk', content: buffer })}\n\n`);
+ }
+ res.write(`data: ${JSON.stringify({ type: 'done', exitCode: code })}\n\n`);
+ res.end();
+ if (acpSessionRegistry.has(sessionId)) {
+ acpSessionRegistry.get(sessionId).lastActivity = Date.now();
+ }
+ });
+ child.on('error', (err) => {
+ res.write(`data: ${JSON.stringify({ type: 'error', content: err.message })}\n\n`);
+ res.end();
+ });
 
-    req.on('close', () => {
-      try { child.kill(); } catch {}
-    });
-  } catch (e) {
-    res.write(`data: ${JSON.stringify({ type: 'error', content: e.message })}\n\n`);
-    res.end();
-  }
+ req.on('close', () => {
+ try { child.kill(); } catch {}
+ });
+ } catch (e) {
+ res.write(`data: ${JSON.stringify({ type: 'error', content: e.message })}\n\n`);
+ res.end();
+ }
 });
 
 // POST /acp/sessions/:sessionId/cancel — Cancel running ACP operation
 app.post('/acp/sessions/:sessionId/cancel', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    const { stdout } = await runAcpCmd(`cancel --session ${sessionId}`);
-    if (acpSessionRegistry.has(sessionId)) {
-      acpSessionRegistry.get(sessionId).lastActivity = Date.now();
-      acpSessionRegistry.get(sessionId).status = 'cancelled';
-    }
-    res.json({ sessionId, status: 'cancelled', output: stdout });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+ try {
+ const { sessionId } = req.params;
+ const { stdout } = await runAcpCmd(`cancel --session ${sessionId}`);
+ if (acpSessionRegistry.has(sessionId)) {
+ acpSessionRegistry.get(sessionId).lastActivity = Date.now();
+ acpSessionRegistry.get(sessionId).status = 'cancelled';
+ }
+ res.json({ sessionId, status: 'cancelled', output: stdout });
+ } catch (e) {
+ res.status(500).json({ error: e.message });
+ }
 });
 
 // DELETE /acp/sessions/:sessionId — Close ACP session
 app.delete('/acp/sessions/:sessionId', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    const { stdout } = await runAcpCmd(`close --session ${sessionId}`);
-    if (acpSessionRegistry.has(sessionId)) {
-      acpSessionRegistry.get(sessionId).status = 'closed';
-    }
-    acpSessionRegistry.delete(sessionId);
-    res.json({ sessionId, status: 'closed', output: stdout });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+ try {
+ const { sessionId } = req.params;
+ const { stdout } = await runAcpCmd(`close --session ${sessionId}`);
+ if (acpSessionRegistry.has(sessionId)) {
+ acpSessionRegistry.get(sessionId).status = 'closed';
+ }
+ acpSessionRegistry.delete(sessionId);
+ res.json({ sessionId, status: 'closed', output: stdout });
+ } catch (e) {
+ res.status(500).json({ error: e.message });
+ }
 });
 
 // GET /acp/sessions/:sessionId — Get single ACP session status
 app.get('/acp/sessions/:sessionId', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    const { stdout } = await runAcpCmd(`status --session ${sessionId} --json`);
-    const status = JSON.parse(stdout || '{}');
-    const local = acpSessionRegistry.get(sessionId) || {};
-    res.json({ ...status, ...local });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+ try {
+ const { sessionId } = req.params;
+ const { stdout } = await runAcpCmd(`status --session ${sessionId} --json`);
+ const status = JSON.parse(stdout || '{}');
+ const local = acpSessionRegistry.get(sessionId) || {};
+ res.json({ ...status, ...local });
+ } catch (e) {
+ res.status(500).json({ error: e.message });
+ }
 });
 
 // PUT /acp/sessions/:sessionId/permissions — Update ACP session permissions
 app.put('/acp/sessions/:sessionId/permissions', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    const { permissions } = req.body || {};
-    if (!permissions || !['approve-all', 'approve-reads', 'deny-all'].includes(permissions)) {
-      return res.status(400).json({ error: 'permissions must be approve-all, approve-reads, or deny-all' });
-    }
-    const { stdout } = await runAcpCmd(`permissions --session ${sessionId} ${permissions}`);
-    if (acpSessionRegistry.has(sessionId)) {
-      acpSessionRegistry.get(sessionId).permissions = permissions;
-      acpSessionRegistry.get(sessionId).lastActivity = Date.now();
-    }
-    res.json({ sessionId, permissions, output: stdout });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+ try {
+ const { sessionId } = req.params;
+ const { permissions } = req.body || {};
+ if (!permissions || !['approve-all', 'approve-reads', 'deny-all'].includes(permissions)) {
+ return res.status(400).json({ error: 'permissions must be approve-all, approve-reads, or deny-all' });
+ }
+ const { stdout } = await runAcpCmd(`permissions --session ${sessionId} ${permissions}`);
+ if (acpSessionRegistry.has(sessionId)) {
+ acpSessionRegistry.get(sessionId).permissions = permissions;
+ acpSessionRegistry.get(sessionId).lastActivity = Date.now();
+ }
+ res.json({ sessionId, permissions, output: stdout });
+ } catch (e) {
+ res.status(500).json({ error: e.message });
+ }
 });
 
 // GET /acp/doctor — ACP diagnostics
 app.get('/acp/doctor', async (req, res) => {
-  try {
-    const { stdout } = await runAcpCmd('doctor --json', 20000);
-    try {
-      res.json(JSON.parse(stdout));
-    } catch {
-      res.json({ raw: stdout, available: true });
-    }
-  } catch (e) {
-    if (/not found|unknown command|No such/i.test(e.message || '')) {
-      res.json({ available: false, message: 'ACP not available (requires acpx plugin)' });
-    } else {
-      res.status(500).json({ error: e.message });
-    }
-  }
+ try {
+ const { stdout } = await runAcpCmd('doctor --json', 20000);
+ try {
+ res.json(JSON.parse(stdout));
+ } catch {
+ res.json({ raw: stdout, available: true });
+ }
+ } catch (e) {
+ if (/not found|unknown command|No such/i.test(e.message || '')) {
+ res.json({ available: false, message: 'ACP not available (requires acpx plugin)' });
+ } else {
+ res.status(500).json({ error: e.message });
+ }
+ }
 });
 
 // GET /acp/agents — List available ACP agent harnesses
 app.get('/acp/agents', async (req, res) => {
-  try {
-    const { stdout } = await runAcpCmd('doctor --json', 20000);
-    try {
-      const doctor = JSON.parse(stdout);
-      const agents = doctor.agents || doctor.harnesses || [];
-      res.json({ agents, available: true });
-    } catch {
-      // Fallback: return known harnesses
-      res.json({
-        agents: [
-          { name: 'claude', label: 'Claude Code', installed: null },
-          { name: 'codex', label: 'Codex CLI', installed: null },
-          { name: 'gemini', label: 'Gemini CLI', installed: null },
-          { name: 'opencode', label: 'OpenCode', installed: null },
-          { name: 'pi', label: 'Pi', installed: null },
-        ],
-        available: true,
-        raw: stdout,
-      });
-    }
-  } catch (e) {
-    res.json({
-      available: false,
-      agents: [
-        { name: 'claude', label: 'Claude Code', installed: null },
-        { name: 'codex', label: 'Codex CLI', installed: null },
-        { name: 'gemini', label: 'Gemini CLI', installed: null },
-        { name: 'opencode', label: 'OpenCode', installed: null },
-        { name: 'pi', label: 'Pi', installed: null },
-      ],
-      error: e.message,
-    });
-  }
+ try {
+ const { stdout } = await runAcpCmd('doctor --json', 20000);
+ try {
+ const doctor = JSON.parse(stdout);
+ const agents = doctor.agents || doctor.harnesses || [];
+ res.json({ agents, available: true });
+ } catch {
+ // Fallback: return known harnesses
+ res.json({
+ agents: [
+ { name: 'claude', label: 'Claude Code', installed: null },
+ { name: 'codex', label: 'Codex CLI', installed: null },
+ { name: 'gemini', label: 'Gemini CLI', installed: null },
+ { name: 'opencode', label: 'OpenCode', installed: null },
+ { name: 'pi', label: 'Pi', installed: null },
+ ],
+ available: true,
+ raw: stdout,
+ });
+ }
+ } catch (e) {
+ res.json({
+ available: false,
+ agents: [
+ { name: 'claude', label: 'Claude Code', installed: null },
+ { name: 'codex', label: 'Codex CLI', installed: null },
+ { name: 'gemini', label: 'Gemini CLI', installed: null },
+ { name: 'opencode', label: 'OpenCode', installed: null },
+ { name: 'pi', label: 'Pi', installed: null },
+ ],
+ error: e.message,
+ });
+ }
 });
 
 // ── Deep Research (Librarium) ─────────────────────────────────────────
 
 // Read research-related API keys from the .env file
 function getResearchEnv() {
-  let envContent = '';
-  try { envContent = readFileSync('/opt/openclaw/.env', 'utf8'); } catch {}
-  const get = (name) => {
-    const m = envContent.match(new RegExp(`^${name}=(.*)$`, 'm'));
-    return m ? m[1].trim() : '';
-  };
-  return {
-    PERPLEXITY_API_KEY: get('PERPLEXITY_API_KEY'),
-    OPENAI_API_KEY: get('OPENAI_API_KEY'),
-    GEMINI_API_KEY: get('GEMINI_API_KEY') || get('GOOGLE_API_KEY'),
-    BRAVE_API_KEY: get('BRAVE_API_KEY'),
-    EXA_API_KEY: get('EXA_API_KEY'),
-    TAVILY_API_KEY: get('TAVILY_API_KEY'),
-    SERPAPI_API_KEY: get('SERPAPI_API_KEY'),
-    SEARCHAPI_API_KEY: get('SEARCHAPI_API_KEY'),
-  };
+ let envContent = '';
+ try { envContent = readFileSync('/opt/openclaw/.env', 'utf8'); } catch {}
+ const get = (name) => {
+ const m = envContent.match(new RegExp(`^${name}=(.*)$`, 'm'));
+ return m ? m[1].trim() : '';
+ };
+ return {
+ PERPLEXITY_API_KEY: get('PERPLEXITY_API_KEY'),
+ OPENAI_API_KEY: get('OPENAI_API_KEY'),
+ GEMINI_API_KEY: get('GEMINI_API_KEY') || get('GOOGLE_API_KEY'),
+ BRAVE_API_KEY: get('BRAVE_API_KEY'),
+ EXA_API_KEY: get('EXA_API_KEY'),
+ TAVILY_API_KEY: get('TAVILY_API_KEY'),
+ SERPAPI_API_KEY: get('SERPAPI_API_KEY'),
+ SEARCHAPI_API_KEY: get('SEARCHAPI_API_KEY'),
+ };
 }
 
 // GET /deep-research/status — check if librarium is installed and which providers are configured
 app.get('/deep-research/status', (req, res) => {
-  try {
-    let installed = false;
-    try { execSync('which librarium', { timeout: 3000 }); installed = true; } catch {}
-    const env = getResearchEnv();
-    const providers = {};
-    // Map env vars to librarium provider names
-    const providerMap = {
-      'perplexity-deep': env.PERPLEXITY_API_KEY,
-      'openai-deep': env.OPENAI_API_KEY,
-      'gemini-deep': env.GEMINI_API_KEY,
-      'perplexity-sonar': env.PERPLEXITY_API_KEY,
-      'brave-search': env.BRAVE_API_KEY,
-      'brave-answers': env.BRAVE_API_KEY,
-      'exa': env.EXA_API_KEY,
-      'tavily': env.TAVILY_API_KEY,
-      'serpapi': env.SERPAPI_API_KEY,
-      'searchapi': env.SEARCHAPI_API_KEY,
-    };
-    for (const [name, key] of Object.entries(providerMap)) {
-      providers[name] = !!key;
-    }
-    const configuredCount = Object.values(providers).filter(Boolean).length;
-    res.json({ installed, providers, configuredCount });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+ try {
+ let installed = false;
+ try { execSync('which librarium', { timeout: 3000 }); installed = true; } catch {}
+ const env = getResearchEnv();
+ const providers = {};
+ // Map env vars to librarium provider names
+ const providerMap = {
+ 'perplexity-deep': env.PERPLEXITY_API_KEY,
+ 'openai-deep': env.OPENAI_API_KEY,
+ 'gemini-deep': env.GEMINI_API_KEY,
+ 'perplexity-sonar': env.PERPLEXITY_API_KEY,
+ 'brave-search': env.BRAVE_API_KEY,
+ 'brave-answers': env.BRAVE_API_KEY,
+ 'exa': env.EXA_API_KEY,
+ 'tavily': env.TAVILY_API_KEY,
+ 'serpapi': env.SERPAPI_API_KEY,
+ 'searchapi': env.SEARCHAPI_API_KEY,
+ };
+ for (const [name, key] of Object.entries(providerMap)) {
+ providers[name] = !!key;
+ }
+ const configuredCount = Object.values(providers).filter(Boolean).length;
+ res.json({ installed, providers, configuredCount });
+ } catch (err) {
+ res.status(500).json({ error: err.message });
+ }
 });
 
 // POST /deep-research — run librarium with SSE streaming
 app.post('/deep-research', async (req, res) => {
-  const { query, providers: requestedProviders, mode = 'sync', timeout = 60 } = req.body;
-  if (!query || typeof query !== 'string' || query.trim().length === 0) {
-    return res.status(400).json({ error: 'Query is required' });
-  }
+ const { query, providers: requestedProviders, mode = 'sync', timeout = 60 } = req.body;
+ if (!query || typeof query !== 'string' || query.trim().length === 0) {
+ return res.status(400).json({ error: 'Query is required' });
+ }
 
-  // Check librarium is installed
-  try { execSync('which librarium', { timeout: 3000 }); } catch {
-    return res.status(503).json({ error: 'Librarium is not installed. Reprovision the server or run: npm install -g librarium' });
-  }
+ // Check librarium is installed
+ try { execSync('which librarium', { timeout: 3000 }); } catch {
+ return res.status(503).json({ error: 'Librarium is not installed. Reprovision the server or run: npm install -g librarium' });
+ }
 
-  // Build env vars from .env file
-  const env = { ...process.env, ...getResearchEnv() };
+ // Build env vars from .env file
+ const env = { ...process.env, ...getResearchEnv() };
 
-  // Build command
-  const args = ['run', query.trim()];
-  if (requestedProviders && Array.isArray(requestedProviders) && requestedProviders.length > 0) {
-    args.push('-p', requestedProviders.join(','));
-  }
-  args.push('-m', mode === 'async' ? 'async' : mode === 'mixed' ? 'mixed' : 'sync');
-  args.push('--timeout', String(Math.min(Math.max(parseInt(timeout, 10) || 60, 10), 300)));
-  args.push('--json');
+ // Build command
+ const args = ['run', query.trim()];
+ if (requestedProviders && Array.isArray(requestedProviders) && requestedProviders.length > 0) {
+ args.push('-p', requestedProviders.join(','));
+ }
+ args.push('-m', mode === 'async' ? 'async' : mode === 'mixed' ? 'mixed' : 'sync');
+ args.push('--timeout', String(Math.min(Math.max(parseInt(timeout, 10) || 60, 10), 300)));
+ args.push('--json');
 
-  const outputDir = `/tmp/librarium-${Date.now()}`;
-  args.push('-o', outputDir);
+ const outputDir = `/tmp/librarium-${Date.now()}`;
+ args.push('-o', outputDir);
 
-  console.log(`[deep-research] Running: librarium ${args.join(' ')}`);
+ console.log(`[deep-research] Running: librarium ${args.join(' ')}`);
 
-  // SSE streaming
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-  });
-  const sendSSE = (event, data) => {
-    if (!res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  };
+ // SSE streaming
+ res.writeHead(200, {
+ 'Content-Type': 'text/event-stream',
+ 'Cache-Control': 'no-cache',
+ 'Connection': 'keep-alive',
+ });
+ const sendSSE = (event, data) => {
+ if (!res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+ };
 
-  sendSSE('start', { query: query.trim(), outputDir });
+ sendSSE('start', { query: query.trim(), outputDir });
 
-  try {
-    const { spawn: spawnProcess } = await import('child_process');
-    const child = spawnProcess('librarium', args, {
-      env,
-      cwd: '/tmp',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: Math.min((parseInt(timeout, 10) || 60) + 30, 330) * 1000,
-    });
+ try {
+ const { spawn: spawnProcess } = await import('child_process');
+ const child = spawnProcess('librarium', args, {
+ env,
+ cwd: '/tmp',
+ stdio: ['ignore', 'pipe', 'pipe'],
+ timeout: Math.min((parseInt(timeout, 10) || 60) + 30, 330) * 1000,
+ });
 
-    let stdout = '';
-    let stderr = '';
+ let stdout = '';
+ let stderr = '';
 
-    child.stdout?.on('data', (chunk) => {
-      stdout += chunk;
-      sendSSE('progress', { chunk: chunk.toString() });
-    });
+ child.stdout?.on('data', (chunk) => {
+ stdout += chunk;
+ sendSSE('progress', { chunk: chunk.toString() });
+ });
 
-    child.stderr?.on('data', (chunk) => {
-      stderr += chunk;
-      // Parse progress lines from stderr (librarium outputs progress there)
-      const line = chunk.toString().trim();
-      if (line) sendSSE('log', { message: line });
-    });
+ child.stderr?.on('data', (chunk) => {
+ stderr += chunk;
+ // Parse progress lines from stderr (librarium outputs progress there)
+ const line = chunk.toString().trim();
+ if (line) sendSSE('log', { message: line });
+ });
 
-    child.on('close', (code) => {
-      if (code === 0) {
-        // Try to parse the JSON manifest from stdout
-        let manifest = null;
-        try { manifest = JSON.parse(stdout); } catch {}
+ child.on('close', (code) => {
+ if (code === 0) {
+ // Try to parse the JSON manifest from stdout
+ let manifest = null;
+ try { manifest = JSON.parse(stdout); } catch {}
 
-        // Also try to read summary.md from output dir
-        let summary = null;
-        try {
-          // librarium creates a timestamped subdir inside outputDir
-          const subdirs = readdirSync(outputDir, { withFileTypes: true }).filter(d => d.isDirectory());
-          const resultDir = subdirs.length ? `${outputDir}/${subdirs[0].name}` : outputDir;
-          try { summary = readFileSync(`${resultDir}/summary.md`, 'utf8'); } catch {}
-          if (!summary) try { summary = readFileSync(`${outputDir}/summary.md`, 'utf8'); } catch {}
-        } catch {}
+ // Also try to read summary.md from output dir
+ let summary = null;
+ try {
+ // librarium creates a timestamped subdir inside outputDir
+ const subdirs = readdirSync(outputDir, { withFileTypes: true }).filter(d => d.isDirectory());
+ const resultDir = subdirs.length ? `${outputDir}/${subdirs[0].name}` : outputDir;
+ try { summary = readFileSync(`${resultDir}/summary.md`, 'utf8'); } catch {}
+ if (!summary) try { summary = readFileSync(`${outputDir}/summary.md`, 'utf8'); } catch {}
+ } catch {}
 
-        sendSSE('done', {
-          success: true,
-          manifest,
-          summary,
-          providerCount: manifest?.providers ? Object.keys(manifest.providers).length : 0,
-          sourceCount: manifest?.sources?.length || 0,
-        });
-      } else {
-        sendSSE('done', { success: false, error: `Librarium exited with code ${code}`, stderr: stderr.slice(-2000) });
-      }
-      res.end();
-    });
+ sendSSE('done', {
+ success: true,
+ manifest,
+ summary,
+ providerCount: manifest?.providers ? Object.keys(manifest.providers).length : 0,
+ sourceCount: manifest?.sources?.length || 0,
+ });
+ } else {
+ sendSSE('done', { success: false, error: `Librarium exited with code ${code}`, stderr: stderr.slice(-2000) });
+ }
+ res.end();
+ });
 
-    child.on('error', (err) => {
-      sendSSE('done', { success: false, error: err.message });
-      res.end();
-    });
+ child.on('error', (err) => {
+ sendSSE('done', { success: false, error: err.message });
+ res.end();
+ });
 
-  } catch (err) {
-    sendSSE('done', { success: false, error: err.message });
-    res.end();
-  }
+ } catch (err) {
+ sendSSE('done', { success: false, error: err.message });
+ res.end();
+ }
 });
 
 // ── Composio connections (proxies to Composio API) ────────────────────
@@ -3567,12 +3591,12 @@ app.get('/composio/connections', async (req, res) => {
  const composioKey = getComposioKey();
  if (!composioKey) return res.status(400).json({ error: 'Composio API key not configured' });
  const resp = await fetch('https://backend.composio.dev/api/v3/connected_accounts?limit=50', {
-  headers: { 'x-api-key': composioKey },
-  signal: AbortSignal.timeout(10000),
+ headers: { 'x-api-key': composioKey },
+ signal: AbortSignal.timeout(10000),
  });
  if (!resp.ok) {
-  const errText = await resp.text();
-  return res.status(resp.status).json({ error: errText || 'Composio API error' });
+ const errText = await resp.text();
+ return res.status(resp.status).json({ error: errText || 'Composio API error' });
  }
  const data = await resp.json();
  res.json({ items: data.items || data.connected_accounts || [], cursor: data.next_cursor || data.cursor });
@@ -3595,12 +3619,12 @@ app.get('/composio/toolkits', async (req, res) => {
  if (category) url += `&category=${encodeURIComponent(category)}`;
  if (cursor) url += `&cursor=${encodeURIComponent(cursor)}`;
  const resp = await fetch(url, {
-  headers: { 'x-api-key': composioKey },
-  signal: AbortSignal.timeout(15000),
+ headers: { 'x-api-key': composioKey },
+ signal: AbortSignal.timeout(15000),
  });
  if (!resp.ok) {
-  const errText = await resp.text();
-  return res.status(resp.status).json({ error: errText || 'Composio API error' });
+ const errText = await resp.text();
+ return res.status(resp.status).json({ error: errText || 'Composio API error' });
  }
  const data = await resp.json();
  const items = data.items || data.toolkits || [];
@@ -3624,12 +3648,12 @@ app.get('/composio/tools', async (req, res) => {
  if (query) url += `&query=${encodeURIComponent(query)}`;
  if (toolkitSlug) url += `&toolkit_slug=${encodeURIComponent(toolkitSlug)}`;
  const resp = await fetch(url, {
-  headers: { 'x-api-key': composioKey },
-  signal: AbortSignal.timeout(20000),
+ headers: { 'x-api-key': composioKey },
+ signal: AbortSignal.timeout(20000),
  });
  if (!resp.ok) {
-  const errText = await resp.text();
-  return res.status(resp.status).json({ error: errText || 'Composio API error' });
+ const errText = await resp.text();
+ return res.status(resp.status).json({ error: errText || 'Composio API error' });
  }
  const data = await resp.json();
  const items = data.items || [];
@@ -3837,77 +3861,77 @@ wss.on('connection', (clientWs) => {
 const OPENCLAW_CONFIG_PATH = '/opt/openclaw-data/config/openclaw.json';
 
 app.get('/config/openclaw', (req, res) => {
-  try {
-    const data = readFileSync(OPENCLAW_CONFIG_PATH, 'utf8');
-    res.json(JSON.parse(data));
-  } catch (err) {
-    if (err.code === 'ENOENT') return res.json({});
-    res.status(500).json({ error: err.message });
-  }
+ try {
+ const data = readFileSync(OPENCLAW_CONFIG_PATH, 'utf8');
+ res.json(JSON.parse(data));
+ } catch (err) {
+ if (err.code === 'ENOENT') return res.json({});
+ res.status(500).json({ error: err.message });
+ }
 });
 
 app.put('/config/openclaw', (req, res) => {
-  try {
-    const data = req.body;
-    if (!data || typeof data !== 'object') return res.status(400).json({ error: 'Invalid JSON body' });
-    // Backup existing
-    try {
-      const existing = readFileSync(OPENCLAW_CONFIG_PATH, 'utf8');
-      writeFileSync(OPENCLAW_CONFIG_PATH + '.bak', existing);
-    } catch {}
-    writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(data, null, 2));
-    // Fix permissions
-    try { execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 }); } catch {}
-    // Restart OpenClaw gateway to pick up changes
-    try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', { timeout: 5000 }); } catch {}
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+ try {
+ const data = req.body;
+ if (!data || typeof data !== 'object') return res.status(400).json({ error: 'Invalid JSON body' });
+ // Backup existing
+ try {
+ const existing = readFileSync(OPENCLAW_CONFIG_PATH, 'utf8');
+ writeFileSync(OPENCLAW_CONFIG_PATH + '.bak', existing);
+ } catch {}
+ writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(data, null, 2));
+ // Fix permissions
+ try { execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 }); } catch {}
+ // Restart OpenClaw gateway to pick up changes
+ try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', { timeout: 5000 }); } catch {}
+ res.json({ success: true });
+ } catch (err) {
+ res.status(500).json({ error: err.message });
+ }
 });
 
 // ── Auth Profiles (read/write OpenClaw auth-profiles.json) ───────────
 const AUTH_PROFILES_PATH = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
 
 app.get('/config/auth-profiles', (req, res) => {
-  try {
-    const data = readFileSync(AUTH_PROFILES_PATH, 'utf8');
-    res.json(JSON.parse(data));
-  } catch (err) {
-    if (err.code === 'ENOENT') return res.json({ version: 1, profiles: {} });
-    res.status(500).json({ error: err.message });
-  }
+ try {
+ const data = readFileSync(AUTH_PROFILES_PATH, 'utf8');
+ res.json(JSON.parse(data));
+ } catch (err) {
+ if (err.code === 'ENOENT') return res.json({ version: 1, profiles: {} });
+ res.status(500).json({ error: err.message });
+ }
 });
 
 app.put('/config/auth-profiles', (req, res) => {
-  try {
-    const data = req.body;
-    if (!data || typeof data !== 'object') return res.status(400).json({ error: 'Invalid JSON body' });
-    // Backup existing
-    try { 
-      const existing = readFileSync(AUTH_PROFILES_PATH, 'utf8');
-      writeFileSync(AUTH_PROFILES_PATH + '.bak', existing);
-    } catch {}
-    writeFileSync(AUTH_PROFILES_PATH, JSON.stringify(data, null, 2));
-    // Fix permissions
-    try { execSync(`chown 1000:1000 ${AUTH_PROFILES_PATH}`, { timeout: 3000 }); } catch {}
-    // Also copy to all SPC agents
-    try {
-      const agentsDir = '/opt/openclaw-data/config/agents';
-      const dirs = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
-      for (const dir of dirs) {
-        const dest = `${agentsDir}/${dir}/agent/auth-profiles.json`;
-        try { mkdirSync(`${agentsDir}/${dir}/agent`, { recursive: true }); } catch {}
-        writeFileSync(dest, JSON.stringify(data, null, 2));
-        try { execSync(`chown -R 1000:1000 ${agentsDir}/${dir}/agent`, { timeout: 3000 }); } catch {}
-      }
-    } catch {}
-    // Restart OpenClaw gateway to pick up changes
-    try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', { timeout: 5000 }); } catch {}
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+ try {
+ const data = req.body;
+ if (!data || typeof data !== 'object') return res.status(400).json({ error: 'Invalid JSON body' });
+ // Backup existing
+ try { 
+ const existing = readFileSync(AUTH_PROFILES_PATH, 'utf8');
+ writeFileSync(AUTH_PROFILES_PATH + '.bak', existing);
+ } catch {}
+ writeFileSync(AUTH_PROFILES_PATH, JSON.stringify(data, null, 2));
+ // Fix permissions
+ try { execSync(`chown 1000:1000 ${AUTH_PROFILES_PATH}`, { timeout: 3000 }); } catch {}
+ // Also copy to all SPC agents
+ try {
+ const agentsDir = '/opt/openclaw-data/config/agents';
+ const dirs = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
+ for (const dir of dirs) {
+ const dest = `${agentsDir}/${dir}/agent/auth-profiles.json`;
+ try { mkdirSync(`${agentsDir}/${dir}/agent`, { recursive: true }); } catch {}
+ writeFileSync(dest, JSON.stringify(data, null, 2));
+ try { execSync(`chown -R 1000:1000 ${agentsDir}/${dir}/agent`, { timeout: 3000 }); } catch {}
+ }
+ } catch {}
+ // Restart OpenClaw gateway to pick up changes
+ try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', { timeout: 5000 }); } catch {}
+ res.json({ success: true });
+ } catch (err) {
+ res.status(500).json({ error: err.message });
+ }
 });
 
 // ── Browser Session Reporting Endpoint ────────────────────────────────
@@ -3915,22 +3939,22 @@ app.put('/config/auth-profiles', (req, res) => {
 // their live view URL so the bridge can show it in the frontend.
 // Accessible from inside the Docker container at host.docker.internal:PORT
 app.post('/api/browser-session', (req, res) => {
-  const { liveViewUrl, sessionId, provider } = req.body;
-  if (!liveViewUrl) {
-    return res.status(400).json({ error: 'liveViewUrl is required' });
-  }
-  reportBrowserSession({ liveViewUrl, sessionId, provider });
-  res.json({ success: true });
+ const { liveViewUrl, sessionId, provider } = req.body;
+ if (!liveViewUrl) {
+ return res.status(400).json({ error: 'liveViewUrl is required' });
+ }
+ reportBrowserSession({ liveViewUrl, sessionId, provider });
+ res.json({ success: true });
 });
 
 app.delete('/api/browser-session', (req, res) => {
-  clearSkillBrowserSession();
-  res.json({ success: true });
+ clearSkillBrowserSession();
+ res.json({ success: true });
 });
 
 app.get('/api/browser-session', (req, res) => {
-  const session = getSkillBrowserSession();
-  res.json(session || { active: false });
+ const session = getSkillBrowserSession();
+ res.json(session || { active: false });
 });
 
 // ── Start Server ─────────────────────────────────────────────────────
