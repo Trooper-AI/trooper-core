@@ -3031,13 +3031,43 @@ app.post('/config/api-keys', async (req, res) => {
  } catch (e) { console.error('Failed to update openclaw.json:', e.message); }
  }
 
-// Normalize a model ID: ensure Claude models have anthropic/ prefix, convert version dots to hyphens
+// Normalize a model ID: ensure provider/ prefix, validate known models
+// OpenRouter sends IDs like "anthropic/claude-4-6-sonnet-20260217" but OpenClaw gateway
+// needs the actual Anthropic API model ID like "anthropic/claude-sonnet-4-6"
+const KNOWN_MODEL_ALIASES = {
+  // Anthropic — map dated/versioned IDs to canonical gateway IDs
+  'claude-4-6-sonnet-20260217': 'claude-sonnet-4-6',
+  'claude-4-5-sonnet-20241022': 'claude-sonnet-4-5',
+  'claude-4-6-opus': 'claude-opus-4-6',
+  'claude-opus-4-6-20260514': 'claude-opus-4-6',
+  'claude-4-5-haiku-20241022': 'claude-haiku-4-5',
+  'claude-haiku-4-5-20241022': 'claude-haiku-4-5',
+  // Pass-through for already-correct IDs
+  'claude-sonnet-4-5': 'claude-sonnet-4-5',
+  'claude-sonnet-4-6': 'claude-sonnet-4-6',
+  'claude-opus-4-6': 'claude-opus-4-6',
+  'claude-haiku-4-5': 'claude-haiku-4-5',
+};
+
 function normalizeModelId(model) {
  if (!model) return model;
  let m = model.replace(/(\d+)\.(\d+)/g, '$1-$2');
- const bare = m.includes('/') ? m.split('/').slice(1).join('/') : m;
- if (/^claude/i.test(bare) && !m.startsWith('anthropic/')) m = `anthropic/${bare}`;
- return m;
+ // Extract provider prefix and bare model name
+ let provider = '';
+ let bare = m;
+ if (m.includes('/')) {
+   const parts = m.split('/');
+   provider = parts[0];
+   bare = parts.slice(1).join('/');
+ }
+ // Check alias map for known model IDs (handles OpenRouter dated versions)
+ if (KNOWN_MODEL_ALIASES[bare]) {
+   bare = KNOWN_MODEL_ALIASES[bare];
+   console.log(`[bridge] Normalized model "${model}" → "${provider ? provider + '/' : ''}${bare}"`);
+ }
+ // Ensure Claude models have anthropic/ prefix
+ if (/^claude/i.test(bare) && provider !== 'anthropic') provider = 'anthropic';
+ return provider ? `${provider}/${bare}` : bare;
 }
 
  const _syncWarnings = [];
