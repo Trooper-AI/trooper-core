@@ -225,7 +225,7 @@ class OpenClawGateway {
  const { promisify: _promisify } = await import('util');
  const { exec: _execCb } = await import('child_process');
  const _run = _promisify(_execCb);
- await _run(`docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`, { timeout: 15000 });
+ await _run(`docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`, { timeout: 15000 });
  console.log('[OpenClaw] Bridge device auto-approved for sessions_spawn');
  } catch { /* device approve not available or already approved */ }
  })();
@@ -398,8 +398,35 @@ class OpenClawGateway {
  const errMsg = frame.error?.message || 'Request failed';
  // Handle pairing required gracefully — resolve (not reject!) to avoid unhandled rejection crash
  if (errMsg === 'pairing required' && frame.id === this._authRequestId) {
- console.log('[OpenClaw] Pairing required — device pending approval, will retry...');
+ console.log('[OpenClaw] Pairing required — attempting self-approve via docker exec...');
  this._pendingRequests.delete(frame.id);
+ // Try to self-approve: approve our device ID, then restart gateway so it reads the approval from disk
+ (async () => {
+ try {
+ const { promisify: _p } = await import('util');
+ const { exec: _e } = await import('child_process');
+ const _run = _p(_e);
+ if (deviceIdentity?.deviceId) {
+ console.log(`[OpenClaw] Self-approving deviceId ${deviceIdentity.deviceId.slice(0, 12)}...`);
+ // Try both `devices approve` (v2026.3+) and `device approve` (older)
+ const { stdout } = await _run(
+ `docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`,
+ { timeout: 20000 }
+ ).catch(() => ({ stdout: '' }));
+ if (stdout.toLowerCase().includes('approved') || stdout.toLowerCase().includes('already')) {
+ console.log('[OpenClaw] Device approved — restarting gateway to apply...');
+ await _run(`docker restart openclaw-openclaw-gateway-1`, { timeout: 60000 }).catch(() => {});
+ // Give gateway time to fully start before bridge reconnects
+ this._reconnectDelay = 30000;
+ console.log('[OpenClaw] Gateway restarted — will reconnect in 30s');
+ } else {
+ console.warn('[OpenClaw] Self-approve output unclear:', stdout.trim().slice(0, 200));
+ }
+ }
+ } catch (err) {
+ console.warn('[OpenClaw] Self-approve failed:', err.message);
+ }
+ })();
  // Resolve auth with null (not reject) so the connect() .then sees falsy and retries
  if (this._authResolve) {
  const res = this._authResolve;
@@ -2826,7 +2853,7 @@ app.post('/gateway/restart', (req, res) => {
  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
  // Re-approve device and reconnect after restart
  setTimeout(async () => {
- try { execSync(`docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`, { timeout: 15000 }); } catch {}
+ try { execSync(`docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`, { timeout: 15000 }); } catch {}
  gateway.connect();
  }, 5000);
  res.json({ success: true, message: 'Gateway container restarted' });
@@ -3248,7 +3275,7 @@ function normalizeModelId(model) {
  // Re-approve bridge device after restart so sessions_spawn works
  if (restartOk) {
  try {
- await run(`docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`, { timeout: 15000 });
+ await run(`docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`, { timeout: 15000 });
  console.log('[keys] Bridge device re-approved after restart');
  } catch (e) { console.warn('[keys] Device auto-approve failed (will retry on connect):', e.message); }
  }
