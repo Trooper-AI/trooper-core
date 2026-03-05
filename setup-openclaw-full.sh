@@ -1707,6 +1707,18 @@ const deviceId = crypto.createHash('sha256').update(pubRaw).digest('hex');
 const identity = { version: 1, deviceId, publicKeyPem, privateKeyPem, createdAtMs: Date.now() };
 fs.writeFileSync('/opt/openclaw-bridge/device-identity.json', JSON.stringify(identity, null, 2), { mode: 0o600 });
 const pubB64 = pubRaw.toString('base64url');
+// Also generate the gateway's own identity so we can pre-pair it
+const gw = crypto.generateKeyPairSync('ed25519');
+const gwPubPem = gw.publicKey.export({ type: 'spki', format: 'pem' }).toString();
+const gwPrivPem = gw.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+const gwPubRaw = gw.publicKey.export({ type: 'spki', format: 'der' }).slice(-32);
+const gwDeviceId = crypto.createHash('sha256').update(gwPubRaw).digest('hex');
+const gwPubB64 = gwPubRaw.toString('base64url');
+const gwIdentity = { version: 1, deviceId: gwDeviceId, publicKeyPem: gwPubPem, privateKeyPem: gwPrivPem, createdAtMs: Date.now() };
+fs.mkdirSync('/opt/openclaw-data/config/identity', { recursive: true });
+fs.writeFileSync('/opt/openclaw-data/config/identity/device.json', JSON.stringify(gwIdentity, null, 2));
+console.log('Gateway identity: ' + gwDeviceId.substring(0, 12) + '...');
+
 const paired = {};
 paired[deviceId] = {
  deviceId, publicKey: pubB64,
@@ -1715,9 +1727,16 @@ paired[deviceId] = {
  clientId: 'gateway-client', clientMode: 'backend',
  approvedAt: Date.now(), approved: true, ts: Date.now()
 };
+paired[gwDeviceId] = {
+ deviceId: gwDeviceId, publicKey: gwPubB64,
+ displayName: 'Gateway Internal', platform: 'linux',
+ role: 'operator', roles: ['operator'], scopes: ['operator.admin'],
+ clientId: 'gateway-internal', clientMode: 'backend',
+ approvedAt: Date.now(), approved: true, ts: Date.now()
+};
 fs.writeFileSync('/opt/openclaw-data/config/devices/paired.json', JSON.stringify(paired, null, 2));
 fs.writeFileSync('/opt/openclaw-data/config/devices/pending.json', '{}');
-console.log('Pre-approved device: ' + deviceId.substring(0, 12) + '...');
+console.log('Pre-approved 2 devices: bridge + gateway internal');
 "
 
 # Fix ownership — Docker runs as uid 1000, files were created by root
