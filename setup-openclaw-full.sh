@@ -660,12 +660,14 @@ OCCONFIG
 sed -i "s/GATEWAY_TOKEN_PLACEHOLDER/${GATEWAY_TOKEN}/g" /opt/openclaw-data/config/openclaw.json
 sed -i "s/HOOK_TOKEN_PLACEHOLDER/oc-hook-${HOOK_TOKEN}/g" /opt/openclaw-data/config/openclaw.json
 
-# Docker compose override — gateway listens on loopback only (bridge proxies external access)
-# Resolve host docker group GID so the container user (UID 1000) can access the socket
+# Docker compose override — host networking so gateway binds to loopback directly
+# This ensures all connections (bridge, internal tools) come from 127.0.0.1,
+# which auto-approves device pairing (no manual approval needed after restarts).
 DOCKER_GID=$(getent group docker | cut -d: -f3)
 cat > /opt/openclaw/docker-compose.override.yml << OVERRIDE
 services:
   openclaw-gateway:
+    network_mode: host
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /usr/bin/docker:/usr/bin/docker:ro
@@ -674,12 +676,8 @@ services:
       - /opt/openclaw-data/2captcha-extension:/opt/openclaw-data/2captcha-extension:ro
       - openclaw-pkg-cache:/opt/pkg-cache
       - /var/run/openclaw:/var/run/openclaw
-    ports:
-      - "127.0.0.1:5999:5999"
     group_add:
       - "${DOCKER_GID}"
-    extra_hosts:
-      host.docker.internal: host-gateway
     environment:
       OPENAI_API_KEY: \${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: \${ANTHROPIC_API_KEY:-}
@@ -801,7 +799,7 @@ chmod 700 /home/node/.openclaw 2>/dev/null || true
 chmod 600 /home/node/.openclaw/openclaw.json 2>/dev/null || true
 find /home/node/.openclaw/agents -name 'auth-profiles.json' -exec chmod 600 {} \; 2>/dev/null || true
 # Drop back to node user for the gateway process
-exec su -s /bin/bash node -c "DISPLAY=:99 node dist/index.js gateway --allow-unconfigured --bind lan --port $GATEWAY_PORT"
+exec su -s /bin/bash node -c "DISPLAY=:99 node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
 STARTUP
 chmod +x /opt/openclaw-data/startup.sh
 
