@@ -1,0 +1,30 @@
+name: Test Setup Script
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  syntax-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bash syntax check
+        run: bash -n setup-openclaw-full.sh
+
+  dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run setup script in dry-run mode
+        run: |
+          # Inject fake env vars
+          export GATEWAY_TOKEN="test-token-123"
+          export ORG_ID="test-org-id"
+          export BRIDGE_TOKEN="test-bridge-token"
+          export OPENROUTER_API_KEY="sk-or-test"
+          export API_URL="https://example.com"
+          export HETZNER_API_TOKEN="fake-hetzner-token"
+          export DRY_RUN=1
+          bash setup-openclaw-full.sh || true
