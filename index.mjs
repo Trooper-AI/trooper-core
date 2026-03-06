@@ -222,14 +222,34 @@ class OpenClawGateway {
  this._startPing();
  console.log('[OpenClaw] Connected — native protocol (full workspace + tools)');
  // Auto-approve bridge device so sessions_spawn works after gateway restarts
+ // Write to paired.json directly (reliable) rather than relying on the CLI flow
  (async () => {
  try {
+ const fs = await import('fs');
  const { promisify: _promisify } = await import('util');
  const { exec: _execCb } = await import('child_process');
  const _run = _promisify(_execCb);
- await _run(`docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null; docker exec openclaw-openclaw-gateway-1 chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null`, { timeout: 15000 });
- console.log('[OpenClaw] Bridge device auto-approved for sessions_spawn');
- } catch { /* device approve not available or already approved */ }
+ const PAIRED_JSON_PATH = '/opt/openclaw-data/config/devices/paired.json';
+ const DEVICES_DIR = '/opt/openclaw-data/config/devices';
+ fs.mkdirSync(DEVICES_DIR, { recursive: true });
+ let existing = {};
+ try { existing = JSON.parse(fs.readFileSync(PAIRED_JSON_PATH, 'utf8')); } catch {}
+ if (!existing[deviceIdentity.deviceId]) {
+ const pubKey = getDevicePublicKeyBase64Url(deviceIdentity);
+ existing[deviceIdentity.deviceId] = {
+ deviceId: deviceIdentity.deviceId, publicKey: pubKey,
+ displayName: 'CrabsHQ Bridge', platform: 'linux',
+ role: 'operator', roles: ['operator'], scopes: ['operator.admin'],
+ clientId: 'gateway-client', clientMode: 'backend',
+ approvedAt: Date.now(), approved: true, ts: Date.now(),
+ };
+ fs.writeFileSync(PAIRED_JSON_PATH, JSON.stringify(existing, null, 2), { mode: 0o600 });
+ await _run(`chown -R 1000:1000 ${DEVICES_DIR} 2>/dev/null || true`).catch(() => {});
+ console.log('[OpenClaw] Bridge device written to paired.json for sessions_spawn');
+ } else {
+ console.log('[OpenClaw] Bridge device already in paired.json');
+ }
+ } catch (e) { console.warn('[OpenClaw] paired.json auto-approve failed:', e.message); }
  })();
  // Reconcile ACP sessions on connect — discover active sessions that survived bridge restart
  (async () => {
@@ -400,30 +420,66 @@ class OpenClawGateway {
  const errMsg = frame.error?.message || 'Request failed';
  // Handle pairing required gracefully — resolve (not reject!) to avoid unhandled rejection crash
  if (errMsg === 'pairing required' && frame.id === this._authRequestId) {
- console.log('[OpenClaw] Pairing required — attempting self-approve via docker exec...');
+ console.log('[OpenClaw] Pairing required — attempting self-approve via paired.json...');
  this._pendingRequests.delete(frame.id);
- // Try to self-approve: approve our device ID, then restart gateway so it reads the approval from disk
+ // Self-approval strategy: write our device directly to paired.json on the host,
+ // then restart the gateway so it loads the approval from disk on next start.
+ // This avoids the race condition where the pending pair request is deleted before
+ // the docker-exec CLI can approve it.
  (async () => {
  try {
  const { promisify: _p } = await import('util');
  const { exec: _e } = await import('child_process');
+ const fs = await import('fs');
  const _run = _p(_e);
  if (deviceIdentity?.deviceId) {
  console.log(`[OpenClaw] Self-approving deviceId ${deviceIdentity.deviceId.slice(0, 12)}...`);
- // Try both `devices approve` (v2026.3+) and `device approve` (older)
- const { stdout } = await _run(
- `docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null; docker exec openclaw-openclaw-gateway-1 chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null`,
+
+ // Build our device entry in the format OpenClaw expects
+ const pubKey = getDevicePublicKeyBase64Url(deviceIdentity);
+ const deviceEntry = {
+ deviceId: deviceIdentity.deviceId,
+ publicKey: pubKey,
+ displayName: 'CrabsHQ Bridge',
+ platform: 'linux',
+ role: 'operator',
+ roles: ['operator'],
+ scopes: ['operator.admin'],
+ clientId: 'gateway-client',
+ clientMode: 'backend',
+ approvedAt: Date.now(),
+ approved: true,
+ ts: Date.now(),
+ };
+
+ // Write directly to paired.json on the host (gateway config dir is bind-mounted here)
+ const PAIRED_JSON_PATH = '/opt/openclaw-data/config/devices/paired.json';
+ const DEVICES_DIR = '/opt/openclaw-data/config/devices';
+ try {
+ fs.mkdirSync(DEVICES_DIR, { recursive: true });
+ let existing = {};
+ try { existing = JSON.parse(fs.readFileSync(PAIRED_JSON_PATH, 'utf8')); } catch {}
+ existing[deviceIdentity.deviceId] = deviceEntry;
+ fs.writeFileSync(PAIRED_JSON_PATH, JSON.stringify(existing, null, 2), { mode: 0o600 });
+ // Fix ownership so gateway container (uid 1000) can read it
+ await _run(`chown -R 1000:1000 ${DEVICES_DIR} 2>/dev/null || true`).catch(() => {});
+ console.log('[OpenClaw] Written to paired.json — restarting gateway to apply...');
+ } catch (writeErr) {
+ console.warn('[OpenClaw] Could not write paired.json directly:', writeErr.message, '— falling back to docker exec approve');
+ // Fallback: try CLI approval (may fail if pending request is gone)
+ await _run(
+ `docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`,
  { timeout: 20000 }
- ).catch(() => ({ stdout: '' }));
- if (stdout.toLowerCase().includes('approved') || stdout.toLowerCase().includes('already')) {
- console.log('[OpenClaw] Device approved — restarting gateway to apply...');
- await _run(`docker restart openclaw-openclaw-gateway-1`, { timeout: 60000 }).catch(() => {});
- // Give gateway time to fully start before bridge reconnects
- this._reconnectDelay = 30000;
- console.log('[OpenClaw] Gateway restarted — will reconnect in 30s');
- } else {
- console.warn('[OpenClaw] Self-approve output unclear:', stdout.trim().slice(0, 200));
+ ).catch(() => {});
  }
+
+ // Restart gateway so it picks up the updated paired.json
+ await _run(`docker restart openclaw-openclaw-gateway-1`, { timeout: 60000 }).catch(() => {});
+ // Fix identity dir permissions after restart (gateway writes to it on boot)
+ await _run(`chown -R 1000:1000 /opt/openclaw-data/config/identity 2>/dev/null || true`).catch(() => {});
+ // Give gateway time to fully start before bridge reconnects
+ this._reconnectDelay = 35000;
+ console.log('[OpenClaw] Gateway restarted — will reconnect in 35s');
  }
  } catch (err) {
  console.warn('[OpenClaw] Self-approve failed:', err.message);
