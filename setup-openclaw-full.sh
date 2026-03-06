@@ -1072,7 +1072,7 @@ sed -i 's|/usr/bin/google-chrome-stable|/opt/chrome-wrapper.sh|g' /opt/openclaw-
 
 # Fix permissions: container runs as uid 1000, files should be private
 chown -R 1000:1000 /opt/openclaw-data
-chmod 700 /opt/openclaw-data/config
+chmod 755 /opt/openclaw-data/config
 chmod 600 /opt/openclaw-data/config/openclaw.json
 chmod 600 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json
 

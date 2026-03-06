@@ -3243,7 +3243,7 @@ app.post('/config/api-keys', async (req, res) => {
  config.tools.allow.push('web_search');
  }
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
- await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json');
+ await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
  } catch (e) { console.error('Failed to update openclaw.json:', e.message); }
  }
 
@@ -3299,7 +3299,7 @@ function normalizeModelId(model) {
  config.agents.defaults.model.primary = normalizedModel;
  console.log(`[bridge] Updating default model to: ${normalizedModel}`);
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
- await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json');
+ await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
  } catch (e) { console.error('Failed to update default model in openclaw.json:', e.message); _syncWarnings.push(`Default model update failed: ${e.message}`); }
  }
 
@@ -3343,7 +3343,7 @@ function normalizeModelId(model) {
  }
 
  writeFileSync(authPath, JSON.stringify(auth, null, 2));
- await run(`chown 1000:1000 ${authPath} && chmod 600 ${authPath}`);
+ await run(`chown 1000:1000 ${authPath} 2>/dev/null; chmod 664 ${authPath}`).catch(() => {});
  console.log(`[bridge] Updated auth-profiles.json for: ${keysToUpdate.map(e => e.provider).join(', ')}`);
 
  // Propagate updated auth-profiles to any existing sub-agent directories
@@ -3356,7 +3356,7 @@ function normalizeModelId(model) {
  const subAuthPath = `${agentsDir}/${dir.name}/agent/auth-profiles.json`;
  if (existsSync(subAuthPath)) {
  writeFileSync(subAuthPath, updatedAuth);
- await run(`chown 1000:1000 ${subAuthPath} && chmod 600 ${subAuthPath}`);
+ await run(`chown 1000:1000 ${subAuthPath} 2>/dev/null; chmod 664 ${subAuthPath}`).catch(() => {});
  }
  }
  } catch (e) { console.error('Failed to propagate auth to sub-agents:', e.message); }
@@ -3418,7 +3418,7 @@ function normalizeModelId(model) {
  }
  if (changed) {
  writeFileSync(configPath, JSON.stringify(config, null, 2));
- await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json');
+ await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
  }
  } catch (e) { console.error('Failed to update openclaw.json providers:', e.message); }
  }
