@@ -33,6 +33,7 @@ GATEWAY_PORT=18789
 MEDIA_PORT=18791
 API_URL="{{API_URL}}"
 COMPOSIO_API_KEY="{{COMPOSIO_API_KEY}}"
+CF_API_TOKEN="{{CF_API_TOKEN}}"
 PRIMARY_PROVIDER="{{PRIMARY_PROVIDER}}"
 PRIMARY_MODEL="{{PRIMARY_MODEL}}"
 BROWSERBASE_API_KEY="{{BROWSERBASE_API_KEY}}"
@@ -204,7 +205,7 @@ DOCKER_PLATFORM="linux/amd64"
 if [ "$HOST_ARCH" = "aarch64" ] || [ "$HOST_ARCH" = "arm64" ]; then
  DOCKER_PLATFORM="linux/arm64"
 fi
-OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/openclaw/openclaw:latest}"
+OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/absurdfounder/crabhq-gateway:latest}"
 dlog "Pulling Docker image in background: ${OPENCLAW_DOCKER_IMAGE}..."
 echo "Starting background pull: ${OPENCLAW_DOCKER_IMAGE} (${DOCKER_PLATFORM})..."
 
@@ -292,6 +293,106 @@ CADDYFILE
  dlog "Caddy configured for ${HTTPS_DOMAIN}"
 else
  echo "ERROR: No public IP — Caddy HTTPS not configured!"
+fi
+
+# ── [3b/9] Cloudflare Tunnel (primary HTTPS, Caddy kept as fallback) ──
+if [ -n "${CF_API_TOKEN:-}" ] && [ -n "${ORG_ID:-}" ]; then
+ dlog "Setting up Cloudflare Tunnel..." "cloudflare-tunnel"
+
+ # Install cloudflared if not present
+ if ! command -v cloudflared &>/dev/null; then
+   curl -fsSL -o /tmp/cloudflared.deb https://pkg.cloudflare.com/cloudflared-linux-amd64.deb
+   dpkg -i /tmp/cloudflared.deb
+   rm -f /tmp/cloudflared.deb
+ fi
+
+ # Get Cloudflare account ID
+ CF_ACCOUNT_ID=$(curl -sf -H "Authorization: Bearer ${CF_API_TOKEN}" \
+   "https://api.cloudflare.com/client/v4/accounts?page=1&per_page=1" | \
+   python3 -c "import sys,json; print(json.load(sys.stdin)['result'][0]['id'])" 2>/dev/null || true)
+
+ if [ -n "$CF_ACCOUNT_ID" ]; then
+   TUNNEL_NAME="org-${ORG_ID}"
+
+   # Check if tunnel already exists
+   EXISTING_TUNNEL=$(curl -sf -H "Authorization: Bearer ${CF_API_TOKEN}" \
+     "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/cfd_tunnel?name=${TUNNEL_NAME}&is_deleted=false" | \
+     python3 -c "import sys,json; r=json.load(sys.stdin)['result']; print(r[0]['id'] if r else '')" 2>/dev/null || true)
+
+   if [ -n "$EXISTING_TUNNEL" ]; then
+     TUNNEL_ID="$EXISTING_TUNNEL"
+     echo "Cloudflare Tunnel already exists: ${TUNNEL_ID}"
+   else
+     # Create tunnel via API
+     TUNNEL_SECRET=$(openssl rand -base64 32)
+     TUNNEL_RESPONSE=$(curl -sf -X POST \
+       -H "Authorization: Bearer ${CF_API_TOKEN}" \
+       -H "Content-Type: application/json" \
+       "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/cfd_tunnel" \
+       -d "{\"name\":\"${TUNNEL_NAME}\",\"tunnel_secret\":\"${TUNNEL_SECRET}\"}" 2>/dev/null || true)
+     TUNNEL_ID=$(echo "$TUNNEL_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['result']['id'])" 2>/dev/null || true)
+     echo "Cloudflare Tunnel created: ${TUNNEL_ID}"
+   fi
+
+   if [ -n "$TUNNEL_ID" ]; then
+     # Get tunnel token for cloudflared connector
+     TUNNEL_TOKEN=$(curl -sf -H "Authorization: Bearer ${CF_API_TOKEN}" \
+       "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/token" | \
+       python3 -c "import sys,json; print(json.load(sys.stdin)['result'])" 2>/dev/null || true)
+
+     # Configure tunnel ingress via API
+     curl -sf -X PUT \
+       -H "Authorization: Bearer ${CF_API_TOKEN}" \
+       -H "Content-Type: application/json" \
+       "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/configurations" \
+       -d "{\"config\":{\"ingress\":[
+         {\"hostname\":\"${HTTPS_DOMAIN}\",\"path\":\"ws\",\"service\":\"http://localhost:${BRIDGE_PORT}\"},
+         {\"hostname\":\"${HTTPS_DOMAIN}\",\"path\":\"vnc/*\",\"service\":\"http://localhost:6080\"},
+         {\"hostname\":\"${HTTPS_DOMAIN}\",\"service\":\"http://localhost:${GATEWAY_PORT}\"},
+         {\"service\":\"http_status:404\"}
+       ]}}" >/dev/null 2>&1
+
+     # Route DNS to tunnel (CNAME)
+     CF_ZONE_ID="da3b8c817a0e3479c05f3f2aac6e04e7"
+     curl -sf -X POST \
+       -H "Authorization: Bearer ${CF_API_TOKEN}" \
+       -H "Content-Type: application/json" \
+       "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records" \
+       -d "{\"type\":\"CNAME\",\"name\":\"${HTTPS_DOMAIN}\",\"content\":\"${TUNNEL_ID}.cfargotunnel.com\",\"ttl\":1,\"proxied\":true}" >/dev/null 2>&1 || true
+
+     # Set up cloudflared as a systemd service using tunnel token
+     if [ -n "$TUNNEL_TOKEN" ]; then
+       mkdir -p /etc/cloudflared
+       cat > /etc/systemd/system/cloudflared.service << CFDSERVICE
+[Unit]
+Description=Cloudflare Tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate run --token ${TUNNEL_TOKEN}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+CFDSERVICE
+       systemctl daemon-reload
+       systemctl enable --now cloudflared
+       echo "Cloudflare Tunnel: running (${TUNNEL_NAME} → ${HTTPS_DOMAIN})"
+       dlog "Cloudflare Tunnel configured: ${HTTPS_DOMAIN}"
+     else
+       echo "WARNING: Could not get tunnel token — cloudflared not started"
+     fi
+   else
+     echo "WARNING: Cloudflare Tunnel creation failed — falling back to Caddy"
+   fi
+ else
+   echo "WARNING: Could not get Cloudflare account ID — falling back to Caddy"
+ fi
+else
+ echo "Cloudflare Tunnel: skipped (no CF_API_TOKEN)"
 fi
 
 # ── [4/9] Model Routing ────────────────────────────────────────────
@@ -670,8 +771,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /usr/bin/docker:/usr/bin/docker:ro
       - /opt/openclaw-data/startup.sh:/opt/startup.sh:ro
-      - /opt/openclaw-data/chrome-wrapper.sh:/opt/openclaw-data/chrome-wrapper.sh:ro
-      - openclaw-pkg-cache:/opt/pkg-cache
+      - /opt/openclaw-data/chrome-wrapper.sh:/opt/chrome-wrapper.sh:ro
       - /var/run/openclaw:/var/run/openclaw
     group_add:
       - "${DOCKER_GID}"
@@ -682,160 +782,38 @@ services:
       OPENROUTER_API_KEY: \${OPENROUTER_API_KEY:-}
       MISTRAL_API_KEY: \${MISTRAL_API_KEY:-}
       BRAVE_API_KEY: \${BRAVE_API_KEY}
-      CHROME_PATH: /opt/openclaw-data/chrome-wrapper.sh
-      CHROMIUM_PATH: /opt/openclaw-data/chrome-wrapper.sh
-      PUPPETEER_EXECUTABLE_PATH: /opt/openclaw-data/chrome-wrapper.sh
-      OPENCLAW_BROWSER_EXECUTABLE: /opt/openclaw-data/chrome-wrapper.sh
+      CHROME_PATH: /opt/chrome-wrapper.sh
+      CHROMIUM_PATH: /opt/chrome-wrapper.sh
+      PUPPETEER_EXECUTABLE_PATH: /opt/chrome-wrapper.sh
+      OPENCLAW_BROWSER_EXECUTABLE: /opt/chrome-wrapper.sh
       COMPOSIO_API_KEY: \${COMPOSIO_API_KEY}
     user: "0:0"
-    entrypoint: ["/bin/bash", "/opt/startup.sh"]
+    entrypoint: ["/bin/bash", "/opt/entrypoint.sh"]
     command: ["${GATEWAY_PORT}"]
-volumes:
-  openclaw-pkg-cache:
 OVERRIDE
 
-# Startup script that ensures Chrome + Xvfb are installed before starting the gateway
+# Startup script — Chrome + TigerVNC are pre-installed in the custom Docker image
+# Only need: Xvnc start, permission fix, gateway start
 cat > /opt/openclaw-data/startup.sh << 'STARTUP'
 #!/bin/bash
-PKG_CACHE="/opt/pkg-cache"
-SNAPSHOT="${PKG_CACHE}/deps-snapshot.tar.gz"
-CHROME_DEB_CACHE="${PKG_CACHE}/chrome.deb"
-
-# Fast path: restore from snapshot if available (< 5 seconds vs 60-90s full install)
-if ! command -v google-chrome-stable &>/dev/null && [ -f "$SNAPSHOT" ]; then
- echo "[startup] Restoring Chrome + TigerVNC from cached snapshot..."
- tar xzf "$SNAPSHOT" -C / 2>/dev/null
- ldconfig 2>/dev/null
- if command -v google-chrome-stable &>/dev/null; then
- echo "[startup] Restored from cache: $(google-chrome-stable --version 2>/dev/null)"
- fi
-fi
-
-# Ensure Chrome is installed (uses cached .deb if available, else downloads)
-if ! command -v google-chrome-stable &>/dev/null; then
- echo "[startup] Chrome not found, installing..."
- dpkg --configure -a 2>/dev/null
- # Try cached .deb first, then download
- if [ -f "$CHROME_DEB_CACHE" ]; then
- echo "[startup] Installing Chrome from cached .deb..."
- apt-get update -qq 2>/dev/null
- dpkg -i "$CHROME_DEB_CACHE" 2>/dev/null || apt-get install -y -f 2>/dev/null
- echo "[startup] Chrome installed from cache: $(google-chrome-stable --version 2>/dev/null || echo FAILED)"
- else
- for _ca in 1 2 3; do
- if curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb; then
- apt-get update -qq 2>/dev/null
- dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f 2>/dev/null
- # Cache the .deb for next restart
- mkdir -p "$PKG_CACHE"
- cp /tmp/chrome.deb "$CHROME_DEB_CACHE" 2>/dev/null
- rm -f /tmp/chrome.deb
- echo "[startup] Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo FAILED)"
- break
- fi
- echo "[startup] Chrome download attempt ${_ca} failed, retrying in 5s..."
- sleep 5
- done
- fi
-else
- echo "[startup] Chrome already installed: $(google-chrome-stable --version 2>/dev/null)"
-fi
-
-# Ensure Chrome's shared library dependencies are present (needed after snapshot restore
-# since the snapshot only captures binaries, not all transitive .so deps)
-CHROME_DEPS="libnspr4 libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
- libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 \
- libcairo2 libasound2 libxshmfence1 libx11-xcb1 fonts-liberation"
-if command -v google-chrome-stable &>/dev/null; then
- MISSING_DEPS=""
- for dep in $CHROME_DEPS; do
- if ! dpkg -s "$dep" &>/dev/null; then
-  MISSING_DEPS="$MISSING_DEPS $dep"
- fi
- done
- if [ -n "$MISSING_DEPS" ]; then
- echo "[startup] Installing missing Chrome dependencies:$MISSING_DEPS"
- apt-get update -qq 2>/dev/null && apt-get install -y --no-install-recommends $MISSING_DEPS 2>/dev/null
- ldconfig 2>/dev/null
- echo "[startup] Chrome deps installed: $(google-chrome-stable --version 2>/dev/null || echo FAILED)"
- fi
-fi
-
-# Ensure TigerVNC is installed (Xvnc = virtual display + VNC server in one process)
-# Replaces Xvfb — provides the display extensions need PLUS live VNC streaming to web app
-if ! command -v Xvnc &>/dev/null; then
- echo "[startup] Installing TigerVNC for display + VNC support..."
- apt-get update -qq 2>/dev/null && apt-get install -y -qq tigervnc-standalone-server 2>/dev/null
- echo "[startup] TigerVNC installed (Xvnc available)"
-else
- echo "[startup] TigerVNC already installed"
-fi
-# Save snapshot for fast restore on next container restart
-if command -v google-chrome-stable &>/dev/null && [ ! -f "$SNAPSHOT" ]; then
- echo "[startup] Creating package snapshot for fast restarts..."
- mkdir -p "$PKG_CACHE"
- tar czf "$SNAPSHOT" \
- /usr/bin/google-chrome-stable \
- /opt/google/chrome/ \
- /usr/bin/Xvnc \
- /usr/bin/xkbcomp \
- /usr/lib/xorg/ \
- /usr/share/X11/xkb/ \
- /usr/lib/*/libXfont2* \
- /usr/lib/*/libfontenc* \
- /usr/lib/*/libxkbfile* \
- /usr/lib/*/libpixman* \
- /usr/lib/*/libxshmfence* \
- /usr/lib/*/libnspr4* \
- /usr/lib/*/libnss3* \
- /usr/lib/*/libnssutil3* \
- /usr/lib/*/libsmime3* \
- /usr/lib/*/libssl3* \
- /usr/lib/*/libatk-1.0* \
- /usr/lib/*/libatk-bridge-2.0* \
- /usr/lib/*/libatspi* \
- /usr/lib/*/libcups* \
- /usr/lib/*/libdrm* \
- /usr/lib/*/libxkbcommon* \
- /usr/lib/*/libXcomposite* \
- /usr/lib/*/libXdamage* \
- /usr/lib/*/libXrandr* \
- /usr/lib/*/libgbm* \
- /usr/lib/*/libpango* \
- /usr/lib/*/libcairo* \
- /usr/lib/*/libasound* \
- /usr/lib/*/libX11-xcb* \
- /usr/lib/*/libplc4* \
- /usr/lib/*/libplds4* \
- 2>/dev/null || true
- echo "[startup] Snapshot saved ($(du -sh "$SNAPSHOT" 2>/dev/null | cut -f1))"
-fi
-# Install Composio CLI if API key is set and not already installed
-if [ -n "${COMPOSIO_API_KEY:-}" ] && ! command -v composio &>/dev/null; then
- echo "[startup] Installing Composio CLI..."
- apt-get update -qq 2>/dev/null
- apt-get install -y -qq python3 python3-pip 2>/dev/null
- pip install --break-system-packages composio-core 2>/dev/null || pip install composio-core 2>/dev/null
- echo "[startup] Composio installed: $(composio --version 2>/dev/null || echo FAILED)"
-elif [ -n "${COMPOSIO_API_KEY:-}" ]; then
- echo "[startup] Composio already installed: $(composio --version 2>/dev/null)"
-fi
 GATEWAY_PORT="${1:-18789}"
-# Start Xvnc at boot so VNC live view is always available (not just when Chrome launches)
+
+# Start Xvnc on :99 for live browser view
 if command -v Xvnc &>/dev/null && ! pgrep -f "Xvnc :99" >/dev/null 2>&1; then
- echo "[startup] Starting Xvnc on :99 (port 5999) for live browser view..."
- Xvnc :99 -geometry 1920x1080 -depth 24 -rfbport 5999 -localhost \
- -SecurityTypes None -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents &
- sleep 0.5
- echo "[startup] Xvnc started on :99"
+  echo "[startup] Starting Xvnc on :99 (port 5999)..."
+  Xvnc :99 -geometry 1920x1080 -depth 24 -rfbport 5999 -localhost \
+    -SecurityTypes None -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents &
+  sleep 0.5
+  echo "[startup] Xvnc started on :99"
 fi
+
 # Fix permissions: ensure node user can read config files
-# (files may have been written by root via bridge or UI before container started)
 chown -R 1000:1000 /home/node/.openclaw 2>/dev/null || true
 chown -R 1000:1000 /home/node/.npm 2>/dev/null || true
 chmod 700 /home/node/.openclaw 2>/dev/null || true
 chmod 600 /home/node/.openclaw/openclaw.json 2>/dev/null || true
 find /home/node/.openclaw/agents -name 'auth-profiles.json' -exec chmod 600 {} \; 2>/dev/null || true
+
 # Drop back to node user for the gateway process
 exec su -s /bin/bash node -c "DISPLAY=:99 node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
 STARTUP
@@ -1033,7 +1011,7 @@ chmod +x /opt/openclaw-data/chrome-wrapper.sh
 # Set headless:false so OpenClaw doesn't add --headless (Chrome uses the Xvnc display)
 sed -i 's|"headless": true|"headless": false|g' /opt/openclaw-data/config/openclaw.json
 # Point browser config at the wrapper
-sed -i 's|/usr/bin/google-chrome-stable|/opt/openclaw-data/chrome-wrapper.sh|g' /opt/openclaw-data/config/openclaw.json
+sed -i 's|/usr/bin/google-chrome-stable|/opt/chrome-wrapper.sh|g' /opt/openclaw-data/config/openclaw.json
 
 
 
@@ -1100,72 +1078,12 @@ for _cw in $(seq 1 20); do
 done
 sleep 2
 
-# Wait for startup.sh to finish Chrome install (it runs as the container entrypoint)
-dlog "Waiting for Chrome install in container..."
-for _chrome_wait in $(seq 1 30); do
- if docker compose exec -T openclaw-gateway bash -c 'command -v google-chrome-stable' >/dev/null 2>&1; then
- echo "Chrome ready after ${_chrome_wait}s"
- break
- fi
- sleep 2
-done
-
-# Fallback: if startup.sh didn't install Chrome, install it now using curl
+# Chrome + TigerVNC are pre-installed in the custom Docker image — no runtime install needed
+# Verify they're available
 docker compose exec -T openclaw-gateway bash -c '
- if command -v google-chrome-stable &>/dev/null; then
- echo "Chrome: $(google-chrome-stable --version 2>/dev/null)"
- exit 0
- fi
- echo "Chrome not found, installing via curl..."
- for _cr in 1 2 3; do
- if curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb; then
- apt-get update -qq 2>/dev/null
- dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f 2>/dev/null
- rm -f /tmp/chrome.deb
- echo "Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo unknown)"
- exit 0
- fi
- echo "Chrome download attempt ${_cr} failed, retrying..."
- sleep 5
- done
- echo "WARNING: Chrome install failed (non-fatal — startup.sh will retry on next restart)"
-' || echo "Chrome exec skipped (non-fatal)"
-# Pre-install TigerVNC in container (so startup.sh doesn't have to on every restart)
-docker compose exec -T openclaw-gateway bash -c '
-  if command -v Xvnc &>/dev/null; then
-    echo "TigerVNC already installed"
-  else
-    echo "Installing TigerVNC..."
-    apt-get update -qq 2>/dev/null && apt-get install -y -qq tigervnc-standalone-server 2>/dev/null
-    echo "TigerVNC installed: $(Xvnc -version 2>&1 | head -1)"
-  fi
-' || echo "TigerVNC exec skipped (non-fatal)"
-
-# Create package snapshot now (Chrome + TigerVNC + deps) so future restarts are fast
-docker compose exec -T openclaw-gateway bash -c '
-  PKG_CACHE="/opt/pkg-cache"
-  SNAPSHOT="${PKG_CACHE}/deps-snapshot.tar.gz"
-  if [ ! -f "$SNAPSHOT" ] && command -v google-chrome-stable &>/dev/null; then
-    echo "Creating package snapshot for fast restarts..."
-    mkdir -p "$PKG_CACHE"
-    tar czf "$SNAPSHOT" \
-      /usr/bin/google-chrome-stable /opt/google/chrome/ \
-      /usr/bin/Xvnc /usr/bin/xkbcomp \
-      /usr/lib/xorg/ /usr/share/X11/xkb/ \
-      /usr/lib/*/libXfont2* /usr/lib/*/libfontenc* /usr/lib/*/libxkbfile* \
-      /usr/lib/*/libpixman* /usr/lib/*/libxshmfence* \
-      /usr/lib/*/libnspr4* /usr/lib/*/libnss3* /usr/lib/*/libnssutil3* \
-      /usr/lib/*/libsmime3* /usr/lib/*/libssl3* \
-      /usr/lib/*/libatk-1.0* /usr/lib/*/libatk-bridge-2.0* /usr/lib/*/libatspi* \
-      /usr/lib/*/libcups* /usr/lib/*/libdrm* /usr/lib/*/libxkbcommon* \
-      /usr/lib/*/libXcomposite* /usr/lib/*/libXdamage* /usr/lib/*/libXrandr* \
-      /usr/lib/*/libgbm* /usr/lib/*/libpango* /usr/lib/*/libcairo* \
-      /usr/lib/*/libasound* /usr/lib/*/libX11-xcb* \
-      /usr/lib/*/libplc4* /usr/lib/*/libplds4* \
-      2>/dev/null || true
-    echo "Snapshot saved ($(du -sh "$SNAPSHOT" 2>/dev/null | cut -f1))"
-  fi
-' || echo "Snapshot creation skipped (non-fatal)"
+  echo "Chrome: $(google-chrome-stable --version 2>/dev/null || echo NOT_FOUND)"
+  echo "Xvnc: $(Xvnc -version 2>&1 | head -1 || echo NOT_FOUND)"
+' || echo "Container exec skipped (non-fatal)"
 
 docker image prune -f 2>/dev/null || true
 
