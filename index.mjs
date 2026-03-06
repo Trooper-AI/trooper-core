@@ -3008,23 +3008,30 @@ app.all('/desktop-api/*', async (req, res) => {
 
 // ── Gateway Management ───────────────────────────────────────────────
 
-// Patch openclaw.json to disable device auth (fixes pairing issues on existing VPS)
+// Patch openclaw.json to fix device-identity ownership and restart gateway
 app.post('/gateway/patch-auth', (req, res) => {
  try {
- const fs = require('fs');
- const CONFIG_PATH = '/opt/openclaw-data/config/openclaw.json';
- const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
- if (!config.gateway) config.gateway = {};
- config.gateway.dangerouslyDisableDeviceAuth = true;
- if (!config.gateway.controlUi) config.gateway.controlUi = {};
- config.gateway.controlUi.dangerouslyDisableDeviceAuth = true;
- fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
- execSync('chown 1000:1000 ' + CONFIG_PATH + ' 2>/dev/null || true', { timeout: 5000 });
- console.log('[bridge] Patched openclaw.json: dangerouslyDisableDeviceAuth=true');
- // Restart gateway to apply
+ const fs = await import('fs');
+ // Fix identity file ownership so bridge can read it
+ execSync('chown node:node /opt/openclaw-bridge/device-identity.json 2>/dev/null || chown 1000:1000 /opt/openclaw-bridge/device-identity.json 2>/dev/null || true', { timeout: 5000 });
+ execSync('chmod 600 /opt/openclaw-bridge/device-identity.json 2>/dev/null || true', { timeout: 5000 });
+ // Ensure paired.json has our device
+ const PAIRED_PATH = '/opt/openclaw-data/config/devices/paired.json';
+ const DEVICES_DIR = '/opt/openclaw-data/config/devices';
+ execSync('mkdir -p ' + DEVICES_DIR, { timeout: 5000 });
+ let paired = {};
+ try { paired = JSON.parse(require('fs').readFileSync(PAIRED_PATH, 'utf8')); } catch {}
+ if (!paired[deviceIdentity.deviceId]) {
+ const pubKey = getDevicePublicKeyBase64Url(deviceIdentity);
+ paired[deviceIdentity.deviceId] = { deviceId: deviceIdentity.deviceId, publicKey: pubKey, displayName: 'CrabsHQ Bridge', platform: 'linux', role: 'operator', roles: ['operator'], scopes: ['operator.admin'], clientId: 'gateway-client', clientMode: 'backend', approvedAt: Date.now(), approved: true, ts: Date.now() };
+ require('fs').writeFileSync(PAIRED_PATH, JSON.stringify(paired, null, 2));
+ execSync('chown -R 1000:1000 ' + DEVICES_DIR + ' 2>/dev/null || true', { timeout: 5000 });
+ console.log('[bridge] Added device to paired.json');
+ }
+ // Restart gateway
  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
  setTimeout(() => gateway.connect(), 15000);
- res.json({ success: true, message: 'Config patched and gateway restarted' });
+ res.json({ success: true, message: 'Identity fixed and gateway restarted' });
  } catch (err) {
  res.status(500).json({ error: 'Patch failed', details: err.message });
  }
