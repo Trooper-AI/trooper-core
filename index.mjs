@@ -1845,13 +1845,37 @@ app.get('/health', (req, res) => {
  const setupDone = existsSync('/tmp/openclaw-setup-complete')
    || existsSync('/opt/openclaw-bridge/.setup-complete')
    || process.uptime() > 300;
+
+ // Check VNC (Xvnc on :99)
+ let vncRunning = false;
+ try { vncRunning = !!execSync('pgrep -f "Xvnc :99"', { timeout: 2000 }).toString().trim(); } catch {}
+
+ // Check browser availability
+ let browserAvailable = false;
+ try { browserAvailable = existsSync('/usr/bin/google-chrome-stable') || existsSync('/opt/chrome-wrapper.sh'); } catch {}
+
  res.json({
  status: setupDone ? 'ok' : 'installing',
  service: 'openclaw-bridge',
- openclawConnected: gateway.isReady,
+ gateway: {
+   connected: gateway.isReady,
+   paired: gateway.isReady,
+ },
+ browser: {
+   available: browserAvailable,
+   port: 18791,
+ },
+ vnc: {
+   running: vncRunning,
+   port: 5999,
+ },
+ agents: {
+   count: pendingRequests.size,
+   main: gateway.isReady ? 'connected' : 'disconnected',
+ },
  mode: gateway.isReady ? 'websocket' : 'poller-fallback',
  pending: pendingRequests.size, skills: skillRegistry.size,
- uptime: process.uptime(),
+ uptime: Math.floor(process.uptime()),
  });
 });
 
