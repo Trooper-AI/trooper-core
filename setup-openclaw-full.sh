@@ -1130,6 +1130,43 @@ docker compose exec -T openclaw-gateway bash -c '
  done
  echo "WARNING: Chrome install failed (non-fatal — startup.sh will retry on next restart)"
 ' || echo "Chrome exec skipped (non-fatal)"
+# Pre-install TigerVNC in container (so startup.sh doesn't have to on every restart)
+docker compose exec -T openclaw-gateway bash -c '
+  if command -v Xvnc &>/dev/null; then
+    echo "TigerVNC already installed"
+  else
+    echo "Installing TigerVNC..."
+    apt-get update -qq 2>/dev/null && apt-get install -y -qq tigervnc-standalone-server 2>/dev/null
+    echo "TigerVNC installed: $(Xvnc -version 2>&1 | head -1)"
+  fi
+' || echo "TigerVNC exec skipped (non-fatal)"
+
+# Create package snapshot now (Chrome + TigerVNC + deps) so future restarts are fast
+docker compose exec -T openclaw-gateway bash -c '
+  PKG_CACHE="/opt/pkg-cache"
+  SNAPSHOT="${PKG_CACHE}/deps-snapshot.tar.gz"
+  if [ ! -f "$SNAPSHOT" ] && command -v google-chrome-stable &>/dev/null; then
+    echo "Creating package snapshot for fast restarts..."
+    mkdir -p "$PKG_CACHE"
+    tar czf "$SNAPSHOT" \
+      /usr/bin/google-chrome-stable /opt/google/chrome/ \
+      /usr/bin/Xvnc /usr/bin/xkbcomp \
+      /usr/lib/xorg/ /usr/share/X11/xkb/ \
+      /usr/lib/*/libXfont2* /usr/lib/*/libfontenc* /usr/lib/*/libxkbfile* \
+      /usr/lib/*/libpixman* /usr/lib/*/libxshmfence* \
+      /usr/lib/*/libnspr4* /usr/lib/*/libnss3* /usr/lib/*/libnssutil3* \
+      /usr/lib/*/libsmime3* /usr/lib/*/libssl3* \
+      /usr/lib/*/libatk-1.0* /usr/lib/*/libatk-bridge-2.0* /usr/lib/*/libatspi* \
+      /usr/lib/*/libcups* /usr/lib/*/libdrm* /usr/lib/*/libxkbcommon* \
+      /usr/lib/*/libXcomposite* /usr/lib/*/libXdamage* /usr/lib/*/libXrandr* \
+      /usr/lib/*/libgbm* /usr/lib/*/libpango* /usr/lib/*/libcairo* \
+      /usr/lib/*/libasound* /usr/lib/*/libX11-xcb* \
+      /usr/lib/*/libplc4* /usr/lib/*/libplds4* \
+      2>/dev/null || true
+    echo "Snapshot saved ($(du -sh "$SNAPSHOT" 2>/dev/null | cut -f1))"
+  fi
+' || echo "Snapshot creation skipped (non-fatal)"
+
 docker image prune -f 2>/dev/null || true
 
 # Wait for gateway to be listening before running setup/doctor
