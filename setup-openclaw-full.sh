@@ -535,6 +535,17 @@ mkdir -p /opt/openclaw-data/config/agents/main/agent
 mkdir -p /opt/openclaw-data/config/hooks
 mkdir -p /opt/openclaw-data/config/credentials
 
+# Create node user on host — bridge service uses /home/node/.openclaw for CLI sub-connections (browser, cron tools)
+if ! id -u node >/dev/null 2>&1; then
+  useradd -r -m -s /bin/bash node 2>/dev/null || true
+fi
+# Add node to docker group so it can exec into containers
+usermod -aG docker node 2>/dev/null || true
+mkdir -p /home/node/.openclaw/identity /home/node/.openclaw/config
+chown -R node:node /home/node/.openclaw 2>/dev/null || chown -R 1000:1000 /home/node/.openclaw 2>/dev/null || true
+# Also chown the bridge dir so node can read its own identity file
+chown -R node:node /opt/openclaw-bridge 2>/dev/null || true
+
 # .env for docker compose — pass all available provider keys
 cat > /opt/openclaw/.env << ENV
 OPENCLAW_IMAGE=openclaw:local
@@ -1578,6 +1589,8 @@ Requires=openclaw-docker.service
 
 [Service]
 Type=simple
+User=node
+Group=node
 WorkingDirectory=/opt/openclaw-bridge
 ExecStart=/usr/bin/node /opt/openclaw-bridge/index.mjs
 Restart=always
