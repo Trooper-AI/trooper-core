@@ -7,6 +7,8 @@ import cors from 'cors';
 import { EventEmitter } from 'events';
 import { execSync, spawn } from 'child_process';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
+import { readFile, writeFile, readdir } from 'fs/promises';
+import os from 'os';
 import { randomUUID, generateKeyPairSync, createHash, createPrivateKey, createPublicKey, sign } from 'crypto';
 import path from 'path';
 const { dirname } = path;
@@ -2621,6 +2623,77 @@ app.post('/dm', async (req, res) => {
  } catch (err) {
  console.error(`[DM] Failed for ${agentName}:`, err.message);
  res.status(502).json({ error: `DM failed: ${err.message}` });
+ }
+});
+
+// Cron: list jobs from OpenClaw's local cron store
+app.get('/cron/jobs', async (req, res) => {
+ try {
+   const cronStorePath = path.join(os.homedir(), '.openclaw', 'cron', 'jobs.json');
+   const raw = await readFile(cronStorePath, 'utf8').catch(() => null);
+   if (raw) {
+     const data = JSON.parse(raw);
+     return res.json({ jobs: data.jobs || [] });
+   }
+   res.json({ jobs: [] });
+ } catch (e) {
+   console.error('Failed to read cron jobs:', e.message);
+   res.json({ jobs: [] });
+ }
+});
+
+// Cron: get run history from OpenClaw's local cron runs
+app.get('/cron/history', async (req, res) => {
+ try {
+   const { limit = 50, jobId } = req.query;
+   const runsDir = path.join(os.homedir(), '.openclaw', 'cron', 'runs');
+   const files = await readdir(runsDir).catch(() => []);
+   const runs = [];
+   for (const file of files) {
+     if (jobId && !file.startsWith(jobId)) continue;
+     if (!file.endsWith('.jsonl')) continue;
+     const content = await readFile(path.join(runsDir, file), 'utf8').catch(() => '');
+     content.trim().split('\n').filter(Boolean).forEach(line => {
+       try { runs.push(JSON.parse(line)); } catch {}
+     });
+   }
+   runs.sort((a, b) => (b.startedAt || b.ts || 0) - (a.startedAt || a.ts || 0));
+   res.json({ runs: runs.slice(0, parseInt(limit)) });
+ } catch (e) {
+   console.error('Failed to read cron history:', e.message);
+   res.json({ runs: [] });
+ }
+});
+
+// Cron: toggle job enabled/disabled
+app.post('/cron/jobs/:id/toggle', async (req, res) => {
+ const { enabled } = req.body;
+ try {
+   const cronStorePath = path.join(os.homedir(), '.openclaw', 'cron', 'jobs.json');
+   const raw = await readFile(cronStorePath, 'utf8');
+   const data = JSON.parse(raw);
+   const job = data.jobs?.find(j => j.id === req.params.id);
+   if (!job) return res.status(404).json({ error: 'Job not found' });
+   job.enabled = enabled;
+   job.updatedAtMs = Date.now();
+   await writeFile(cronStorePath, JSON.stringify(data, null, 2));
+   res.json({ success: true });
+ } catch (e) {
+   res.status(500).json({ error: e.message });
+ }
+});
+
+// Cron: delete job
+app.delete('/cron/jobs/:id', async (req, res) => {
+ try {
+   const cronStorePath = path.join(os.homedir(), '.openclaw', 'cron', 'jobs.json');
+   const raw = await readFile(cronStorePath, 'utf8');
+   const data = JSON.parse(raw);
+   data.jobs = (data.jobs || []).filter(j => j.id !== req.params.id);
+   await writeFile(cronStorePath, JSON.stringify(data, null, 2));
+   res.json({ success: true });
+ } catch (e) {
+   res.status(500).json({ error: e.message });
  }
 });
 
