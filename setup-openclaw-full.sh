@@ -1724,6 +1724,14 @@ console.log('Pre-approved 2 devices: bridge + gateway internal');
 
 # Fix ownership — Docker runs as uid 1000, files were created by root
 chown -R 1000:1000 /opt/openclaw-data
+# Re-apply bridge-writable permissions (the chown above resets them)
+chmod 755 /opt/openclaw-data/config
+HOST_NODE_UID=$(id -u node 2>/dev/null || echo 1000)
+if [ "$HOST_NODE_UID" != "1000" ]; then
+  chown "$HOST_NODE_UID" /opt/openclaw/.env /opt/openclaw-data/config/openclaw.json /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
+  mkdir -p /opt/openclaw-data/config/devices && chown -R "$HOST_NODE_UID" /opt/openclaw-data/config/devices 2>/dev/null || true
+  chmod 660 /opt/openclaw-data/config/openclaw.json /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
+fi
 
 # CRITICAL: chown bridge identity AFTER creation (was written by root above, node user must be able to read it)
 # Without this the bridge can't read its own identity and generates a NEW random one that doesn't match paired.json
