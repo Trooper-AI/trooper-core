@@ -39,6 +39,19 @@ PRIMARY_MODEL="{{PRIMARY_MODEL}}"
 BROWSERBASE_API_KEY="{{BROWSERBASE_API_KEY}}"
 BROWSERBASE_PROJECT_ID="{{BROWSERBASE_PROJECT_ID}}"
 
+# Detect if booting from a pre-built snapshot (skip heavy installs)
+FROM_SNAPSHOT="${CRABHQ_FROM_SNAPSHOT:-0}"
+
+# Dry-run mode: print commands instead of executing them
+DRY_RUN="${DRY_RUN:-0}"
+run_cmd() {
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "[DRY-RUN] $*"
+  else
+    "$@"
+  fi
+}
+
 # Deploy log — writes to /tmp/deploy.log, served via HTTP on BRIDGE_PORT
 DEPLOY_LOG=/tmp/deploy.log
 DEPLOY_RAW_LOG=/tmp/deploy-raw.log
@@ -113,6 +126,13 @@ echo "Log server started on :${BRIDGE_PORT} (pid $LOG_SERVER_PID)"
 
 dlog "Starting server setup..." "workspace"
 
+if [ "$FROM_SNAPSHOT" = "1" ]; then
+  dlog "Booting from snapshot — skipping package installs" "installing"
+fi
+if [ "$DRY_RUN" = "1" ]; then
+  dlog "Running in dry-run mode" "installing"
+fi
+
 # ── [1/8] SSH & OS hardening ────────────────────────────────────────
 
 # Inject admin SSH key if provided
@@ -136,10 +156,11 @@ fi
 
 # ── [2/8] Docker + Node.js + Caddy (batched repo setup + single install) ──
 # Instead of 3 separate apt-get update cycles, set up ALL repos first, then install once
+if [ "$FROM_SNAPSHOT" != "1" ]; then
 dlog "Installing Docker, Node.js, Caddy..."
 
-apt-get update -qq
-apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg unattended-upgrades debian-keyring debian-archive-keyring apt-transport-https
+run_cmd apt-get update -qq
+run_cmd apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg unattended-upgrades debian-keyring debian-archive-keyring apt-transport-https
 echo 'Unattended-Upgrade::Automatic-Reboot "false";' > /etc/apt/apt.conf.d/51auto-upgrades
 
 # Add Docker repo
@@ -198,6 +219,8 @@ chmod 1777 /var/run/openclaw
 # Wait for swap to finish
 [ -n "${SWAP_PID:-}" ] && wait $SWAP_PID 2>/dev/null || true
 
+fi # end FROM_SNAPSHOT != 1 (Docker + Node + Caddy install)
+
 # ── Start Docker image pull in BACKGROUND (biggest bottleneck: 2-3 GB download) ──
 # While the image downloads, we continue with config generation, git clone, etc.
 HOST_ARCH=$(uname -m)
@@ -206,6 +229,14 @@ if [ "$HOST_ARCH" = "aarch64" ] || [ "$HOST_ARCH" = "arm64" ]; then
  DOCKER_PLATFORM="linux/arm64"
 fi
 OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/absurdfounder/crabhq-gateway:latest}"
+
+if [ "$FROM_SNAPSHOT" = "1" ]; then
+  # Image already cached on snapshot — just re-tag it
+  dlog "Snapshot boot: tagging cached Docker image as openclaw:local"
+  docker tag "${OPENCLAW_DOCKER_IMAGE}" openclaw:local 2>/dev/null || docker tag ghcr.io/absurdfounder/crabhq-gateway:latest openclaw:local
+  echo "IMAGE_READY=true" > /tmp/docker-pull-status
+  DOCKER_PULL_PID=""
+else
 dlog "Pulling Docker image in background: ${OPENCLAW_DOCKER_IMAGE}..."
 echo "Starting background pull: ${OPENCLAW_DOCKER_IMAGE} (${DOCKER_PLATFORM})..."
 
@@ -229,6 +260,7 @@ DOCKER_PULL_LOG=/tmp/docker-pull.log
  echo "IMAGE_READY=false" > /tmp/docker-pull-status
 ) &
 DOCKER_PULL_PID=$!
+fi # end FROM_SNAPSHOT Docker pull
 
 # Get public IP (validate it's actually an IP, not an error page)
 _get_ip() {
@@ -1034,8 +1066,8 @@ cd /opt/openclaw
 
 # ── Wait for background Docker image pull ─────────────────────────────
 dlog "Waiting for Docker image pull to complete..."
-echo "Waiting for background Docker pull (PID: ${DOCKER_PULL_PID})..."
-wait $DOCKER_PULL_PID 2>/dev/null || true
+echo "Waiting for background Docker pull (PID: ${DOCKER_PULL_PID:-none})..."
+[ -n "${DOCKER_PULL_PID:-}" ] && wait $DOCKER_PULL_PID 2>/dev/null || true
 
 # Check pull result
 IMAGE_READY=false
@@ -1074,13 +1106,13 @@ fi
 
 dlog "Starting containers..."
 # Start containers (clean up any partial state first)
-docker compose down 2>/dev/null || true
+run_cmd docker compose down 2>/dev/null || true
 # Retry docker compose up — host network mode can fail with namespace race on first boot
 for _dc_attempt in 1 2 3; do
-  docker compose up -d 2>&1 && break || true
+  run_cmd docker compose up -d 2>&1 && break || true
   echo "docker compose up failed (attempt $_dc_attempt), retrying in 3s..."
   sleep 3
-  docker compose down 2>/dev/null || true
+  run_cmd docker compose down 2>/dev/null || true
 done
 # Verify gateway container is actually running (CLI container failure is non-fatal)
 if ! docker compose ps --format json 2>/dev/null | grep -q '"running"'; then
@@ -1176,6 +1208,7 @@ dlog "Installing bridge, sandbox, and dependencies in parallel..."
 BRIDGE_NPM_PID=$!
 
 # Task 2: Sandbox base image build (background)
+if [ "$FROM_SNAPSHOT" != "1" ]; then
 (
  cd /opt/openclaw
  dlog "Building sandbox base image..."
@@ -1186,6 +1219,9 @@ BRIDGE_NPM_PID=$!
  fi
 ) &
 SANDBOX_PID=$!
+else
+SANDBOX_PID=""
+fi
 
 # Task 3: Poller npm + librarium + noVNC (foreground — fastest)
 cd /opt/openclaw-poller && timeout 120 npm install --prefer-offline 2>/dev/null || timeout 120 npm install
@@ -1193,22 +1229,24 @@ timeout 120 npm install -g librarium 2>&1 || {
  dlog "librarium install failed (non-fatal, deep research will be unavailable)"
 }
 
+if [ "$FROM_SNAPSHOT" != "1" ]; then
 # noVNC + websockify — enables live browser streaming for all orgs
 dlog "Installing noVNC + websockify for live browser streaming..."
-apt-get install -y -qq --no-install-recommends novnc websockify 2>/dev/null || true
+run_cmd apt-get install -y -qq --no-install-recommends novnc websockify 2>/dev/null || true
 echo "[setup] noVNC + websockify installed for VNC live view"
 
 # ── Desktop (LXQt) setup — manual use via CrabsHQ Desktop panel ──────────────
 dlog "Installing desktop packages (LXQt, x11vnc, apps)..."
-apt-get install -y -qq --no-install-recommends \
+run_cmd apt-get install -y -qq --no-install-recommends \
  xvfb xorg openbox x11vnc xterm xdotool \
  lxqt-core lxqt-panel lxqt-runner \
  pcmanfm-qt feh papirus-icon-theme \
  fonts-dejavu fonts-liberation \
  xdg-utils wget 2>/dev/null || true
 # Install snap Firefox (Ubuntu 24.04 doesn't have firefox-esr deb)
-snap install firefox 2>/dev/null || true
+run_cmd snap install firefox 2>/dev/null || true
 echo "[setup] LXQt desktop packages installed"
+fi # end FROM_SNAPSHOT != 1 (noVNC + desktop packages)
 
 # Pre-seed LXQt session config (openbox as WM, skip first-run dialog)
 mkdir -p /root/.config/lxqt
@@ -1379,10 +1417,12 @@ AGENTDAEMON
 fi
 
 # Install Playwright for VPS browser server
+if [ "$FROM_SNAPSHOT" != "1" ]; then
 cd /opt/crabhq-desktop-api
 npm init -y 2>/dev/null
 npm install playwright 2>/dev/null || true
 echo "[setup] Playwright installed"
+fi # end FROM_SNAPSHOT != 1 (Playwright)
 
 # Playwright browser server — launches Chromium on :1, exposes WS for Render backend
 cat > /opt/crabhq-desktop-api/playwright-server.mjs << 'PWEOF'
@@ -1505,7 +1545,7 @@ wait $BRIDGE_NPM_PID 2>/dev/null || {
  cd /opt/openclaw-bridge && npm cache clean --force 2>/dev/null; timeout 180 npm install 2>&1
 }
 dlog "Waiting for sandbox build..."
-wait $SANDBOX_PID 2>/dev/null || true
+[ -n "${SANDBOX_PID:-}" ] && wait $SANDBOX_PID 2>/dev/null || true
 
 cd /opt/openclaw
 
@@ -1689,8 +1729,8 @@ RestartSec=5
 WantedBy=multi-user.target
 PWSVC
 
-systemctl daemon-reload
-systemctl enable openclaw-docker openclaw-bridge openclaw-poller openclaw-vnc crabhq-desktop-api crabhq-playwright
+run_cmd systemctl daemon-reload
+run_cmd systemctl enable openclaw-docker openclaw-bridge openclaw-poller openclaw-vnc crabhq-desktop-api crabhq-playwright
 
 # ── [9/9] Start all services (single clean startup) ──────────────────
 dlog "Starting services..."
@@ -1698,10 +1738,10 @@ dlog "Starting services..."
 kill $LOG_SERVER_PID 2>/dev/null; sleep 1
 
 # Start bridge immediately — binds in ~5s, minimizes log gap (provision.js polls port 3002)
-systemctl start openclaw-bridge
+run_cmd systemctl start openclaw-bridge
 
 # Start docker containers
-systemctl start openclaw-docker
+run_cmd systemctl start openclaw-docker
 
 # Wait for gateway to be ready (single wait, not 3 separate loops)
 dlog "Waiting for OpenClaw gateway..."
@@ -1720,11 +1760,11 @@ if [ "$_gw_alive" -eq 0 ]; then
 fi
 
 # Start poller, VNC, desktop API, playwright (bridge already running)
-systemctl start openclaw-poller
-systemctl start openclaw-vnc
-systemctl start crabhq-desktop-api
-systemctl start crabhq-playwright
-systemctl restart caddy 2>/dev/null || true
+run_cmd systemctl start openclaw-poller
+run_cmd systemctl start openclaw-vnc
+run_cmd systemctl start crabhq-desktop-api
+run_cmd systemctl start crabhq-playwright
+run_cmd systemctl restart caddy 2>/dev/null || true
 
 # Brief settle time, then verify
 sleep 3
