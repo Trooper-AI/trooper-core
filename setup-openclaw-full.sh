@@ -290,8 +290,10 @@ HTTPS_DOMAIN="org-${ORG_SHORT}.crabhq.com"
 echo "HTTPS domain: ${HTTPS_DOMAIN} (DNS created by provision.js)"
 
 if [ -n "$SERVER_PUBLIC_IP" ]; then
- # Caddyfile: reverse proxy HTTPS → gateway on localhost
+ SSLIP_DOMAIN=$(echo "$SERVER_PUBLIC_IP" | tr '.' '-').sslip.io
+ # Caddyfile: CF-proxied crabhq.com domain (primary) + sslip.io fallback
  cat > /etc/caddy/Caddyfile << CADDYFILE
+# Primary: Cloudflare-proxied domain (CF handles external SSL)
 ${HTTPS_DOMAIN} {
  handle /ws {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
@@ -303,9 +305,52 @@ ${HTTPS_DOMAIN} {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
  handle_path /vnc/* {
+ uri replace /vnc.html /vnc_lite.html
  reverse_proxy 127.0.0.1:6080
  }
  handle_path /desktop-vnc/* {
+ uri replace /vnc.html /vnc_lite.html
+ @blocked {
+ not header_regexp Origin ".*(crabhq\\.com|crabhq\\.netlify\\.app|sslip\\.io).*"
+ not header_regexp Referer ".*(crabhq\\.com|crabhq\\.netlify\\.app|sslip\\.io).*"
+ }
+ respond @blocked 403
+ reverse_proxy 127.0.0.1:6081
+ }
+ handle_path /playwright-ws/* {
+ reverse_proxy 127.0.0.1:3333
+ }
+ handle /desktop-api/* {
+ uri strip_prefix /desktop-api
+ reverse_proxy 127.0.0.1:4567
+ }
+ handle {
+ reverse_proxy 127.0.0.1:${GATEWAY_PORT}
+ }
+}
+
+# Fallback: sslip.io (direct HTTPS via Let's Encrypt, no CF dependency)
+${SSLIP_DOMAIN} {
+ handle /ws {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /api/proxy/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /files/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle_path /vnc/* {
+ uri replace /vnc.html /vnc_lite.html
+ reverse_proxy 127.0.0.1:6080
+ }
+ handle_path /desktop-vnc/* {
+ uri replace /vnc.html /vnc_lite.html
+ @blocked {
+ not header_regexp Origin ".*(crabhq\\.com|crabhq\\.netlify\\.app|sslip\\.io).*"
+ not header_regexp Referer ".*(crabhq\\.com|crabhq\\.netlify\\.app|sslip\\.io).*"
+ }
+ respond @blocked 403
  reverse_proxy 127.0.0.1:6081
  }
  handle_path /playwright-ws/* {
@@ -321,7 +366,7 @@ ${HTTPS_DOMAIN} {
 }
 CADDYFILE
  systemctl enable caddy
- echo "Caddy: configured for ${HTTPS_DOMAIN} → 127.0.0.1:${GATEWAY_PORT}"
+ echo "Caddy: configured for ${HTTPS_DOMAIN} + ${SSLIP_DOMAIN} → 127.0.0.1:${GATEWAY_PORT}"
  dlog "Caddy configured for ${HTTPS_DOMAIN}"
 else
  echo "ERROR: No public IP — Caddy HTTPS not configured!"
@@ -791,7 +836,7 @@ ${MODELS_PROVIDERS}
  "mode": "local",
  "port": ${GATEWAY_PORT},
  "auth": { "mode": "token", "token": "GATEWAY_TOKEN_PLACEHOLDER" },
- "trustedProxies": ["127.0.0.1", "172.16.0.0/12"],
+ "trustedProxies": ["127.0.0.1", "172.16.0.0/12", "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20", "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13", "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22"],
  "controlUi": {
  "enabled": true,
  "allowInsecureAuth": true,
@@ -929,6 +974,10 @@ ${AUTH_LASTGOOD}
  }
 }
 AUTHPROF
+
+# ALSO create auth-profiles.json at the root config level — Control UI reads from here
+cp /opt/openclaw-data/config/agents/main/agent/auth-profiles.json /opt/openclaw-data/config/auth-profiles.json
+
 dlog "Auth profiles configured for: $(echo "$AUTH_LASTGOOD" | grep -o '"[a-z]*"' | tr '\n' ' ' || echo 'none')"
 
 # ── OpenClaw Workspace Bootstrap ──────────────────────────────────────
@@ -1075,6 +1124,7 @@ chown -R 1000:1000 /opt/openclaw-data
 chmod 755 /opt/openclaw-data/config
 chmod 600 /opt/openclaw-data/config/openclaw.json
 chmod 600 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json
+chmod 600 /opt/openclaw-data/config/auth-profiles.json
 
 # Bridge runs on HOST as node (uid may differ from container's 1000).
 # It needs write access to config files for API key sync, model updates, and device approval.
@@ -1085,12 +1135,14 @@ if [ "$HOST_NODE_UID" != "1000" ]; then
   chown "$HOST_NODE_UID" /opt/openclaw/.env 2>/dev/null || true
   chown "$HOST_NODE_UID" /opt/openclaw-data/config/openclaw.json 2>/dev/null || true
   chown "$HOST_NODE_UID" /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
+  chown "$HOST_NODE_UID" /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
   mkdir -p /opt/openclaw-data/config/devices
   chown -R "$HOST_NODE_UID" /opt/openclaw-data/config/devices 2>/dev/null || true
   # Container still needs read access — both UIDs can read via group or mode
   chmod 666 /opt/openclaw/.env 2>/dev/null || true
   chmod 660 /opt/openclaw-data/config/openclaw.json 2>/dev/null || true
   chmod 660 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
+  chmod 660 /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
 fi
 
 cd /opt/openclaw
@@ -1728,9 +1780,9 @@ chown -R 1000:1000 /opt/openclaw-data
 chmod 755 /opt/openclaw-data/config
 HOST_NODE_UID=$(id -u node 2>/dev/null || echo 1000)
 if [ "$HOST_NODE_UID" != "1000" ]; then
-  chown "$HOST_NODE_UID" /opt/openclaw/.env /opt/openclaw-data/config/openclaw.json /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
+  chown "$HOST_NODE_UID" /opt/openclaw/.env /opt/openclaw-data/config/openclaw.json /opt/openclaw-data/config/agents/main/agent/auth-profiles.json /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
   mkdir -p /opt/openclaw-data/config/devices && chown -R "$HOST_NODE_UID" /opt/openclaw-data/config/devices 2>/dev/null || true
-  chmod 660 /opt/openclaw-data/config/openclaw.json /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
+  chmod 660 /opt/openclaw-data/config/openclaw.json /opt/openclaw-data/config/agents/main/agent/auth-profiles.json /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
 fi
 
 # CRITICAL: chown bridge identity AFTER creation (was written by root above, node user must be able to read it)
