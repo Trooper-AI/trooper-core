@@ -567,6 +567,9 @@ ENV
 [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "{{GEMINI_API_KEY}}" ] && echo "GEMINI_API_KEY=${GEMINI_API_KEY}" >> /opt/openclaw/.env
 [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ] && echo "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}" >> /opt/openclaw/.env
 
+# Fix ownership so bridge (node user) can update .env later
+chown node:node /opt/openclaw/.env 2>/dev/null || chown 1000:1000 /opt/openclaw/.env 2>/dev/null || true
+
 # Derive hook token from gateway token
 HOOK_TOKEN=$(echo -n "${GATEWAY_TOKEN}-hook" | sha256sum | cut -c1-32)
 
