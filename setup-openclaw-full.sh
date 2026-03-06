@@ -1756,19 +1756,19 @@ run_cmd systemctl start openclaw-bridge
 # Start docker containers
 run_cmd systemctl start openclaw-docker
 
-# Wait for gateway to be ready (single wait, not 3 separate loops)
-dlog "Waiting for OpenClaw gateway..."
+# Wait for gateway to be ready — up to 3 minutes (acpx plugin install on first boot takes ~2min)
+dlog "Waiting for OpenClaw gateway (up to 3 min for first boot acpx install)..."
 _gw_alive=0
-for i in $(seq 1 30); do
+for i in $(seq 1 90); do
  if curl -sf --max-time 2 http://127.0.0.1:${GATEWAY_PORT}/ >/dev/null 2>&1; then
- echo "Gateway: ALIVE (ready after ${i}s)"
+ echo "Gateway: ALIVE (ready after $((i * 2))s)"
  _gw_alive=1
  break
  fi
  sleep 2
 done
 if [ "$_gw_alive" -eq 0 ]; then
- echo "WARNING: Gateway did not respond after 60s"
+ echo "WARNING: Gateway did not respond after 180s"
  docker compose logs --tail 20 openclaw-gateway 2>/dev/null || true
 fi
 
