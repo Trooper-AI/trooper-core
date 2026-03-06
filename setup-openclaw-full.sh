@@ -1778,6 +1778,12 @@ else
  journalctl -u caddy --no-pager -n 10
 fi
 
+# Kill the background raw log pusher — setup is done, no need to keep POSTing to API
+if [ -n "${RAW_LOG_PUSHER_PID:-}" ]; then
+  kill "$RAW_LOG_PUSHER_PID" 2>/dev/null || true
+  echo "Raw log pusher stopped (PID $RAW_LOG_PUSHER_PID)"
+fi
+
 # Signal to bridge that setup is complete (bridge /health transitions from 'installing' → 'ok')
 # /tmp marker is ephemeral; /opt marker persists across reboots
 touch /tmp/openclaw-setup-complete
