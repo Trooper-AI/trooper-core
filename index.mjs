@@ -84,7 +84,7 @@ function saveBrowserScreenshot(base64Data, ext = 'png') {
 // ── Browser Session Screen Recording ─────────────────────────────────
 // Records X displays during agent sessions using ffmpeg.
 // Supports both :99 (browser) and :1 (desktop).
-import { spawn } from 'child_process';
+// spawn imported at top level from 'child_process'
 
 const MEDIA_DIR = '/home/node/.openclaw/media';
 const _activeRecordings = {}; // display -> { process, filePath, startedAt }
