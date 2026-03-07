@@ -497,15 +497,15 @@ dlog "Configuring model routing..." "model-routing"
 
 resolve_primary_model() {
  # If user explicitly specified provider + model, use that
- if [ -n "${PRIMARY_PROVIDER:-}" ] && [ "${PRIMARY_PROVIDER}" != "{{PRIMARY_PROVIDER}}" ] && \
- [ -n "${PRIMARY_MODEL:-}" ] && [ "${PRIMARY_MODEL}" != "{{PRIMARY_MODEL}}" ]; then
+ if [ -n "${PRIMARY_PROVIDER:-}" ] && [ "${PRIMARY_PROVIDER}" != "__UNSET_PRIMARY_PROVIDER__" ] && \
+ [ -n "${PRIMARY_MODEL:-}" ] && [ "${PRIMARY_MODEL}" != "__UNSET_PRIMARY_MODEL__" ]; then
  echo "${PRIMARY_PROVIDER}/${PRIMARY_MODEL}"
  return
  fi
 
  # If user specified provider but not model, pick best model for that provider
  local provider="${PRIMARY_PROVIDER:-}"
- if [ -n "$provider" ] && [ "$provider" != "{{PRIMARY_PROVIDER}}" ]; then
+ if [ -n "$provider" ] && [ "$provider" != "__UNSET_PRIMARY_PROVIDER__" ]; then
  case "$provider" in
  anthropic) echo "anthropic/claude-sonnet-4-5"; return ;;
  openai) echo "openai/gpt-5.2"; return ;;
@@ -515,13 +515,13 @@ resolve_primary_model() {
  fi
 
  # Auto-detect from available API keys (priority: anthropic > openai > gemini > openrouter)
- if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "{{ANTHROPIC_API_KEY}}" ]; then
+ if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "__UNSET_ANTHROPIC_API_KEY__" ]; then
  echo "anthropic/claude-sonnet-4-5"
- elif [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "{{OPENAI_API_KEY}}" ]; then
+ elif [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "__UNSET_OPENAI_API_KEY__" ]; then
  echo "openai/gpt-5.2"
- elif [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "{{GEMINI_API_KEY}}" ]; then
+ elif [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "__UNSET_GEMINI_API_KEY__" ]; then
  echo "google/gemini-2.5-pro"
- elif [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ]; then
+ elif [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "__UNSET_OPENROUTER_API_KEY__" ]; then
  echo "openrouter/openai/gpt-5-mini"
  else
  # Fallback — no keys found, default to cheap model
@@ -547,16 +547,16 @@ build_fallback() {
  fi
  fi
 }
-if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "{{ANTHROPIC_API_KEY}}" ]; then
+if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "__UNSET_ANTHROPIC_API_KEY__" ]; then
  build_fallback "anthropic/claude-sonnet-4-5"
 fi
-if [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "{{OPENAI_API_KEY}}" ]; then
+if [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "__UNSET_OPENAI_API_KEY__" ]; then
  build_fallback "openai/gpt-5.2"
 fi
-if [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "{{GEMINI_API_KEY}}" ]; then
+if [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "__UNSET_GEMINI_API_KEY__" ]; then
  build_fallback "google/gemini-2.5-pro"
 fi
-if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ]; then
+if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "__UNSET_OPENROUTER_API_KEY__" ]; then
  build_fallback "openrouter/openai/gpt-5-mini"
 fi
 
@@ -618,10 +618,10 @@ CLAUDE_WEB_COOKIE=
 ENV
 
 # Conditionally add provider API keys to .env (only if set)
-[ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "{{OPENAI_API_KEY}}" ] && echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> /opt/openclaw/.env
-[ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "{{ANTHROPIC_API_KEY}}" ] && echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> /opt/openclaw/.env
-[ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "{{GEMINI_API_KEY}}" ] && echo "GEMINI_API_KEY=${GEMINI_API_KEY}" >> /opt/openclaw/.env
-[ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ] && echo "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}" >> /opt/openclaw/.env
+[ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "__UNSET_OPENAI_API_KEY__" ] && echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> /opt/openclaw/.env
+[ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "__UNSET_ANTHROPIC_API_KEY__" ] && echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> /opt/openclaw/.env
+[ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "__UNSET_GEMINI_API_KEY__" ] && echo "GEMINI_API_KEY=${GEMINI_API_KEY}" >> /opt/openclaw/.env
+[ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "__UNSET_OPENROUTER_API_KEY__" ] && echo "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}" >> /opt/openclaw/.env
 
 # Fix ownership so bridge (node user) can update .env later
 chown node:node /opt/openclaw/.env 2>/dev/null || chown 1000:1000 /opt/openclaw/.env 2>/dev/null || true
@@ -642,7 +642,7 @@ $entry"
  fi
 }
 
-if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "{{ANTHROPIC_API_KEY}}" ]; then
+if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "__UNSET_ANTHROPIC_API_KEY__" ]; then
  add_provider ' "anthropic": {
  "baseUrl": "https://api.anthropic.com",
  "api": "anthropic-messages",
@@ -655,7 +655,7 @@ if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "{{ANTHROPIC_A
  }'
 fi
 
-if [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "{{OPENAI_API_KEY}}" ]; then
+if [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "__UNSET_OPENAI_API_KEY__" ]; then
  add_provider ' "openai": {
  "baseUrl": "https://api.openai.com/v1",
  "api": "openai-completions",
@@ -666,7 +666,7 @@ if [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "{{OPENAI_API_KEY}}"
  }'
 fi
 
-if [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "{{GEMINI_API_KEY}}" ]; then
+if [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "__UNSET_GEMINI_API_KEY__" ]; then
  add_provider ' "google": {
  "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
  "api": "google-generative-ai",
@@ -677,7 +677,7 @@ if [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "{{GEMINI_API_KEY}}"
  }'
 fi
 
-if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ]; then
+if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "__UNSET_OPENROUTER_API_KEY__" ]; then
  add_provider ' "openrouter": {
  "baseUrl": "https://openrouter.ai/api/v1",
  "api": "openai-completions",
@@ -702,9 +702,9 @@ if [ -z "$MODELS_PROVIDERS" ]; then
 fi
 
 # Resolve memorySearch config — always use OpenRouter for embeddings (platform key)
-if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ]; then
+if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "__UNSET_OPENROUTER_API_KEY__" ]; then
  MEMORY_SEARCH_JSON='"memorySearch": { "enabled": true, "provider": "openai", "model": "text-embedding-3-small", "remote": { "baseUrl": "https://openrouter.ai/api/v1/", "apiKey": "'"${OPENROUTER_API_KEY}"'" } }'
-elif [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "{{OPENAI_API_KEY}}" ]; then
+elif [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "__UNSET_OPENAI_API_KEY__" ]; then
  MEMORY_SEARCH_JSON='"memorySearch": { "enabled": true, "provider": "openai", "model": "text-embedding-3-small" }'
 else
  MEMORY_SEARCH_JSON='"memorySearch": { "enabled": true }'
@@ -960,16 +960,16 @@ add_auth_profile() {
  fi
 }
 
-if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "{{ANTHROPIC_API_KEY}}" ]; then
+if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "__UNSET_ANTHROPIC_API_KEY__" ]; then
  add_auth_profile "anthropic:default" "anthropic" "${ANTHROPIC_API_KEY}"
 fi
-if [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "{{OPENAI_API_KEY}}" ]; then
+if [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "__UNSET_OPENAI_API_KEY__" ]; then
  add_auth_profile "openai:default" "openai" "${OPENAI_API_KEY}"
 fi
-if [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "{{GEMINI_API_KEY}}" ]; then
+if [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "__UNSET_GEMINI_API_KEY__" ]; then
  add_auth_profile "google:default" "google" "${GEMINI_API_KEY}"
 fi
-if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ]; then
+if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "__UNSET_OPENROUTER_API_KEY__" ]; then
  add_auth_profile "openrouter:default" "openrouter" "${OPENROUTER_API_KEY}"
 fi
 
