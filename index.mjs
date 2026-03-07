@@ -1882,6 +1882,21 @@ async function handleIncomingTaskStream(req, res) {
  }
  });
 
+ // Stop all screen recordings and get video paths before sending done event
+ const recordingPath = stopBrowserRecording();
+ const desktopRecordingPath = stopDesktopRecording();
+ const recordingUrl = recordingPath ? `/files${recordingPath}` : null;
+ const desktopRecordingUrl = desktopRecordingPath ? `/files${desktopRecordingPath}` : null;
+
+ // Signal browser session end
+ const endSession = getSkillBrowserSession();
+ if (endSession) {
+ try { sendSSE('browser_session_end', { sessionId: endSession.sessionId, recordingUrl }); } catch {}
+ clearSkillBrowserSession();
+ } else if (isBrowserTask) {
+ try { sendSSE('browser_session_end', { sessionId: null, recordingUrl }); } catch {}
+ }
+
  // Send final done event with complete result + tool log
  sendSSE('done', {
  requestId: id, agentId,
@@ -1910,19 +1925,9 @@ async function handleIncomingTaskStream(req, res) {
  screenshotPollerInterval = null;
  }
  clearInterval(keepAlive);
- // Stop all screen recordings and get video paths
- const recordingPath = stopBrowserRecording();
- const desktopRecordingPath = stopDesktopRecording();
- const recordingUrl = recordingPath ? `/files${recordingPath}` : null;
- const desktopRecordingUrl = desktopRecordingPath ? `/files${desktopRecordingPath}` : null;
- // Signal browser session end — for skill-reported or any browser task
- const endSession = getSkillBrowserSession();
- if (endSession) {
- try { sendSSE('browser_session_end', { sessionId: endSession.sessionId, recordingUrl }); } catch {}
- clearSkillBrowserSession();
- } else if (isBrowserTask) {
- try { sendSSE('browser_session_end', { sessionId: null, recordingUrl }); } catch {}
- }
+ // Ensure recordings are stopped (no-op if already stopped in try block)
+ stopBrowserRecording();
+ stopDesktopRecording();
  res.end();
  }
 }
