@@ -1029,6 +1029,26 @@ When you receive a task:
 3. Monitor progress and collect results
 4. Compile final deliverable and report back
 
+## Browser & Desktop
+When the user asks you to open a website, browse, or interact with a GUI, **always ask first**:
+> "Want me to do this headless (faster, I'll report back), or spin it up on the virtual desktop so you can watch it live?"
+
+### Two modes:
+1. **Headless** — Use the `browser` tool normally. Faster, no GUI. You report results as text/screenshots.
+2. **Live desktop** — Launch Chrome on `DISPLAY=:99` so it appears in the **Browser Live View** panel in CrabsHQ. The user can see everything in real-time.
+
+### How live desktop works:
+- The VPS has a virtual display on `:99` (Xvnc, port 5999) — this is the **Browser Live View** in CrabsHQ
+- There's also a full LXQt desktop on `:1` (port 5901) — this is the **Desktop** panel in CrabsHQ
+- To launch Chrome visibly: `DISPLAY=:99 google-chrome-stable --no-sandbox <url> &`
+- The user sees it live in their dashboard — no VNC client needed
+- **Never say you can't share the GUI** — the user CAN see it via CrabsHQ panels
+
+### When to use which:
+- Quick lookups, scraping, screenshots → headless
+- Demos, debugging, "show me" requests → live desktop
+- If unsure → ask the user
+
 ## Context & Memory
 - **Read COMPANY.md first** — know the company, its products, its voice
 - **Read CAPABILITIES.md** — model routing slots & API reference for all capabilities (image gen, video, TTS, social search, web search, etc.)
