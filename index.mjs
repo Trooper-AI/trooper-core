@@ -81,6 +81,65 @@ function saveBrowserScreenshot(base64Data, ext = 'png') {
  }
 }
 
+// ── Browser Session Screen Recording ─────────────────────────────────
+// Records the Xvnc display during browser sessions using ffmpeg.
+// Saves to media/browser/ and returns the path on session end.
+import { spawn } from 'child_process';
+
+let _activeRecording = null; // { process, filePath, startedAt }
+
+function startBrowserRecording() {
+ if (_activeRecording) return _activeRecording.filePath; // already recording
+ const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+ const filename = `session-${ts}.mp4`;
+ const filePath = `${SCREENSHOT_DIR}/${filename}`;
+ // Record from host's Xvnc display :99 (not inside container)
+ // Use ultrafast preset + high CRF for small files
+ try {
+  const proc = spawn('ffmpeg', [
+   '-y', '-f', 'x11grab', '-video_size', '1280x720', '-framerate', '10',
+   '-i', ':99', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '35',
+   '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+   filePath,
+  ], { stdio: ['pipe', 'pipe', 'pipe'], detached: false });
+  proc.on('error', (e) => console.warn(`[recording] ffmpeg error: ${e.message}`));
+  _activeRecording = { process: proc, filePath, hostPath: filePath, startedAt: Date.now() };
+  console.log(`[recording] Started: ${filePath}`);
+  return filePath;
+ } catch (e) {
+  console.warn(`[recording] Failed to start ffmpeg: ${e.message}`);
+  return null;
+ }
+}
+
+function stopBrowserRecording() {
+ if (!_activeRecording) return null;
+ const { process: proc, filePath, hostPath } = _activeRecording;
+ _activeRecording = null;
+ try {
+  // Send 'q' to ffmpeg stdin for graceful stop (writes moov atom)
+  proc.stdin.write('q');
+  proc.stdin.end();
+  // Give ffmpeg 3s to finalize
+  setTimeout(() => { try { proc.kill('SIGTERM'); } catch {} }, 3000);
+  // Copy into container so it's accessible via /files endpoint
+  setTimeout(() => {
+   try {
+    const containerPath = `${SCREENSHOT_DIR}/${filePath.split('/').pop()}`;
+    execSync(`docker cp ${hostPath} openclaw-openclaw-gateway-1:${containerPath}`, { timeout: 15000 });
+    execSync(`docker exec openclaw-openclaw-gateway-1 chown 1000:1000 ${containerPath}`, { timeout: 3000 });
+    console.log(`[recording] Copied to container: ${containerPath}`);
+   } catch (e) { console.warn(`[recording] Container copy failed: ${e.message}`); }
+  }, 2000);
+  console.log(`[recording] Stopped: ${filePath}`);
+  return filePath;
+ } catch (e) {
+  console.warn(`[recording] Stop failed: ${e.message}`);
+  try { proc.kill('SIGKILL'); } catch {}
+  return filePath;
+ }
+}
+
 // ── Skill-Reported Browser Sessions ──────────────────────────────────
 // Skills (e.g. browserbase, browserbase-sessions from ClawHub) report their
 // live view URLs here so the bridge can forward them to the frontend.
@@ -1762,6 +1821,9 @@ async function handleIncomingTaskStream(req, res) {
  let domain = '';
  try { domain = navUrl ? new URL(navUrl.startsWith('http') ? navUrl : `https://${navUrl}`).hostname : ''; } catch {}
 
+ // Start screen recording for browser sessions
+ startBrowserRecording();
+
  // Priority: skill-reported live view > VNC > screenshot polling
  const skillSession = getSkillBrowserSession();
  if (skillSession?.liveViewUrl) {
@@ -1830,13 +1892,16 @@ async function handleIncomingTaskStream(req, res) {
  screenshotPollerInterval = null;
  }
  clearInterval(keepAlive);
+ // Stop screen recording and get video path
+ const recordingPath = stopBrowserRecording();
+ const recordingUrl = recordingPath ? `/files${recordingPath}` : null;
  // Signal browser session end — for skill-reported or any browser task
  const endSession = getSkillBrowserSession();
  if (endSession) {
- try { sendSSE('browser_session_end', { sessionId: endSession.sessionId }); } catch {}
+ try { sendSSE('browser_session_end', { sessionId: endSession.sessionId, recordingUrl }); } catch {}
  clearSkillBrowserSession();
  } else if (isBrowserTask) {
- try { sendSSE('browser_session_end', { sessionId: null }); } catch {}
+ try { sendSSE('browser_session_end', { sessionId: null, recordingUrl }); } catch {}
  }
  res.end();
  }
@@ -1908,7 +1973,7 @@ app.get('/files/*', (req, res) => {
  const data = execSync(`docker exec openclaw-openclaw-gateway-1 cat "${filePath.replace(/"/g, '')}"`, { maxBuffer: 50 * 1024 * 1024, timeout: 10000 });
  // Guess content type from extension
  const ext = filePath.split('.').pop().toLowerCase();
- const types = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', pdf: 'application/pdf', json: 'application/json', txt: 'text/plain', md: 'text/markdown', html: 'text/html' };
+ const types = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', pdf: 'application/pdf', json: 'application/json', txt: 'text/plain', md: 'text/markdown', html: 'text/html', mp4: 'video/mp4', webm: 'video/webm', mkv: 'video/x-matroska' };
  res.set('Content-Type', types[ext] || 'application/octet-stream');
  res.set('Cache-Control', 'public, max-age=3600');
  res.send(data);

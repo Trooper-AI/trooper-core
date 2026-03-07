@@ -1366,7 +1366,7 @@ timeout 120 npm install -g librarium 2>&1 || {
 if [ "$FROM_SNAPSHOT" != "1" ]; then
 # noVNC + websockify — enables live browser streaming for all orgs
 dlog "Installing noVNC + websockify for live browser streaming..."
-run_cmd apt-get install -y -qq --no-install-recommends novnc websockify 2>/dev/null || true
+run_cmd apt-get install -y -qq --no-install-recommends novnc websockify ffmpeg 2>/dev/null || true
 echo "[setup] noVNC + websockify installed for VNC live view"
 
 # Custom embedded VNC page — no toolbar, no CtrlAltDel, clean iframe embed
