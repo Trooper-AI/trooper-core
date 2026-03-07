@@ -597,6 +597,8 @@ if ! id -u node >/dev/null 2>&1; then
 fi
 # Add node to docker group so it can exec into containers
 usermod -aG docker node 2>/dev/null || true
+# Add node to systemd-journal so bridge can read poller/bridge logs via journalctl
+usermod -aG systemd-journal node 2>/dev/null || true
 mkdir -p /home/node/.openclaw/identity /home/node/.openclaw/config
 chown -R node:node /home/node/.openclaw 2>/dev/null || chown -R 1000:1000 /home/node/.openclaw 2>/dev/null || true
 # Also chown the bridge dir so node can read its own identity file
