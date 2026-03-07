@@ -39,12 +39,7 @@ function getSslipDomain() {
 function getVNCLiveViewUrl() {
  const orgId = process.env.ORG_ID || '';
  if (!orgId) return null;
- // Prefer sslip.io (always resolves via IP) over crabhq.com (may have DNS/cert issues)
- const sslip = getSslipDomain();
- if (sslip) {
-   return `https://${sslip}/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify&reconnect=true&reconnect_delay=3000`;
- }
- // Fallback to crabhq.com domain
+ // Prefer crabhq.com (CF-proxied, reliable SSL) over sslip.io (LE rate limits)
  const orgShort = orgId.toLowerCase().substring(0, 12);
  const domain = `org-${orgShort}.crabhq.com`;
  return `https://${domain}/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify&reconnect=true&reconnect_delay=3000`;
