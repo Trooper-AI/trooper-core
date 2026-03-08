@@ -1971,7 +1971,7 @@ async function handleIncomingTaskStream(req, res) {
  // Estimate token usage from response length (~4 chars/token for English)
  // Also estimate input tokens from the prompt/context length
  const estimatedOutputTokens = response ? Math.ceil(response.length / 4) : 0;
- const estimatedInputTokens = message ? Math.ceil(message.length / 4) : 0;
+ const estimatedInputTokens = fullTask ? Math.ceil(fullTask.length / 4) : 0;
 
  sendSSE('done', {
  requestId: id, agentId,
