@@ -902,15 +902,22 @@ class OpenClawGateway {
  if (stream === 'assistant' && data?.text) {
  textChunks.push(data.text);
  lastTextTime = Date.now();
- // If we were in a tool gap, mark it as done
+ // If we were in a tool gap, mark it as done and DON'T forward text as streaming
+ // (it's tool output/thinking, not the final response — prevents garbage like
+ // "Searching for DelhiNo Brave API key configured..." in the streaming display)
  if (inToolGap) {
  inToolGap = false;
  const last = toolLog[toolLog.length - 1];
  if (last && last.status === 'called') {
  last.status = 'ok';
  last.durationMs = Date.now() - (last.startedAt || Date.now());
- if (onEvent) onEvent('tool_result', { tool: last.tool, skillName: last.skillName, params: last.params, success: true, summary: `Completed in ${(last.durationMs / 1000).toFixed(1)}s`, index: toolLog.length - 1 });
+ // Use the text as the tool's summary instead of streaming it
+ const toolSummary = data.text.substring(0, 120);
+ last.summary = toolSummary;
+ if (onEvent) onEvent('tool_result', { tool: last.tool, skillName: last.skillName, params: last.params, success: true, summary: toolSummary, index: toolLog.length - 1 });
  }
+ // Skip forwarding this text as a streaming event — it's tool output
+ return;
  }
  // Reset gap timer
  if (toolGapTimer) clearTimeout(toolGapTimer);
