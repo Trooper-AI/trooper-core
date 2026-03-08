@@ -883,7 +883,11 @@ class OpenClawGateway {
  if (toolGapTimer) clearTimeout(toolGapTimer);
  toolGapTimer = setTimeout(() => {
  // Text stopped for 2s — likely executing a tool
- if (!inToolGap && textChunks.length > 0) {
+ // But if we've already received a substantial response (>500 chars), the agent is
+ // writing, not about to use a tool — skip heuristic to avoid false positives like
+ // "Browsing google.com" when the response just mentions a domain.
+ const totalText = textChunks.join('');
+ if (!inToolGap && textChunks.length > 0 && totalText.length < 500) {
  inToolGap = true;
  let toolName = 'processing';
  let skillName = null;
