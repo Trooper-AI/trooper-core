@@ -14,6 +14,42 @@ import path from 'path';
 const { dirname } = path;
 import WebSocket from 'ws';
 
+// Build a human-readable summary for a completed tool call
+// Used when the heuristic detects tools (no real tool_use events from gateway)
+function buildToolSummary(tool, params, skillName, rawText) {
+ const p = params || {};
+ const trunc = (s, n = 80) => s && s.length > n ? s.substring(0, n) + '…' : s;
+ switch (tool) {
+ case 'web_search': case 'search': case 'news_search':
+   return p.query ? `Searched for "${trunc(p.query, 60)}"` : 'Searched the web';
+ case 'web_fetch': case 'url_fetch':
+   return p.url ? `Fetched ${trunc(p.url, 80)}` : (skillName || 'Fetched a web page');
+ case 'read': case 'read_file':
+   return p.path ? `Read ${p.path}` : 'Read a file';
+ case 'write': case 'write_file':
+   return p.path ? `Wrote ${p.path}` : 'Wrote a file';
+ case 'edit':
+   return p.path ? `Edited ${p.path}` : 'Edited a file';
+ case 'exec':
+   return p.command ? `Ran: ${trunc(p.command, 60)}` : (skillName ? `Used ${skillName}` : 'Ran a command');
+ case 'memory_search':
+   return p.query ? `Searched memory for "${trunc(p.query, 60)}"` : 'Searched memory';
+ case 'sessions_spawn':
+   return p.task ? `Spawned agent: ${trunc(p.task, 60)}` : 'Spawned a sub-agent';
+ default:
+   // For unknown tools with a skill name, use that
+   if (skillName) return `Used ${skillName}`;
+   // Fallback: clean up the raw text into a sentence-like summary
+   if (rawText) {
+     const clean = rawText.replace(/\s+/g, ' ').trim();
+     // If it's very short (just a word/city name), it's a param not a summary
+     if (clean.length < 20 && !clean.includes(' ')) return `Completed ${tool || 'task'}`;
+     return trunc(clean, 100);
+   }
+   return `Completed ${tool || 'task'}`;
+ }
+}
+
 // Browser tool names that trigger live screenshot streaming
 const BROWSER_TOOLS = ['browser', 'browser_navigate', 'browser_click', 'browser_type', 'browser_screenshot', 'browser_read', 'browser_search', 'browser_form'];
 function isBrowserTool(tool) {
@@ -911,8 +947,9 @@ class OpenClawGateway {
  if (last && last.status === 'called') {
  last.status = 'ok';
  last.durationMs = Date.now() - (last.startedAt || Date.now());
- // Use the text as the tool's summary instead of streaming it
- const toolSummary = data.text.substring(0, 120);
+ // Build a meaningful summary from the tool context, not raw text chunks
+ // Raw text like "Delhi" or "Searching for Delhi" isn't a useful summary
+ const toolSummary = buildToolSummary(last.tool, last.params, last.skillName, data.text);
  last.summary = toolSummary;
  if (onEvent) onEvent('tool_result', { tool: last.tool, skillName: last.skillName, params: last.params, success: true, summary: toolSummary, index: toolLog.length - 1 });
  }
@@ -953,6 +990,11 @@ class OpenClawGateway {
  if (qm) params.query = qm[1].trim().replace(/[.!?]$/, '');
  else if (_eq) params.query = _eq;
  else { const ctx = recentText.match(/(?:search|look(?:ing)?\s+(?:up|for|into))\s+(.{5,60}?)(?:\.|$|\n|to\s)/i); if (ctx) params.query = ctx[1].trim(); }
+ // Fallback: extract search topic from user's original prompt
+ if (!params.query && promptLower) {
+   const pm = promptLower.match(/(?:search|find|look up|what(?:'s| is))\s+(?:for\s+|the\s+|about\s+)?(.{5,60}?)(?:\?|$|\.|!)/i);
+   if (pm) params.query = pm[1].trim();
+ }
  }
  else if (/brows|navigat|visit|check.*(?:site|page|website)|open.*(?:page|site|url)|go(?:ing)?\s+to\s/i.test(recentText)) {
  toolName = 'browser';
@@ -963,6 +1005,11 @@ class OpenClawGateway {
  toolName = 'web_fetch';
  if (_eu) params.url = _eu;
  else if (_ed) params.url = 'https://' + _ed;
+ // Fallback: describe what's being fetched from user prompt
+ if (!params.url && promptLower) {
+   const fm = promptLower.match(/(?:weather|news|price|stock|forecast|info|data|details)\s+(?:in|for|of|about)\s+(.{3,40}?)(?:\?|$|\.|!|today)/i);
+   if (fm) params.query = fm[1].trim();
+ }
  }
  else if (/memory.*search|search.*memory|recall|remember/i.test(recentText)) {
  toolName = 'memory_search';
