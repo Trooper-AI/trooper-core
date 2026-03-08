@@ -2869,7 +2869,8 @@ app.post('/dm', async (req, res) => {
 // Cron: list jobs from OpenClaw's local cron store
 app.get('/cron/jobs', async (req, res) => {
  try {
-   const cronStorePath = path.join(os.homedir(), '.openclaw', 'cron', 'jobs.json');
+   // Read from Docker volume mount (gateway writes cron data inside the container at ~/.openclaw/cron/)
+   const cronStorePath = '/opt/openclaw-data/config/cron/jobs.json';
    const raw = await readFile(cronStorePath, 'utf8').catch(() => null);
    if (raw) {
      const data = JSON.parse(raw);
@@ -2886,7 +2887,7 @@ app.get('/cron/jobs', async (req, res) => {
 app.get('/cron/history', async (req, res) => {
  try {
    const { limit = 50, jobId } = req.query;
-   const runsDir = path.join(os.homedir(), '.openclaw', 'cron', 'runs');
+   const runsDir = '/opt/openclaw-data/config/cron/runs';
    const files = await readdir(runsDir).catch(() => []);
    const runs = [];
    for (const file of files) {
@@ -2909,7 +2910,7 @@ app.get('/cron/history', async (req, res) => {
 app.post('/cron/jobs/:id/toggle', async (req, res) => {
  const { enabled } = req.body;
  try {
-   const cronStorePath = path.join(os.homedir(), '.openclaw', 'cron', 'jobs.json');
+   const cronStorePath = '/opt/openclaw-data/config/cron/jobs.json';
    const raw = await readFile(cronStorePath, 'utf8');
    const data = JSON.parse(raw);
    const job = data.jobs?.find(j => j.id === req.params.id);
@@ -2926,7 +2927,7 @@ app.post('/cron/jobs/:id/toggle', async (req, res) => {
 // Cron: delete job
 app.delete('/cron/jobs/:id', async (req, res) => {
  try {
-   const cronStorePath = path.join(os.homedir(), '.openclaw', 'cron', 'jobs.json');
+   const cronStorePath = '/opt/openclaw-data/config/cron/jobs.json';
    const raw = await readFile(cronStorePath, 'utf8');
    const data = JSON.parse(raw);
    data.jobs = (data.jobs || []).filter(j => j.id !== req.params.id);
