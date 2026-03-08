@@ -367,6 +367,7 @@ ${SSLIP_DOMAIN} {
 }
 CADDYFILE
  systemctl enable caddy
+ systemctl restart caddy 2>/dev/null || true
  echo "Caddy: configured for ${HTTPS_DOMAIN} + ${SSLIP_DOMAIN} → 127.0.0.1:${GATEWAY_PORT}"
  dlog "Caddy configured for ${HTTPS_DOMAIN}"
 else
