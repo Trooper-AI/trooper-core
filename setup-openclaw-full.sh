@@ -1540,19 +1540,28 @@ export DISPLAY=:1
 mkdir -p /root/.config/lxqt
 printf '[General]\n__userfile__=true\nwindow_manager=openbox\n' > /root/.config/lxqt/session.conf
 
-# Start openbox first (WM must run before lxqt-session, no --display flag)
+# Start a persistent dbus session and save the address so all desktop
+# processes share the same bus (lxqt-panel, pcmanfm-qt, etc.)
+DBUS_ENV_FILE=/tmp/dbus-desktop-env
+if [ ! -f "$DBUS_ENV_FILE" ] || ! kill -0 "$(grep DBUS_SESSION_BUS_PID "$DBUS_ENV_FILE" 2>/dev/null | cut -d= -f2)" 2>/dev/null; then
+ dbus-launch --sh-syntax > "$DBUS_ENV_FILE"
+fi
+eval "$(cat "$DBUS_ENV_FILE")"
+export DBUS_SESSION_BUS_ADDRESS DBUS_SESSION_BUS_PID
+
+# Start openbox (window manager)
 if ! pgrep -f 'openbox' > /dev/null 2>&1; then
  nohup openbox > /var/log/openbox.log 2>&1 &
  sleep 2
 fi
 
-# Start LXQt session (openbox already running, skips WM dialog)
+# Start LXQt session
 if ! pgrep -f 'lxqt-session' > /dev/null 2>&1; then
- nohup dbus-run-session lxqt-session > /var/log/lxqt.log 2>&1 &
+ nohup lxqt-session > /var/log/lxqt.log 2>&1 &
  sleep 3
 fi
 
-# Explicitly start lxqt-panel (autostart unreliable in headless env)
+# Start lxqt-panel (shares same dbus session)
 if ! pgrep -f 'lxqt-panel' > /dev/null 2>&1; then
  nohup lxqt-panel > /var/log/lxqt-panel.log 2>&1 &
  sleep 1
@@ -1568,7 +1577,7 @@ fi
 # Set wallpaper
 feh --bg-fill /usr/local/share/crabhq-wallpaper.jpg 2>/dev/null || true
 
-# Start pcmanfm-qt in desktop mode (shows icons) — retry if it fails
+# Start pcmanfm-qt in desktop mode (shows icons on desktop)
 for _try in 1 2 3; do
  if pgrep -f 'pcmanfm-qt --desktop' > /dev/null 2>&1; then break; fi
  nohup pcmanfm-qt --desktop --profile lxqt > /var/log/pcmanfm-desktop.log 2>&1 &
