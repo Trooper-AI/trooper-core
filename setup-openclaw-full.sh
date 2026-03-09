@@ -1573,7 +1573,7 @@ for _try in 1 2 3; do
  if pgrep -f 'pcmanfm-qt --desktop' > /dev/null 2>&1; then break; fi
  nohup pcmanfm-qt --desktop --profile lxqt > /var/log/pcmanfm-desktop.log 2>&1 &
  sleep 1
-fi
+done
 
 # Start websockify bridging port 6081 → VNC 5901
 if ! pgrep -f "websockify.*6081" > /dev/null 2>&1; then
