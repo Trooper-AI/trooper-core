@@ -4652,6 +4652,18 @@ app.get('/api/browser-session', (req, res) => {
  res.json(session || { active: false });
 });
 
+// ── Voice capabilities check ─────────────────────────────────────────
+app.get('/capabilities/voice', (req, res) => {
+ let hasKey = !!process.env.OPENAI_API_KEY;
+ if (!hasKey) {
+  try {
+   const envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+   hasKey = /^OPENAI_API_KEY=.+/m.test(envContent);
+  } catch {}
+ }
+ res.json({ tts: hasKey, stt: hasKey });
+});
+
 // ── TTS Endpoint (OpenAI TTS API) ────────────────────────────────────
 app.post('/tts', async (req, res) => {
  try {
