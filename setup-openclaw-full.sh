@@ -1520,10 +1520,94 @@ run_cmd snap install firefox 2>/dev/null || true
 echo "[setup] LXQt desktop packages installed"
 fi # end FROM_SNAPSHOT != 1 (noVNC + desktop packages)
 
-# Pre-seed LXQt session config (openbox as WM, skip first-run dialog)
+# ── Pre-seed ALL desktop configs BEFORE anything starts ──
+# These must exist before crabhq-desktop-start runs, otherwise
+# pcmanfm/openbox launch with defaults (black bg, no icons, broken menu).
+
+# LXQt session config (openbox as WM)
 mkdir -p /root/.config/lxqt
 printf '[General]\n__userfile__=true\nwindow_manager=openbox\n' > /root/.config/lxqt/session.conf
-echo "[setup] LXQt session config pre-seeded (openbox WM)"
+
+# LXQt global icon theme
+cat > /root/.config/lxqt/lxqt.conf << 'LXQTCONF'
+[General]
+__userfile__=true
+icon_theme=Papirus
+theme=system
+LXQTCONF
+
+# Default icon theme for all Qt apps
+mkdir -p /root/.icons/default
+printf '[Icon Theme]\nInherits=Papirus\n' > /root/.icons/default/index.theme
+
+# pcmanfm-qt config — BOTH profiles (desktop runs --profile lxqt)
+PCMAN_CONF='[Behavior]
+SingleClick=true
+QuickExec=true
+
+[Desktop]
+BgColor=#e8e8ee
+FgColor=#333333
+ShadowColor=#ffffff
+DesktopIconSize=48
+WallpaperMode=none
+WorkAreaMargins=12, 12, 12, 12
+
+[System]
+FallbackIconThemeName=Papirus
+Terminal=xterm'
+
+mkdir -p /root/.config/pcmanfm-qt/default /root/.config/pcmanfm-qt/lxqt
+echo "$PCMAN_CONF" > /root/.config/pcmanfm-qt/default/settings.conf
+echo "$PCMAN_CONF" > /root/.config/pcmanfm-qt/lxqt/settings.conf
+
+# Openbox right-click menu
+mkdir -p /root/.config/openbox
+cat > /root/.config/openbox/menu.xml << 'OBMENU'
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+  <menu id="root-menu" label="Desktop">
+    <item label="Terminal"><action name="Execute"><execute>xterm</execute></action></item>
+    <item label="Firefox"><action name="Execute"><execute>/snap/bin/firefox --no-sandbox</execute></action></item>
+    <item label="File Manager"><action name="Execute"><execute>pcmanfm-qt</execute></action></item>
+    <separator />
+    <item label="Reconfigure"><action name="Reconfigure" /></item>
+  </menu>
+</openbox_menu>
+OBMENU
+
+# Desktop icons
+mkdir -p /root/Desktop
+cat > /root/Desktop/firefox.desktop << 'DKICON'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Firefox
+Exec=/snap/bin/firefox --no-sandbox
+Icon=firefox
+Terminal=false
+DKICON
+cat > /root/Desktop/files.desktop << 'DKICON'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Files
+Exec=pcmanfm-qt
+Icon=system-file-manager
+Terminal=false
+DKICON
+cat > /root/Desktop/terminal.desktop << 'DKICON'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Terminal
+Exec=qterminal
+Icon=utilities-terminal
+Terminal=false
+DKICON
+chmod +x /root/Desktop/*.desktop
+
+echo "[setup] Desktop configs pre-seeded (icons, menu, pcmanfm, lxqt)"
 
 # Desktop start script — called by control API
 cat > /usr/local/bin/crabhq-desktop-start << 'DSTART'
@@ -1750,86 +1834,9 @@ mkdir -p /usr/local/share
 wget -q 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=1280&h=800&fit=crop' \
  -O /usr/local/share/crabhq-wallpaper.jpg 2>/dev/null || true
 
-# Configure pcmanfm-qt desktop — write to BOTH default and lxqt profiles
-# (desktop runs with --profile lxqt, but some paths read default)
-PCMAN_CONF='[Behavior]
-SingleClick=true
-QuickExec=true
+# (pcmanfm + lxqt + icon configs already pre-seeded above)
 
-[Desktop]
-BgColor=#e8e8ee
-FgColor=#333333
-ShadowColor=#ffffff
-DesktopIconSize=48
-WallpaperMode=none
-WorkAreaMargins=12, 12, 12, 12
-
-[System]
-FallbackIconThemeName=Papirus
-Terminal=xterm'
-
-mkdir -p /root/.config/pcmanfm-qt/default /root/.config/pcmanfm-qt/lxqt
-echo "$PCMAN_CONF" > /root/.config/pcmanfm-qt/default/settings.conf
-echo "$PCMAN_CONF" > /root/.config/pcmanfm-qt/lxqt/settings.conf
-
-# Set global LXQt icon theme to Papirus
-mkdir -p /root/.config/lxqt
-cat > /root/.config/lxqt/lxqt.conf << 'LXQTCONF'
-[General]
-__userfile__=true
-icon_theme=Papirus
-theme=system
-LXQTCONF
-
-# Set default icon theme for all Qt apps
-mkdir -p /root/.icons/default
-printf '[Icon Theme]\nInherits=Papirus\n' > /root/.icons/default/index.theme
-
-# Desktop icons
-mkdir -p /root/Desktop
-cat > /root/Desktop/firefox.desktop << 'EOF'
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Firefox
-Exec=/snap/bin/firefox --no-sandbox
-Icon=firefox
-Terminal=false
-EOF
-cat > /root/Desktop/files.desktop << 'EOF'
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Files
-Exec=pcmanfm-qt
-Icon=system-file-manager
-Terminal=false
-EOF
-cat > /root/Desktop/terminal.desktop << 'EOF'
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Terminal
-Exec=qterminal
-Icon=utilities-terminal
-Terminal=false
-EOF
-chmod +x /root/Desktop/*.desktop
-
-# Openbox right-click menu
-mkdir -p /root/.config/openbox
-cat > /root/.config/openbox/menu.xml << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<openbox_menu xmlns="http://openbox.org/3.4/menu">
-  <menu id="root-menu" label="Desktop">
-    <item label="Terminal"><action name="Execute"><execute>xterm</execute></action></item>
-    <item label="Firefox"><action name="Execute"><execute>/snap/bin/firefox --no-sandbox</execute></action></item>
-    <item label="File Manager"><action name="Execute"><execute>pcmanfm-qt</execute></action></item>
-    <separator />
-    <item label="Reconfigure"><action name="Reconfigure" /></item>
-  </menu>
-</openbox_menu>
-EOF
+# (desktop icons + openbox menu already pre-seeded above)
 
 # Hide noVNC sidebar by default (inject <style> after <head> tag)
 sed -i '/<head>/a <style>#noVNC_control_bar_anchor { display: none !important; }</style>' \
