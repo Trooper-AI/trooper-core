@@ -1678,6 +1678,32 @@ fi
 
 systemctl start crabhq-agent-daemon 2>/dev/null || true
 
+# ── Verify all critical processes are alive, restart any that died ──
+sleep 2
+RETRY=0
+while [ $RETRY -lt 3 ]; do
+ NEED_RESTART=false
+ if ! pgrep -f 'openbox' > /dev/null 2>&1; then
+  echo "openbox died — restarting (attempt $((RETRY+1)))"
+  nohup openbox > /var/log/openbox.log 2>&1 &
+  NEED_RESTART=true
+ fi
+ if ! pgrep -f 'pcmanfm-qt --desktop' > /dev/null 2>&1; then
+  echo "pcmanfm-qt died — restarting (attempt $((RETRY+1)))"
+  XDG_CURRENT_DESKTOP=LXQt nohup pcmanfm-qt --desktop --profile lxqt > /var/log/pcmanfm-desktop.log 2>&1 &
+  NEED_RESTART=true
+ fi
+ if ! pgrep -f 'x11vnc.*5901' > /dev/null 2>&1; then
+  echo "x11vnc died — restarting (attempt $((RETRY+1)))"
+  nohup x11vnc -display :1 -forever -nopw -shared -rfbport 5901 \
+  -o /var/log/x11vnc-desktop.log -quiet > /dev/null 2>&1 &
+  NEED_RESTART=true
+ fi
+ if [ "$NEED_RESTART" = "false" ]; then break; fi
+ RETRY=$((RETRY+1))
+ sleep 2
+done
+
 echo 'Desktop started on :1, noVNC on port 6081'
 exit 0
 DSTART
