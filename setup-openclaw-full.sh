@@ -1664,11 +1664,16 @@ if ! pgrep -f 'x11vnc.*5901' > /dev/null 2>&1; then
 fi
 
 # pcmanfm-qt desktop icons (uses --profile lxqt, config at ~/.config/pcmanfm-qt/lxqt/)
-for _try in 1 2 3; do
- if pgrep -f 'pcmanfm-qt --desktop' > /dev/null 2>&1; then break; fi
+# WORKAROUND: pcmanfm-qt doesn't paint BgColor on first launch after fresh Xvfb.
+# Kill and restart it once so the second instance renders correctly.
+if ! pgrep -f 'pcmanfm-qt --desktop' > /dev/null 2>&1; then
+ XDG_CURRENT_DESKTOP=LXQt nohup pcmanfm-qt --desktop --profile lxqt > /var/log/pcmanfm-desktop.log 2>&1 &
+ sleep 2
+ pkill -f 'pcmanfm-qt --desktop' 2>/dev/null
+ sleep 1
  XDG_CURRENT_DESKTOP=LXQt nohup pcmanfm-qt --desktop --profile lxqt > /var/log/pcmanfm-desktop.log 2>&1 &
  sleep 1
-done
+fi
 
 # websockify bridging port 6081 → VNC 5901
 if ! pgrep -f "websockify.*6081" > /dev/null 2>&1; then
