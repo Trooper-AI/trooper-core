@@ -1528,11 +1528,10 @@ echo "[setup] LXQt session config pre-seeded (openbox WM)"
 # Desktop start script — called by control API
 cat > /usr/local/bin/crabhq-desktop-start << 'DSTART'
 #!/bin/bash
-set +e  # Don't exit on errors — best-effort desktop startup
-# Start LXQt on display :1 + x11vnc + websockify on port 6081
+set +e
+# Desktop on :1 — NO lxqt-session (it creates isolated dbus, breaks everything)
 # Display :99 is reserved for AI browser live view
 
-# Required for dbus
 export XDG_RUNTIME_DIR=/tmp/runtime-root
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
@@ -1542,67 +1541,52 @@ if ! pgrep -f 'Xvfb :1' > /dev/null 2>&1; then
  nohup Xvfb :1 -screen 0 1280x800x24 > /var/log/xvfb.log 2>&1 &
  sleep 2
 fi
-
 export DISPLAY=:1
 
-# Pre-seed LXQt config
-mkdir -p /root/.config/lxqt
-printf '[General]\n__userfile__=true\nwindow_manager=openbox\n' > /root/.config/lxqt/session.conf
-
-# ── Shared dbus session ──
-# Start a persistent dbus daemon and save env so ALL desktop processes
-# share the same bus. DO NOT use lxqt-session — it spawns its own
-# isolated dbus internally, causing panel/pcmanfm to lose connection.
+# ── Fresh dbus session every start ──
+# NEVER reuse stale env files — dead bus address = black screen + no icons.
+# DO NOT use lxqt-session — it spawns its own isolated dbus internally.
 DBUS_ENV_FILE=/tmp/dbus-desktop-env
-DBUS_ALIVE=false
-if [ -f "$DBUS_ENV_FILE" ]; then
- DBUS_PID="$(grep DBUS_SESSION_BUS_PID "$DBUS_ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d "'\"; ")"
- if [ -n "$DBUS_PID" ] && kill -0 "$DBUS_PID" 2>/dev/null; then
-  DBUS_ALIVE=true
- fi
+rm -f "$DBUS_ENV_FILE"
+eval "$(dbus-launch --sh-syntax)"
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+ apt-get install -y dbus dbus-x11 2>/dev/null
+ eval "$(dbus-launch --sh-syntax)"
 fi
-if [ "$DBUS_ALIVE" = "false" ]; then
- # Kill stale dbus if any
- [ -n "$DBUS_PID" ] && kill "$DBUS_PID" 2>/dev/null || true
- dbus-launch --sh-syntax > "$DBUS_ENV_FILE" 2>/dev/null
- if [ $? -ne 0 ]; then
-  echo "WARNING: dbus-launch failed — panel/desktop icons may not work"
- fi
-fi
-eval "$(cat "$DBUS_ENV_FILE" 2>/dev/null)"
+cat > "$DBUS_ENV_FILE" << EOF2
+DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS
+DBUS_SESSION_BUS_PID=$DBUS_SESSION_BUS_PID
+EOF2
 export DBUS_SESSION_BUS_ADDRESS DBUS_SESSION_BUS_PID
 
-# Start openbox (window manager) — must share dbus
+# openbox (window manager — right-click menu, window borders)
 if ! pgrep -f 'openbox' > /dev/null 2>&1; then
  nohup openbox > /var/log/openbox.log 2>&1 &
- sleep 2
+ sleep 1
 fi
 
-# Start lxqt-panel directly (NOT via lxqt-session which creates isolated dbus)
+# lxqt-panel (taskbar) — NO lxqt-session
 if ! pgrep -f 'lxqt-panel' > /dev/null 2>&1; then
+ mkdir -p /root/.config/lxqt
  nohup lxqt-panel > /var/log/lxqt-panel.log 2>&1 &
  sleep 1
 fi
 
-# Start x11vnc on display :1, port 5901
+# x11vnc on display :1, port 5901
 if ! pgrep -f 'x11vnc.*5901' > /dev/null 2>&1; then
  nohup x11vnc -display :1 -forever -nopw -shared -rfbport 5901 \
  -o /var/log/x11vnc-desktop.log -quiet > /dev/null 2>&1 &
  sleep 1
 fi
 
-# Set wallpaper
-feh --bg-fill /usr/local/share/crabhq-wallpaper.jpg 2>/dev/null || true
-
-# Start pcmanfm-qt in desktop mode (shows icons on desktop)
-# Must share the same DBUS_SESSION_BUS_ADDRESS as lxqt-panel
+# pcmanfm-qt desktop icons (uses --profile lxqt, config at ~/.config/pcmanfm-qt/lxqt/)
 for _try in 1 2 3; do
  if pgrep -f 'pcmanfm-qt --desktop' > /dev/null 2>&1; then break; fi
- nohup pcmanfm-qt --desktop --profile lxqt > /var/log/pcmanfm-desktop.log 2>&1 &
+ XDG_CURRENT_DESKTOP=LXQt nohup pcmanfm-qt --desktop --profile lxqt > /var/log/pcmanfm-desktop.log 2>&1 &
  sleep 1
 done
 
-# Start websockify bridging port 6081 → VNC 5901
+# websockify bridging port 6081 → VNC 5901
 if ! pgrep -f "websockify.*6081" > /dev/null 2>&1; then
  nohup websockify --web=/usr/share/novnc 6081 localhost:5901 \
  > /var/log/websockify-desktop.log 2>&1 &
@@ -1766,25 +1750,40 @@ mkdir -p /usr/local/share
 wget -q 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=1280&h=800&fit=crop' \
  -O /usr/local/share/crabhq-wallpaper.jpg 2>/dev/null || true
 
-# Configure pcmanfm-qt desktop (wallpaper + single-click + Papirus icons)
-mkdir -p /root/.config/pcmanfm-qt/default
-cat > /root/.config/pcmanfm-qt/default/settings.conf << 'PCMANCONF'
-[Behavior]
+# Configure pcmanfm-qt desktop — write to BOTH default and lxqt profiles
+# (desktop runs with --profile lxqt, but some paths read default)
+PCMAN_CONF='[Behavior]
 SingleClick=true
 QuickExec=true
 
 [Desktop]
-Wallpaper=/usr/local/share/crabhq-wallpaper.jpg
-WallpaperMode=zoom
+BgColor=#e8e8ee
+FgColor=#333333
+ShadowColor=#ffffff
 DesktopIconSize=48
-FgColor=#ffffff
-ShadowColor=#000000
+WallpaperMode=none
 WorkAreaMargins=12, 12, 12, 12
 
 [System]
 FallbackIconThemeName=Papirus
-Terminal=xterm
-PCMANCONF
+Terminal=xterm'
+
+mkdir -p /root/.config/pcmanfm-qt/default /root/.config/pcmanfm-qt/lxqt
+echo "$PCMAN_CONF" > /root/.config/pcmanfm-qt/default/settings.conf
+echo "$PCMAN_CONF" > /root/.config/pcmanfm-qt/lxqt/settings.conf
+
+# Set global LXQt icon theme to Papirus
+mkdir -p /root/.config/lxqt
+cat > /root/.config/lxqt/lxqt.conf << 'LXQTCONF'
+[General]
+__userfile__=true
+icon_theme=Papirus
+theme=system
+LXQTCONF
+
+# Set default icon theme for all Qt apps
+mkdir -p /root/.icons/default
+printf '[Icon Theme]\nInherits=Papirus\n' > /root/.icons/default/index.theme
 
 # Desktop icons
 mkdir -p /root/Desktop
@@ -1820,16 +1819,16 @@ chmod +x /root/Desktop/*.desktop
 # Openbox right-click menu
 mkdir -p /root/.config/openbox
 cat > /root/.config/openbox/menu.xml << 'EOF'
- 
- 
- 
- /snap/bin/firefox 
- pcmanfm-qt 
- xterm 
- 
- 
- 
- 
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+  <menu id="root-menu" label="Desktop">
+    <item label="Terminal"><action name="Execute"><execute>xterm</execute></action></item>
+    <item label="Firefox"><action name="Execute"><execute>/snap/bin/firefox --no-sandbox</execute></action></item>
+    <item label="File Manager"><action name="Execute"><execute>pcmanfm-qt</execute></action></item>
+    <separator />
+    <item label="Reconfigure"><action name="Reconfigure" /></item>
+  </menu>
+</openbox_menu>
 EOF
 
 # Hide noVNC sidebar by default (inject <style> after <head> tag)
