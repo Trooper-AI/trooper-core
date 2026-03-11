@@ -1155,6 +1155,28 @@ class OpenClawGateway {
  }
  lifecycleDepth = Math.max(0, lifecycleDepth - 1);
  }
+ // Gateway auth/provider error — forward immediately and terminate
+ if (stream === 'lifecycle' && data?.phase === 'error') {
+ const errMsg = data.error || 'Gateway error';
+ console.error(`[OpenClaw] Gateway lifecycle error: ${errMsg}`);
+ if (onEvent) onEvent('error', { message: errMsg });
+ // Reject the pending request so the SSE stream terminates immediately
+ // Try by runId first, then scan all pending requests
+ let pendingEntry = null;
+ for (const [reqId, p] of this._pendingRequests.entries()) {
+  if (p.runId === runId || reqId === runId) { pendingEntry = { id: reqId, ...p }; break; }
+ }
+ // If no match by runId, reject the most recent pending request (likely the one that caused the error)
+ if (!pendingEntry && this._pendingRequests.size > 0) {
+  const lastKey = [...this._pendingRequests.keys()].pop();
+  const lastP = this._pendingRequests.get(lastKey);
+  pendingEntry = { id: lastKey, ...lastP };
+ }
+ if (pendingEntry?.reject) {
+  pendingEntry.reject(new Error(`Gateway error: ${errMsg}`));
+  this._pendingRequests.delete(pendingEntry.id);
+ }
+ }
  if (stream === 'tool_use' && data) {
  // Cancel any pending heuristic gap timer — we have real data now
  if (toolGapTimer) { clearTimeout(toolGapTimer); toolGapTimer = null; }
