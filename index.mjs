@@ -662,6 +662,8 @@ class OpenClawGateway {
  // Route unmatched events to the active session listener (captures nested runId events)
  this._activeSessionListener(stream, data, runId);
  }
+ // Reset inactivity timeout for any agent event (including from sub-agents with unknown runIds)
+ if (this._activeTimeoutReset) this._activeTimeoutReset();
  }
  }
 
@@ -699,14 +701,21 @@ class OpenClawGateway {
 
  try {
  const result = await new Promise((resolve, reject) => {
- const timeout = setTimeout(() => {
- this._pendingRequests.delete(id);
- reject(new Error(`Agent timeout after ${timeoutMs / 1000}s`));
- }, timeoutMs);
+ // Inactivity timeout — resets on each gateway event
+ let timeout;
+ const resetTimeout = () => {
+  if (timeout) clearTimeout(timeout);
+  timeout = setTimeout(() => {
+   this._pendingRequests.delete(id);
+   reject(new Error(`Agent timeout after ${timeoutMs / 1000}s of inactivity`));
+  }, timeoutMs);
+ };
+ resetTimeout();
+ this._activeTimeoutReset = resetTimeout;
 
  this._pendingRequests.set(id, {
- resolve: (payload) => { clearTimeout(timeout); resolve(payload); },
- reject: (err) => { clearTimeout(timeout); reject(err); },
+ resolve: (payload) => { clearTimeout(timeout); this._activeTimeoutReset = null; resolve(payload); },
+ reject: (err) => { clearTimeout(timeout); this._activeTimeoutReset = null; reject(err); },
  expectFinal: true, runId: null, idempotencyKey,
  });
 
@@ -818,6 +827,8 @@ class OpenClawGateway {
  };
 
  const eventHandler = (stream, data, runId) => {
+ // Reset inactivity timeout — agent is actively working
+ if (this._activeTimeoutReset) this._activeTimeoutReset();
  // Debug: log ALL raw gateway events to global buffer + console
  if (stream === 'tool_use' || stream === 'tool_result' || stream === 'lifecycle') {
  const rawStr = JSON.stringify(data || {}).substring(0, 300);
@@ -1353,14 +1364,22 @@ class OpenClawGateway {
 
  try {
  const result = await new Promise((resolve, reject) => {
- const timeout = setTimeout(() => {
- this._pendingRequests.delete(id);
- reject(new Error(`Agent timeout after ${timeoutMs / 1000}s`));
- }, timeoutMs);
+ // Inactivity timeout — resets every time the gateway sends an event
+ let timeout;
+ const resetTimeout = () => {
+  if (timeout) clearTimeout(timeout);
+  timeout = setTimeout(() => {
+   this._pendingRequests.delete(id);
+   reject(new Error(`Agent timeout after ${timeoutMs / 1000}s of inactivity`));
+  }, timeoutMs);
+ };
+ resetTimeout();
+ // Expose resetTimeout so eventHandler can call it on each event
+ this._activeTimeoutReset = resetTimeout;
 
  this._pendingRequests.set(id, {
- resolve: (payload) => { clearTimeout(timeout); resolve(payload); },
- reject: (err) => { clearTimeout(timeout); reject(err); },
+ resolve: (payload) => { clearTimeout(timeout); this._activeTimeoutReset = null; resolve(payload); },
+ reject: (err) => { clearTimeout(timeout); this._activeTimeoutReset = null; reject(err); },
  expectFinal: true, runId: null, idempotencyKey,
  });
 
