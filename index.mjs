@@ -829,16 +829,19 @@ class OpenClawGateway {
  const eventHandler = (stream, data, runId) => {
  // Reset inactivity timeout — agent is actively working
  if (this._activeTimeoutReset) this._activeTimeoutReset();
- // Debug: log ALL raw gateway events to global buffer + console
- if (stream === 'tool_use' || stream === 'tool_result' || stream === 'lifecycle') {
+ // Debug: log ALL raw gateway events to global buffer + console (including text)
  const rawStr = JSON.stringify(data || {}).substring(0, 300);
- logDebugEvent('raw_gateway', { stream, runId, isSubAgent: !!(mainRunId && runId && runId !== mainRunId), data: rawStr });
- console.log(`[TOOL:DBG] stream=${stream} runId=${runId} data=${rawStr.substring(0, 200)}`);
+ const isSubAgent = !!(mainRunId && runId && runId !== mainRunId);
+ logDebugEvent('raw_gateway', { stream, runId: runId?.substring(0,8), isSubAgent, data: rawStr.substring(0, 200) });
+ if (stream !== 'assistant') {
+ console.log(`[TOOL:DBG] stream=${stream} runId=${runId?.substring(0,8)} data=${rawStr.substring(0, 200)}`);
+ } else if (data?.text) {
+ // Log text events more compactly (they're frequent)
+ console.log(`[TEXT:DBG] runId=${runId?.substring(0,8)} isSubAgent=${isSubAgent} chars=${data.text.length} snippet="${data.text.substring(0, 60).replace(/\n/g, '\\n')}"`);
  }
 
  // Track main runId from first event
  if (!mainRunId && runId) mainRunId = runId;
- const isSubAgent = mainRunId && runId && runId !== mainRunId;
 
  // Associate new runIds with pending sub-agent spawns (tree-based)
  if (isSubAgent && !activeSubAgents.has(runId)) {
@@ -1949,6 +1952,14 @@ async function handleIncomingTaskStream(req, res) {
  const sendSSE = (event, data) => {
  if (res.writableEnded) return;
  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+ // Debug: log every SSE event sent to CrabsHQ
+ const dataStr = JSON.stringify(data).substring(0, 150);
+ if (event !== 'text' && event !== 'typing_keepalive') {
+  logDebugEvent('sse_to_crabhq', { event, data: dataStr });
+  console.log(`[SSE→CrabsHQ] event=${event} data=${dataStr}`);
+ } else if (event === 'text') {
+  logDebugEvent('sse_to_crabhq', { event, chars: data?.text?.length || 0 });
+ }
  };
 
  // Keep-alive to prevent proxy timeouts + typing indicator keepalive (v2026.3.1)
@@ -2262,8 +2273,46 @@ app.get('/debug/events', (req, res) => {
  total: _recentDebugEvents.length,
  showing: Math.min(events.length, limit),
  categories: [...new Set(_recentDebugEvents.map(e => e.category))],
- help: 'Filter: ?category=raw_gateway|tool_use|heuristic_lifecycle|heuristic_gap|subagent_tool_use',
+ help: 'Filter: ?category=raw_gateway|sse_to_crabhq|tool_use|heuristic_lifecycle|heuristic_gap|subagent_tool_use&limit=200',
  events: events.slice(-limit),
+ });
+});
+
+// Full pipeline trace: shows gateway→bridge→crabhq flow side by side
+app.get('/debug/pipeline', (req, res) => {
+ const limit = Math.min(parseInt(req.query.limit) || 100, MAX_DEBUG_EVENTS);
+ const since = req.query.since ? parseInt(req.query.since) : 0;
+ let events = _recentDebugEvents;
+ if (since) events = events.filter(e => e.t > since);
+ 
+ // Group by category for pipeline view
+ const gateway = events.filter(e => e.category === 'raw_gateway').slice(-limit);
+ const sse = events.filter(e => e.category === 'sse_to_crabhq').slice(-limit);
+ const tools = events.filter(e => e.category === 'tool_use' || e.category === 'subagent_tool_use').slice(-limit);
+ const heuristic = events.filter(e => e.category?.startsWith('heuristic')).slice(-limit);
+ 
+ // Stats
+ const textEvents = gateway.filter(e => e.stream === 'assistant');
+ const toolEvents = gateway.filter(e => e.stream === 'tool_use' || e.stream === 'tool_result');
+ const lifecycleEvents = gateway.filter(e => e.stream === 'lifecycle');
+ 
+ res.json({
+  pipeline: {
+   gateway_events: gateway.length,
+   sse_events_sent: sse.length,
+   text_chunks: textEvents.length,
+   tool_events: toolEvents.length,
+   lifecycle_events: lifecycleEvents.length,
+   heuristic_guesses: heuristic.length,
+  },
+  ws_connected: !!gateway._ws?.readyState,
+  recent: {
+   gateway: gateway.slice(-20),
+   sse_to_crabhq: sse.slice(-20),
+   tools: tools.slice(-10),
+   heuristics: heuristic.slice(-5),
+  },
+  help: 'Use ?since=<timestamp_ms> to filter. Use /debug/events for raw list.',
  });
 });
 
