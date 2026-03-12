@@ -880,6 +880,35 @@ class OpenClawGateway {
  }
  }
 
+
+ // Fetch session history from gateway — returns tool calls and messages
+ async fetchSessionHistory(sessionKey, limit = 50) {
+  if (!this.connected) return null;
+  const id = randomUUID();
+  try {
+   const result = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+     this._pendingRequests.delete(id);
+     reject(new Error('History fetch timeout'));
+    }, 10000);
+    this._pendingRequests.set(id, {
+     resolve: (payload) => { clearTimeout(timeout); resolve(payload); },
+     reject: (err) => { clearTimeout(timeout); reject(err); },
+    });
+    this.ws.send(JSON.stringify({
+     type: 'req', id, method: 'chat.history',
+     params: { sessionKey, limit },
+    }));
+   });
+   return result?.messages || [];
+  } catch (err) {
+   console.error('[OpenClaw] fetchSessionHistory error:', err.message);
+   return null;
+  } finally {
+   this._pendingRequests.delete(id);
+  }
+ }
+
  // Streaming variant — calls onEvent(type, data) for each event as it arrives.
  // Returns a promise that resolves with { response, toolLog } when agent finishes.
  async runAgentStreaming(message, opts = {}, onEvent) {
@@ -1146,8 +1175,8 @@ class OpenClawGateway {
  // Last resort: URL/domain found but no tool match — only if the domain appears intentional
  // (skip if the prompt is about scheduling/reminders — domains in text are incidental)
  else if ((_eu || _ed) && !/remind|cron|schedule|every\s+\d/i.test(promptLower)) {
- toolName = 'web_fetch';
- params.url = _eu || ('https://' + _ed);
+ toolName = 'processing';
+ // Heuristic: domain found in text but cannot confirm actual tool use
  }
  logDebugEvent('heuristic_gap', { tool: toolName, params, textSnippet: recentText.substring(recentText.length - 100) });
  console.log(`[HEURISTIC:gap] tool=${toolName} params=${JSON.stringify(params)} text="${recentText.substring(recentText.length - 80)}"`);
@@ -1992,7 +2021,7 @@ async function handleIncomingTask(req, res) {
  agentId, agentName: agentName || 'default', sessionKey,
  thinking: thinking || undefined,
  model: model || undefined,
- extraSystemPrompt: registered ? undefined : (systemPrompt || undefined),
+ extraSystemPrompt: registered?.soul ? `You are ${registered.name || "Agent"}, a ${registered.title || "Specialist"}. ${registered.soul}` : (systemPrompt || undefined),
  timeoutMs: isTaskWork ? 600000 : 180000,
  });
 
@@ -2079,7 +2108,9 @@ async function handleIncomingTaskStream(req, res) {
  // If this is a browser task (flagged by CrabsHQ), add a browser-focused system prompt
  // to ensure the agent uses the browser tool even if the task description is ambiguous
  const isBrowserTask = context?.browserTask === true;
- let resolvedSystemPrompt = registered ? undefined : (systemPrompt || undefined);
+ let resolvedSystemPrompt = registered?.soul
+   ? `You are ${registered.name || "Agent"}, a ${registered.title || "Specialist"}. ${registered.soul}`
+   : (systemPrompt || undefined);
  if (isBrowserTask && !registered) {
  const browserHint = 'You have a browser tool available. Use it to complete this task. Navigate to URLs, interact with pages, take screenshots, and report results. Use DuckDuckGo instead of Google for web searches (Google blocks automated browsers).';
  resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${browserHint}` : browserHint;
@@ -2197,6 +2228,54 @@ async function handleIncomingTaskStream(req, res) {
  usage: { input_tokens: estimatedInputTokens + toolOverhead, output_tokens: estimatedOutputTokens, estimated: true },
  desktopRecordingUrl: desktopRecordingUrl || undefined,
  });
+
+ // Post-completion: fetch real tool history from gateway session transcript
+ // This gives us exec commands, Read/Write calls, browser actions etc.
+ try {
+  const sessionKey2 = `agent:${agentId}:hook:crabhq:${(agentName || 'default').toLowerCase().replace(/\s+/g, '-')}:task`;
+  const historyMessages = await gateway.fetchSessionHistory(sessionKey2, 100);
+  if (historyMessages && historyMessages.length > 0) {
+   // Extract tool calls from history (toolCall + toolResult pairs)
+   const toolHistory = [];
+   for (const msg of historyMessages) {
+    const content = msg?.message?.content;
+    const role = msg?.message?.role;
+    if (role === 'assistant' && Array.isArray(content)) {
+     for (const block of content) {
+      if (block.type === 'toolCall') {
+       toolHistory.push({
+        event: 'tool_start',
+        data: { tool: block.name, params: block.arguments || {}, toolCallId: block.id },
+        time: new Date(msg.timestamp).getTime() || Date.now(),
+       });
+      }
+     }
+    }
+    if (role === 'toolResult' && content) {
+     const resultText = Array.isArray(content)
+      ? content.filter(c => c.type === 'text').map(c => c.text).join('\n')
+      : typeof content === 'string' ? content : JSON.stringify(content);
+     toolHistory.push({
+      event: 'tool_result',
+      data: {
+       tool: msg.message.toolName || 'unknown',
+       toolCallId: msg.message.toolCallId,
+       success: !msg.message.isError,
+       summary: resultText,
+       details: msg.message.details || undefined,
+      },
+      time: new Date(msg.timestamp).getTime() || Date.now(),
+     });
+    }
+   }
+   if (toolHistory.length > 0) {
+    console.log(`[OpenClaw] Post-completion: ${toolHistory.length} tool events from session history`);
+    sendSSE('tool_history', { requestId: id, agentId, events: toolHistory });
+   }
+  }
+ } catch (histErr) {
+  console.error('[OpenClaw] Post-completion history fetch error:', histErr.message);
+ }
 
  // Forward async callbacks
  const taskId = context?.taskId;
