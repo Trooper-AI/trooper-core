@@ -2116,17 +2116,18 @@ async function handleIncomingTaskStream(req, res) {
  resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${browserHint}` : browserHint;
  }
 
+ // ── Live tool events via JSONL tail ──
+ // Gateway doesn't forward tool events over WS (issue #43986).
+ // Workaround: tail the session JSONL file inside Docker and parse tool events in real-time.
+ // Declared outside try/catch so cleanup in catch block can access it.
+ let jsonlTailProc = null;
+
  try {
  console.log(`[${id}] SSE streaming to OpenClaw agent:${agentId} for ${agentName || 'default'}${isBrowserTask ? ' [browser task]' : ''}...`);
  // Task work needs longer inactivity timeout — gateway agents do internal tool work
  // (read/write/exec) that doesn't emit WS events. 600s for tasks, 180s for chat.
  const isTaskWork = !!(context?.taskId);
  const inactivityMs = isTaskWork ? 600000 : 180000;
-
- // ── Live tool events via JSONL tail ──
- // Gateway doesn't forward tool events over WS (issue #43986).
- // Workaround: tail the session JSONL file inside Docker and parse tool events in real-time.
- let jsonlTailProc = null;
  const activeToolCalls = new Map(); // toolCallId → { name, startedAt }
  try {
    // Find the latest JSONL for this agent's sessions dir
