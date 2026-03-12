@@ -1101,7 +1101,7 @@ class OpenClawGateway {
  // writing, not about to use a tool — skip heuristic to avoid false positives like
  // "Browsing google.com" when the response just mentions a domain.
  const totalText = textChunks.join('');
- if (!inToolGap && textChunks.length > 0 && totalText.length < 500) {
+ if (!inToolGap && textChunks.length > 0 && totalText.length < 100) {
  inToolGap = true;
  let toolName = 'processing';
  let skillName = null;
