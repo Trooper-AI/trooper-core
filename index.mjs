@@ -1040,7 +1040,7 @@ class OpenClawGateway {
  if (last && last.status === 'called') {
    last.status = data.is_error ? 'failed' : 'ok';
    last.durationMs = Date.now() - (last.startedAt || Date.now());
-   const summary = typeof data.content === 'string' ? data.content.substring(0, 120) : (data.summary || `Completed in ${(last.durationMs / 1000).toFixed(1)}s`);
+   const summary = typeof data.content === 'string' ? data.content.substring(0, 500) : (data.summary || `Completed in ${(last.durationMs / 1000).toFixed(1)}s`);
    last.summary = summary;
    if (onEvent) onEvent('tool_result', { tool: last.tool, skillName: last.skillName, params: last.params, success: !data.is_error, summary, index: toolLog.length - 1 });
  }
