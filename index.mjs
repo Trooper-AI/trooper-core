@@ -2398,7 +2398,7 @@ async function handleIncomingTaskStream(req, res) {
  } else if (completedMatch) {
    sendSSE('outcome', { type: 'completed', detail: (completedMatch[1] || '').trim() });
  }
- sendSSE('model_done', { eventType: 'model_done', confidence: 'native', model: opts.model || null, time: Date.now() });
+ sendSSE('model_done', { eventType: 'model_done', confidence: 'native', model: model || null, time: Date.now() });
 
  sendSSE('done', {
  requestId: id, agentId,
