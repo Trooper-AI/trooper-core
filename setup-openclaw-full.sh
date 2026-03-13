@@ -1666,8 +1666,36 @@ sleep 1
 nohup lxqt-panel > /var/log/lxqt-panel.log 2>&1 &
 sleep 1
 
+# Create a few reliable launchers/shortcuts so the desktop is actually usable.
+mkdir -p /root/Desktop /root/.local/share/applications
+cat > /root/Desktop/Terminal.desktop << 'DESK1'
+[Desktop Entry]
+Type=Application
+Name=Terminal
+Exec=xterm -fa Monospace -fs 11
+Icon=utilities-terminal
+Terminal=false
+DESK1
+cat > /root/Desktop/Browser.desktop << 'DESK2'
+[Desktop Entry]
+Type=Application
+Name=Browser
+Exec=/opt/chrome-wrapper.sh
+Icon=google-chrome
+Terminal=false
+DESK2
+cat > /root/Desktop/Workspace.desktop << 'DESK3'
+[Desktop Entry]
+Type=Application
+Name=Workspace
+Exec=pcmanfm-qt /home/node/.openclaw/workspace
+Icon=folder
+Terminal=false
+DESK3
+chmod +x /root/Desktop/*.desktop
+
 # Always launch one visible terminal so the desktop never looks dead.
-nohup xterm -hold -geometry 100x28+80+60 -fa Monospace -fs 11 -bg '#111827' -fg '#e5e7eb' -e /bin/bash -lc "echo CrabsHQ Desktop Ready; echo; echo '- If panel/icons are missing, the session is still alive.'; echo '- Open apps can be launched from terminal or agent actions.'; echo; exec bash" > /var/log/xterm-desktop.log 2>&1 &
+nohup xterm -hold -geometry 100x28+80+60 -fa Monospace -fs 11 -bg '#111827' -fg '#e5e7eb' -e /bin/bash -lc "echo CrabsHQ Desktop Ready; echo; echo '- Use the desktop shortcuts for Browser / Workspace / Terminal.'; echo '- If panel/icons are missing, the session is still alive.'; echo; exec bash" > /var/log/xterm-desktop.log 2>&1 &
 sleep 1
 
 nohup x11vnc -display :1 -forever -nopw -shared -rfbport 5901 -noxdamage \
