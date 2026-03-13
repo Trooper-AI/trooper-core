@@ -929,6 +929,7 @@ class OpenClawGateway {
  const _projectFolder = opts.projectFolder || null;
 
  const textChunks = [];
+ if (onEvent) onEvent('model_start', { eventType: 'model_start', confidence: 'native', model: model || opts.model || null, time: Date.now() });
  const toolLog = [];
  let lifecycleDepth = 0; // track nested lifecycle start/end to detect tool execution
  let lastTextTime = 0; // track when text stops (tool execution gap)
@@ -1068,6 +1069,7 @@ class OpenClawGateway {
      confidence: base.confidence || 'native',
      tool: base.tool || 'unknown',
      toolCallId: base.toolCallId,
+     skillName: base.skillName || null,
      params: base.params || {},
      summary: base.summary || '',
      raw: base.raw || '',
@@ -1223,7 +1225,8 @@ class OpenClawGateway {
  }
  logDebugEvent('heuristic_gap', { tool: toolName, params, textSnippet: recentText.substring(recentText.length - 100) });
  console.log(`[HEURISTIC:gap] tool=${toolName} params=${JSON.stringify(params)} text="${recentText.substring(recentText.length - 80)}"`);
- if (onEvent) onEvent('tool_start', { tool: toolName, skillName, params, index: toolLog.length });
+ if (skillName && onEvent) onEvent('skill_start', { eventType: 'skill_start', confidence: 'heuristic', skillName, tool: toolName, params, time: Date.now() });
+ if (onEvent) onEvent('tool_start', normalizeToolEventPayload('tool_start', { tool: toolName, skillName, params, index: toolLog.length, startedAt: Date.now(), confidence: 'heuristic' }));
  toolLog.push({ tool: toolName, skillName, params, status: 'called', startedAt: Date.now() });
  }
  }, 2000);
@@ -1334,7 +1337,8 @@ class OpenClawGateway {
  if (last && last.status === 'called') {
  last.status = 'ok';
  last.durationMs = Date.now() - (last.startedAt || Date.now());
- if (onEvent) onEvent('tool_result', { tool: last.tool, skillName: last.skillName, params: {}, success: true, summary: `Completed in ${(last.durationMs / 1000).toFixed(1)}s`, index: toolLog.length - 1 });
+ if (onEvent) onEvent('tool_result', normalizeToolEventPayload('tool_result', { tool: last.tool, skillName: last.skillName, params: {}, success: true, summary: `Completed in ${(last.durationMs / 1000).toFixed(1)}s`, durationMs: last.durationMs, index: toolLog.length - 1, startedAt: last.startedAt, confidence: 'heuristic' }));
+ if (last.skillName && onEvent) onEvent('skill_end', { eventType: 'skill_end', confidence: 'heuristic', skillName: last.skillName, tool: last.tool, summary: last.summary || `Completed in ${(last.durationMs / 1000).toFixed(1)}s`, durationMs: last.durationMs, time: Date.now() });
  }
  }
  lifecycleDepth = Math.max(0, lifecycleDepth - 1);
@@ -2383,6 +2387,7 @@ async function handleIncomingTaskStream(req, res) {
  } else if (completedMatch) {
    sendSSE('outcome', { type: 'completed', detail: (completedMatch[1] || '').trim() });
  }
+ sendSSE('model_done', { eventType: 'model_done', confidence: 'native', model: model || opts.model || null, time: Date.now() });
 
  sendSSE('done', {
  requestId: id, agentId,
