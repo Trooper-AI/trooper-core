@@ -3203,6 +3203,7 @@ app.post('/agents/company-context', (req, res) => {
 });
 
 // Sync structured memories to all agent workspaces as MEMORIES.md
+// and mirror them one-way into MEMORY.md for agents/tools that only read MEMORY.md.
 app.post('/agents/sync-memories', (req, res) => {
  const { memories } = req.body;
  if (!Array.isArray(memories)) return res.status(400).json({ error: 'memories array required' });
@@ -3215,16 +3216,21 @@ app.post('/agents/sync-memories', (req, res) => {
  grouped[m.category].push(m);
  });
 
- let content = '# Team Memory\n\n_Auto-synced structured knowledge. Agents: reference this for context._\n\n';
+ let memoriesContent = '# Team Memory\n\n_Auto-synced structured knowledge. Agents: reference this for context._\n\n';
  for (const [cat, mems] of Object.entries(grouped)) {
- content += `## ${cat.charAt(0).toUpperCase() + cat.slice(1)}\n`;
- mems.forEach(m => { content += `- **${m.key}**: ${m.value}\n`; });
- content += '\n';
+ memoriesContent += `## ${cat.charAt(0).toUpperCase() + cat.slice(1)}\n`;
+ mems.forEach(m => { memoriesContent += `- **${m.key}**: ${m.value}\n`; });
+ memoriesContent += '\n';
  }
 
+ const memoryContent = memoriesContent
+   .replace(/^# Team Memory/m, '# Long-Term Memory')
+   .replace('_Auto-synced structured knowledge. Agents: reference this for context._', '_Auto-synced from MEMORIES.md. Do not edit manually; this file is generated from structured memory._');
+
  // Write to LEAD workspace
- writeFileSync('/opt/openclaw-data/workspace/MEMORIES.md', content);
- execSync('chown 1000:1000 /opt/openclaw-data/workspace/MEMORIES.md', { timeout: 5000 });
+ writeFileSync('/opt/openclaw-data/workspace/MEMORIES.md', memoriesContent);
+ writeFileSync('/opt/openclaw-data/workspace/MEMORY.md', memoryContent);
+ execSync('chown 1000:1000 /opt/openclaw-data/workspace/MEMORIES.md /opt/openclaw-data/workspace/MEMORY.md', { timeout: 5000 });
 
  // Write to all SPC workspaces
  const agentsDir = '/opt/openclaw-data/config/agents';
@@ -3234,12 +3240,13 @@ app.post('/agents/sync-memories', (req, res) => {
  for (const agent of agents) {
  const spcWs = `${agentsDir}/${agent}/workspace`;
  mkdirSync(spcWs, { recursive: true });
- writeFileSync(`${spcWs}/MEMORIES.md`, content);
+ writeFileSync(`${spcWs}/MEMORIES.md`, memoriesContent);
+ writeFileSync(`${spcWs}/MEMORY.md`, memoryContent);
  execSync(`chown -R 1000:1000 ${agentsDir}/${agent}`, { timeout: 5000 });
  spcCount++;
  }
  } catch {}
- console.log(`🧠 Synced ${memories.length} memories to main + ${spcCount} SPCs`);
+ console.log(`🧠 Synced ${memories.length} memories to main + ${spcCount} SPCs (MEMORIES.md -> MEMORY.md)`);
  res.json({ success: true, synced: spcCount + 1 });
  } catch (err) {
  res.status(500).json({ error: err.message });
