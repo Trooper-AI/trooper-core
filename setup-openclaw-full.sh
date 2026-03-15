@@ -13,6 +13,8 @@
 # {{OPENCLAW_DOCKER_IMAGE}} - Docker image (default: ghcr.io/openclaw/openclaw:latest)
 # {{PRIMARY_PROVIDER}} - Preferred model provider (anthropic|openai|gemini|openrouter, default: auto-detect)
 # {{PRIMARY_MODEL}} - Preferred model ID (default: auto-detect from provider)
+# {{RUNTIME_AUTH_SECRET}} - Shared secret for central -> org-runtime auth
+# {{CRABHQ_RUNTIME_TARBALL_URL}} - Optional tarball URL for CrabsHQ runtime bundle
 
 set -e
 
@@ -38,6 +40,10 @@ PRIMARY_PROVIDER="{{PRIMARY_PROVIDER}}"
 PRIMARY_MODEL="{{PRIMARY_MODEL}}"
 BROWSERBASE_API_KEY="{{BROWSERBASE_API_KEY}}"
 BROWSERBASE_PROJECT_ID="{{BROWSERBASE_PROJECT_ID}}"
+RUNTIME_AUTH_SECRET="{{RUNTIME_AUTH_SECRET}}"
+CRABHQ_RUNTIME_TARBALL_URL="{{CRABHQ_RUNTIME_TARBALL_URL}}"
+CRABHQ_RUNTIME_PORT=3101
+CRABHQ_RUNTIME_DATA_DIR=/var/lib/crabhq-org-runtime
 
 # Detect if booting from a pre-built snapshot (skip heavy installs)
 FROM_SNAPSHOT="${CRABHQ_FROM_SNAPSHOT:-0}"
@@ -330,6 +336,10 @@ ${HTTPS_DOMAIN} {
  uri strip_prefix /desktop-api
  reverse_proxy 127.0.0.1:4567
  }
+ handle /runtime-api/* {
+ uri strip_prefix /runtime-api
+ reverse_proxy 127.0.0.1:${CRABHQ_RUNTIME_PORT}
+ }
  handle {
  reverse_proxy 127.0.0.1:${GATEWAY_PORT}
  }
@@ -360,6 +370,10 @@ ${SSLIP_DOMAIN} {
  handle /desktop-api/* {
  uri strip_prefix /desktop-api
  reverse_proxy 127.0.0.1:4567
+ }
+ handle /runtime-api/* {
+ uri strip_prefix /runtime-api
+ reverse_proxy 127.0.0.1:${CRABHQ_RUNTIME_PORT}
  }
  handle {
  reverse_proxy 127.0.0.1:${GATEWAY_PORT}
@@ -1882,6 +1896,34 @@ dlog "Waiting for sandbox build..."
 
 cd /opt/openclaw
 
+# ── [7b/9] CrabsHQ org runtime install ─────────────────────────────
+dlog "Preparing CrabsHQ org runtime..."
+mkdir -p /opt/crabhq-org-runtime /var/lib/crabhq-org-runtime
+
+if [ -n "${CRABHQ_RUNTIME_TARBALL_URL:-}" ] && [ "${CRABHQ_RUNTIME_TARBALL_URL}" != "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; then
+  dlog "Downloading CrabsHQ runtime bundle..."
+  curl -fsSL "$CRABHQ_RUNTIME_TARBALL_URL" -o /tmp/crabhq-org-runtime.tar.gz
+  tar -xzf /tmp/crabhq-org-runtime.tar.gz -C /opt/crabhq-org-runtime --strip-components=1
+else
+  dlog "No CrabsHQ runtime bundle URL provided — install path prepared only" "installing"
+fi
+
+if [ -f /opt/crabhq-org-runtime/server/package.json ]; then
+  dlog "Installing CrabsHQ org runtime dependencies..."
+  cd /opt/crabhq-org-runtime/server
+  npm install --omit=dev >/tmp/crabhq-org-runtime-npm.log 2>&1 || (tail -n 50 /tmp/crabhq-org-runtime-npm.log; exit 1)
+  cd /opt/openclaw
+fi
+
+cat > /etc/default/crabhq-org-runtime << CRENV
+ORG_RUNTIME_PORT=${CRABHQ_RUNTIME_PORT}
+ORG_RUNTIME_ORG_ID=${ORG_ID}
+RUNTIME_AUTH_SECRET=${RUNTIME_AUTH_SECRET}
+LOCAL_RUNTIME_DATA_DIR=${CRABHQ_RUNTIME_DATA_DIR}
+PREFER_LOCAL_RUNTIME_MEMORY=1
+FRONTEND_URL=https://crabhq.netlify.app
+CRENV
+
 # ── [8/9] Systemd services ──────────────────────────────────────────
 
 # Docker Compose service (auto-start containers on boot)
@@ -1934,6 +1976,29 @@ Environment=BROWSERBASE_PROJECT_ID=${BROWSERBASE_PROJECT_ID}
 [Install]
 WantedBy=multi-user.target
 BSVC
+
+# CrabsHQ org runtime service
+cat > /etc/systemd/system/crabhq-org-runtime.service << CRUNTIME
+[Unit]
+Description=CrabsHQ Org Runtime
+After=network-online.target openclaw-bridge.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/crabhq-org-runtime/server
+EnvironmentFile=/etc/default/crabhq-org-runtime
+ExecStart=/usr/bin/node /opt/crabhq-org-runtime/server/org-runtime/index.js
+Restart=always
+RestartSec=5
+User=root
+Group=root
+StandardOutput=append:/var/log/crabhq-org-runtime.log
+StandardError=append:/var/log/crabhq-org-runtime.log
+
+[Install]
+WantedBy=multi-user.target
+CRUNTIME
 
 # Poller service
 cat > /etc/systemd/system/openclaw-poller.service << PSVC
@@ -2103,7 +2168,7 @@ WantedBy=multi-user.target
 PWSVC
 
 run_cmd systemctl daemon-reload
-run_cmd systemctl enable openclaw-docker openclaw-bridge openclaw-poller openclaw-vnc crabhq-desktop crabhq-desktop-api crabhq-playwright
+run_cmd systemctl enable openclaw-docker openclaw-bridge crabhq-org-runtime openclaw-poller openclaw-vnc crabhq-desktop crabhq-desktop-api crabhq-playwright
 
 # ── [9/9] Start all services (single clean startup) ──────────────────
 dlog "Starting services..."
@@ -2132,7 +2197,8 @@ if [ "$_gw_alive" -eq 0 ]; then
  docker compose logs --tail 20 openclaw-gateway 2>/dev/null || true
 fi
 
-# Start poller, VNC, desktop API, playwright (bridge already running)
+# Start org runtime, poller, VNC, desktop API, playwright (bridge already running)
+run_cmd systemctl start crabhq-org-runtime
 run_cmd systemctl start openclaw-poller
 run_cmd systemctl start openclaw-vnc
 run_cmd systemctl start crabhq-desktop
@@ -2164,6 +2230,25 @@ if systemctl is-active --quiet caddy; then
 else
  echo "Caddy: NOT RUNNING"
  journalctl -u caddy --no-pager -n 10
+fi
+
+if systemctl is-active --quiet crabhq-org-runtime; then
+ echo "Org Runtime: RUNNING"
+else
+ echo "Org Runtime: NOT RUNNING"
+ journalctl -u crabhq-org-runtime --no-pager -n 20 || true
+fi
+
+if curl -sf http://127.0.0.1:${CRABHQ_RUNTIME_PORT}/health >/dev/null 2>&1; then
+ echo "Org Runtime Local Health: OK"
+else
+ echo "Org Runtime Local Health: FAILED"
+fi
+
+if curl -sf https://${HTTPS_DOMAIN}/runtime-api/health >/dev/null 2>&1 || curl -sf https://${SSLIP_DOMAIN}/runtime-api/health >/dev/null 2>&1; then
+ echo "Org Runtime Public Health: OK"
+else
+ echo "Org Runtime Public Health: FAILED"
 fi
 
 # Kill the background raw log pusher — setup is done, no need to keep POSTing to API
