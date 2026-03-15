@@ -1900,20 +1900,25 @@ cd /opt/openclaw
 dlog "Preparing CrabsHQ org runtime..."
 mkdir -p /opt/crabhq-org-runtime /var/lib/crabhq-org-runtime
 
-if [ -n "${CRABHQ_RUNTIME_TARBALL_URL:-}" ] && [ "${CRABHQ_RUNTIME_TARBALL_URL}" != "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; then
-  dlog "Downloading CrabsHQ runtime bundle..."
-  curl -fsSL "$CRABHQ_RUNTIME_TARBALL_URL" -o /tmp/crabhq-org-runtime.tar.gz
-  tar -xzf /tmp/crabhq-org-runtime.tar.gz -C /opt/crabhq-org-runtime --strip-components=1
-else
-  dlog "No CrabsHQ runtime bundle URL provided — install path prepared only" "installing"
+if [ -z "${CRABHQ_RUNTIME_TARBALL_URL:-}" ] || [ "${CRABHQ_RUNTIME_TARBALL_URL}" = "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; then
+  echo "ERROR: CRABHQ_RUNTIME_TARBALL_URL is required for fresh provisioning" >&2
+  exit 1
 fi
 
-if [ -f /opt/crabhq-org-runtime/server/package.json ]; then
-  dlog "Installing CrabsHQ org runtime dependencies..."
-  cd /opt/crabhq-org-runtime/server
-  npm install --omit=dev >/tmp/crabhq-org-runtime-npm.log 2>&1 || (tail -n 50 /tmp/crabhq-org-runtime-npm.log; exit 1)
-  cd /opt/openclaw
+dlog "Downloading CrabsHQ runtime bundle..."
+curl -fsSL "$CRABHQ_RUNTIME_TARBALL_URL" -o /tmp/crabhq-org-runtime.tar.gz || { echo "ERROR: failed to download runtime bundle" >&2; exit 1; }
+tar -xzf /tmp/crabhq-org-runtime.tar.gz -C /opt/crabhq-org-runtime --strip-components=1 || { echo "ERROR: failed to extract runtime bundle" >&2; exit 1; }
+
+if [ ! -f /opt/crabhq-org-runtime/server/package.json ] || [ ! -f /opt/crabhq-org-runtime/server/org-runtime/index.js ]; then
+  echo "ERROR: runtime bundle extracted but expected server files are missing" >&2
+  find /opt/crabhq-org-runtime -maxdepth 3 -type f | sed -n '1,120p' >&2 || true
+  exit 1
 fi
+
+dlog "Installing CrabsHQ org runtime dependencies..."
+cd /opt/crabhq-org-runtime/server
+npm install --omit=dev >/tmp/crabhq-org-runtime-npm.log 2>&1 || (tail -n 50 /tmp/crabhq-org-runtime-npm.log; exit 1)
+cd /opt/openclaw
 
 cat > /etc/default/crabhq-org-runtime << CRENV
 ORG_RUNTIME_PORT=${CRABHQ_RUNTIME_PORT}
@@ -2167,6 +2172,11 @@ RestartSec=5
 WantedBy=multi-user.target
 PWSVC
 
+if [ ! -f /opt/crabhq-org-runtime/server/org-runtime/index.js ]; then
+  echo "ERROR: refusing to install crabhq-org-runtime systemd service without runtime files" >&2
+  exit 1
+fi
+
 run_cmd systemctl daemon-reload
 run_cmd systemctl enable openclaw-docker openclaw-bridge crabhq-org-runtime openclaw-poller openclaw-vnc crabhq-desktop crabhq-desktop-api crabhq-playwright
 
@@ -2243,12 +2253,14 @@ if curl -sf http://127.0.0.1:${CRABHQ_RUNTIME_PORT}/health >/dev/null 2>&1; then
  echo "Org Runtime Local Health: OK"
 else
  echo "Org Runtime Local Health: FAILED"
+ exit 1
 fi
 
 if curl -sf https://${HTTPS_DOMAIN}/runtime-api/health >/dev/null 2>&1 || curl -sf https://${SSLIP_DOMAIN}/runtime-api/health >/dev/null 2>&1; then
  echo "Org Runtime Public Health: OK"
 else
  echo "Org Runtime Public Health: FAILED"
+ exit 1
 fi
 
 # Kill the background raw log pusher — setup is done, no need to keep POSTing to API
