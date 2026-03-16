@@ -2061,9 +2061,10 @@ async function handleIncomingTask(req, res) {
  const id = requestId || `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
  const slug = agentSlug(agentName);
  const registered = agentRegistry.get(slug);
- // Route SPCs to unified 'spc' agent, everything else to 'main'
+ const isTaskWork = !!(context?.taskId);
+ // CrabsHQ owns delegation. For task work, always route through main and preserve persona via prompt.
  const isSPC = registered?.role === 'SPC';
- const agentId = isSPC ? 'spc' : 'main';
+ const agentId = isTaskWork ? 'main' : (isSPC ? 'spc' : 'main');
  // Session key MUST be in canonical format: agent:{agentId}:{rest}
  const sessionKey = `agent:${agentId}:hook:crabhq:${slug}:task`;
  const fullTask = buildTaskMessage(req.body);
@@ -2090,13 +2091,29 @@ async function handleIncomingTask(req, res) {
  const folderRule = `[SYSTEM RULE — PROJECT FOLDER]\nAll files for this task MUST be saved inside: ${nonStreamProjectFolder}/\nExamples: ${nonStreamProjectFolder}/index.html ✅ | index.html ❌\nThis is enforced by the system. Do not save files outside this folder.`;
  nonStreamSystemPrompt = nonStreamSystemPrompt ? `${nonStreamSystemPrompt}\n\n${folderRule}` : folderRule;
  }
- const result = await gateway.runAgent(fullTask, {
+ const runOpts = {
  agentId, agentName: agentName || 'default', sessionKey,
  thinking: thinking || undefined,
  model: model || undefined,
  extraSystemPrompt: nonStreamSystemPrompt,
  timeoutMs: isTaskWork ? 600000 : 180000,
+ };
+ let result;
+ try {
+ result = await gateway.runAgent(fullTask, runOpts);
+ } catch (err) {
+ if (agentId === 'spc' && /unknown agent id\s+"?spc"?/i.test(err.message || '')) {
+ console.warn(`[${id}] SPC agent missing in gateway config; retrying ${agentName || 'SPC'} via main agent fallback`);
+ result = await gateway.runAgent(fullTask, {
+ ...runOpts,
+ agentId: 'main',
+ sessionKey: `agent:main:hook:crabhq:${slug}:task`,
+ extraSystemPrompt: nonStreamSystemPrompt ? `${nonStreamSystemPrompt}\n\n[SPC FALLBACK]\nThe gateway does not currently expose the unified spc agent. Respond as the specialist persona requested above, not as the team lead.` : '[SPC FALLBACK]\nRespond as the requested specialist persona, not as the team lead.',
  });
+ } else {
+ throw err;
+ }
+ }
 
  if (result) {
  const taskId = context?.taskId;
@@ -2128,9 +2145,10 @@ async function handleIncomingTaskStream(req, res) {
  const id = requestId || `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
  const slug = agentSlug(agentName);
  const registered = agentRegistry.get(slug);
- // Route SPCs to unified 'spc' agent, everything else to 'main'
+ const isTaskWork = !!(context?.taskId);
+ // CrabsHQ owns delegation. For task work, always route through main and preserve persona via prompt.
  const isSPC = registered?.role === 'SPC';
- const agentId = isSPC ? 'spc' : 'main';
+ const agentId = isTaskWork ? 'main' : (isSPC ? 'spc' : 'main');
  // Session key MUST be in canonical format: agent:{agentId}:{rest}
  const sessionKey = `agent:${agentId}:hook:crabhq:${slug}:task`;
  const fullTask = buildTaskMessage(req.body);
@@ -2272,7 +2290,9 @@ async function handleIncomingTaskStream(req, res) {
    console.warn(`[${id}] JSONL tail setup failed: ${e.message}`);
  }
 
- const { response, toolLog } = await gateway.runAgentStreaming(fullTask, {
+ let response, toolLog;
+ try {
+ ({ response, toolLog } = await gateway.runAgentStreaming(fullTask, {
  agentId, agentName: agentName || 'default', sessionKey,
  thinking: thinking || undefined,
  model: model || undefined,
