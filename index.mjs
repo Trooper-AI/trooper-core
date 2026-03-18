@@ -2087,7 +2087,7 @@ async function handleIncomingTask(req, res) {
  const nonStreamProjectFolder = context?.projectFolder;
  if (nonStreamProjectFolder) {
  const wsBase = '/home/node/.openclaw/workspace';
- try { execSync(`docker exec openclaw-openclaw-gateway-1 mkdir -p "${wsBase}/${nonStreamProjectFolder}"`, { timeout: 5000 }); } catch {}
+ try { execSync(`docker exec openclaw-openclaw-gateway-1 bash -c "mkdir -p '${wsBase}/${nonStreamProjectFolder}' && chown node:node '${wsBase}/${nonStreamProjectFolder}'"`, { timeout: 5000 }); } catch {}
  const folderRule = `[SYSTEM RULE — PROJECT FOLDER]\nAll files for this task MUST be saved inside: ${nonStreamProjectFolder}/\nExamples: ${nonStreamProjectFolder}/index.html ✅ | index.html ❌\nThis is enforced by the system. Do not save files outside this folder.`;
  nonStreamSystemPrompt = nonStreamSystemPrompt ? `${nonStreamSystemPrompt}\n\n${folderRule}` : folderRule;
  }
@@ -2213,7 +2213,7 @@ async function handleIncomingTaskStream(req, res) {
  const projectFolder = context?.projectFolder;
  if (projectFolder) {
  const wsBase = '/home/node/.openclaw/workspace';
- try { execSync(`docker exec openclaw-openclaw-gateway-1 mkdir -p "${wsBase}/${projectFolder}"`, { timeout: 5000 }); } catch {}
+ try { execSync(`docker exec openclaw-openclaw-gateway-1 bash -c "mkdir -p '${wsBase}/${projectFolder}' && chown node:node '${wsBase}/${projectFolder}'"`, { timeout: 5000 }); } catch {}
  const folderRule = `[SYSTEM RULE — PROJECT FOLDER]\nAll files for this task MUST be saved inside: ${projectFolder}/\nExamples: ${projectFolder}/index.html ✅ | index.html ❌\nThis is enforced by the system. Do not save files outside this folder.`;
  resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${folderRule}` : folderRule;
  }
