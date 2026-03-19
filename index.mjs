@@ -1644,6 +1644,20 @@ try {
  changed = true;
  console.log('[bridge] Migrated: enabled acpx plugin');
  }
+ // Startup migration: enable all 4 bundled hooks
+ if (config.hooks?.internal?.entries) {
+ const entries = config.hooks.internal.entries;
+ if (!entries['boot-md']?.enabled) {
+ entries['boot-md'] = { enabled: true };
+ changed = true;
+ console.log('[bridge] Migrated: enabled boot-md hook');
+ }
+ if (!entries['bootstrap-extra-files']?.enabled) {
+ entries['bootstrap-extra-files'] = { enabled: true, paths: ['Tasks/*/AGENTS.md'] };
+ changed = true;
+ console.log('[bridge] Migrated: enabled bootstrap-extra-files hook');
+ }
+ }
  if (changed) {
  writeFileSync(configPath, JSON.stringify(config, null, 2));
  try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}

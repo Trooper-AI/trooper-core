@@ -836,7 +836,9 @@ ${MODELS_PROVIDERS}
  "enabled": true,
  "entries": {
  "session-memory": { "enabled": true },
- "command-logger": { "enabled": true }
+ "command-logger": { "enabled": true },
+ "boot-md": { "enabled": true },
+ "bootstrap-extra-files": { "enabled": true, "paths": ["Tasks/*/AGENTS.md"] }
  }
  },
  "enabled": true,
@@ -1031,6 +1033,16 @@ dlog "Auth profiles configured for: $(echo "$AUTH_LASTGOOD" | grep -o '"[a-z]*"'
 # Workspace files are pushed AFTER deploy via the bridge API (provision.js)
 # This keeps the setup script small and workspace always in sync.
 mkdir -p /opt/openclaw-data/workspace/memory
+
+# BOOT.md — runs on gateway startup via boot-md hook
+cat > /opt/openclaw-data/workspace/BOOT.md << 'BOOTMD'
+# Boot
+
+On startup:
+1. Read MEMORY.md and today's memory file to restore context
+2. Check if any tasks are in_progress or blocked — report status
+3. Say nothing if everything is normal (NO_REPLY)
+BOOTMD
 
 # Team Lead AGENTS.md — core operating rules for lead agents
 cat > /opt/openclaw-data/workspace/AGENTS.md << 'AGENTSMD'
