@@ -3054,6 +3054,24 @@ app.post('/api/proxy/:path(*)', async (req, res) => {
  }
 });
 
+app.patch('/api/proxy/:path(*)', async (req, res) => {
+ if (!MISSION_CONTROL_URL) return res.status(503).json({ error: 'No CrabsHQ backend configured' });
+ try {
+ const targetUrl = `${MISSION_CONTROL_URL}/api/${req.params.path}`;
+ console.log(`[Proxy] PATCH ${targetUrl}`);
+ const upstream = await fetch(targetUrl, {
+ method: 'PATCH',
+ headers: { 'Content-Type': 'application/json' },
+ body: JSON.stringify(req.body),
+ });
+ const data = await upstream.json();
+ res.status(upstream.status).json(data);
+ } catch (err) {
+ console.error(`[Proxy] PATCH failed:`, err.message);
+ res.status(502).json({ error: err.message });
+ }
+});
+
 app.get('/api/proxy/:path(*)', async (req, res) => {
  if (!MISSION_CONTROL_URL) return res.status(503).json({ error: 'No CrabsHQ backend configured' });
  try {
