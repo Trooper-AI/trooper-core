@@ -1816,7 +1816,12 @@ async function handleIncomingTask(req, res) {
  const isSPC = registered?.role === 'SPC';
  const agentId = isTaskWork ? 'main' : (isSPC ? 'spc' : 'main');
  // Session key MUST be in canonical format: agent:{agentId}:{rest}
- const sessionKey = `agent:${agentId}:hook:crabhq:${slug}:task`;
+ // Task-scoped sessions: each task gets isolated context on the gateway
+ // Chat messages share a single chat session per agent
+ const _taskId = context?.taskId;
+ const sessionKey = _taskId
+   ? `agent:${agentId}:hook:crabhq:${slug}:task:${_taskId}`
+   : `agent:${agentId}:hook:crabhq:${slug}:chat`;
  const fullTask = buildTaskMessage(req.body);
 
  // Persist any skill credentials to the container environment
@@ -1900,7 +1905,12 @@ async function handleIncomingTaskStream(req, res) {
  const isSPC = registered?.role === 'SPC';
  const agentId = isTaskWork ? 'main' : (isSPC ? 'spc' : 'main');
  // Session key MUST be in canonical format: agent:{agentId}:{rest}
- const sessionKey = `agent:${agentId}:hook:crabhq:${slug}:task`;
+ // Task-scoped sessions: each task gets isolated context on the gateway
+ // Chat messages share a single chat session per agent
+ const _taskId = context?.taskId;
+ const sessionKey = _taskId
+   ? `agent:${agentId}:hook:crabhq:${slug}:task:${_taskId}`
+   : `agent:${agentId}:hook:crabhq:${slug}:chat`;
  const fullTask = buildTaskMessage(req.body);
 
  // Persist any skill credentials to the container environment
