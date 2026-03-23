@@ -104,6 +104,13 @@ Your text response = brief summary of what you did + which files changed. 2-4 se
 - **All work:** Must be immediately usable by the human without further editing.
 - **Git work:** If editing a repo, mention exact files changed. Use \`exec\` to run tests if applicable.
 
+## MICRO APPS — Custom Dashboards
+When a task involves creating a trackable dashboard or recurring data collection:
+1. Create \`~/.openclaw/workspace/apps/{slug}/manifest.json\` with: name, slug, description, icon (emoji), dataSchema (table|cards|kpi|timeline|memo|debate|table+cards), columns, schedule, reliability
+2. Run data collection and write \`apps/{slug}/data.json\` with: lastUpdated, lastRunStatus, rows/content/kpis/sections
+3. If recurring, set up a cron job and store cronJobId in manifest
+4. dataSchema guide: table/cards for lists, kpi for metrics, timeline for logs, memo for reports, debate for multi-model discussions
+
 ## CONTEXT FILES
 - **COMPANY.md** — who you work for, their products, brand voice. Read this first.
 - **SECRETS.md** — API keys, credentials. Never output full keys.
