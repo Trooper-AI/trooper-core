@@ -35,6 +35,9 @@ import WebSocket from 'ws';
 import { createServer } from 'http';
 import { initFirebaseAuth } from './lib/firebase-auth.mjs';
 import { BridgeWSServer } from './lib/ws-server.mjs';
+import { handleChatMessage, getRecentMessages } from './lib/chat-handler.mjs';
+import { messages as messagesTable } from './db/schema.mjs';
+import { eq, desc } from 'drizzle-orm';
 
 // Build a human-readable summary for a completed tool call
 // Used for native tool_use/tool_result events from gateway
@@ -1476,6 +1479,13 @@ class OpenClawGateway {
 // Initialize the gateway client (connects on startup)
 const gateway = new OpenClawGateway(OPENCLAW_URL, OPENCLAW_GATEWAY_TOKEN);
 
+// ── Cached company docs (synced from Render via /agents/company-context) ──
+let cachedCompanyDocs = '';
+// Try to pre-load from disk on startup
+try {
+  cachedCompanyDocs = readFileSync('/opt/openclaw-data/workspace/COMPANY.md', 'utf8');
+} catch { /* not available yet */ }
+
 // ── Debug Event Buffer (for /debug/events endpoint) ─────────────────
 // Stores recent raw + mapped tool events for troubleshooting label accuracy
 const _recentDebugEvents = [];
@@ -1588,6 +1598,16 @@ function loadAgentRegistry() {
 
 // Load registry on startup
 loadAgentRegistry();
+
+// ── Wire chat handler into WebSocket server ───────────────────────────────
+bridgeWS.onChatMessage(async (msg, user, ws) => {
+  await handleChatMessage(msg, user, ws, {
+    gateway,
+    agentRegistry,
+    bridgeWS,
+    companyDocs: cachedCompanyDocs || '',
+  });
+});
 
 // ── Startup config migrations ──────────────────────────────────────────────
 try {
@@ -3032,6 +3052,8 @@ app.post('/agents/company-context', (req, res) => {
 
  try {
  const content = `# ${companyName || 'Company'} Context\n\n${companyDocs}`;
+ // Cache in memory so chat-handler can access it immediately
+ cachedCompanyDocs = content;
  // Write to LEAD workspace
  const workspacePath = '/opt/openclaw-data/workspace';
  writeFileSync(`${workspacePath}/COMPANY.md`, content);
@@ -3229,6 +3251,25 @@ app.post('/llm/vision', async (req, res) => {
  return res.json({ content: data.choices?.[0]?.message?.content?.trim() || '' });
  } catch (err) {
  console.error('[llm/vision] Error:', err.message);
+ res.status(500).json({ error: err.message });
+ }
+});
+
+// ── Messages API ──────────────────────────────────────────────────────────
+// GET /api/messages — recent messages for a channel
+app.get('/api/messages', (req, res) => {
+ try {
+ const { channel = 'general', limit = 50 } = req.query;
+ const results = db
+  .select()
+  .from(messagesTable)
+  .where(eq(messagesTable.channel, channel))
+  .orderBy(desc(messagesTable.created_at))
+  .limit(Math.min(parseInt(limit) || 50, 200))
+  .all()
+  .reverse(); // oldest first
+ res.json({ messages: results });
+ } catch (err) {
  res.status(500).json({ error: err.message });
  }
 });
