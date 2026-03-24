@@ -315,7 +315,31 @@ ${HTTPS_DOMAIN} {
  handle /ws {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
- handle /api/proxy/* {
+ handle /health {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /healthz {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /webhook/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /admin/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /api/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /agents/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /recording/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /llm/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /debug/* {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
  handle /files/* {
@@ -348,6 +372,33 @@ ${HTTPS_DOMAIN} {
 # Fallback: sslip.io (direct HTTPS via Let's Encrypt, no CF dependency)
 ${SSLIP_DOMAIN} {
  handle /ws {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /health {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /healthz {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /webhook/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /admin/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /api/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /agents/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /recording/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /llm/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /debug/* {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
  handle /api/proxy/* {
