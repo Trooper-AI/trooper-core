@@ -3007,7 +3007,7 @@ app.get('/recording/status', (req, res) => {
 
 // Create a new SPC agent
 app.post('/agents', (req, res) => {
- const { name, title, soul, skills, tools, model, installedSkillIds } = req.body;
+ const { name, title, soul, skills, tools, model, installedSkillIds, avatar } = req.body;
  if (!name) return res.status(400).json({ error: 'Agent name required' });
 
  const id = agentSlug(name);
@@ -3092,7 +3092,7 @@ app.post('/agents', (req, res) => {
  });
 
  // Register in memory and persist
- agentRegistry.set(id, { agentId, role: 'SPC', title: title || 'Specialist', soul: soulContent, name, installedSkillIds: installedSkillIds || [] });
+ agentRegistry.set(id, { agentId, role: 'SPC', title: title || 'Specialist', soul: soulContent, name, installedSkillIds: installedSkillIds || [], avatar: avatar || null });
  saveAgentRegistry();
 
  console.log(`✅ Created SPC agent: ${name} (${agentId})`);
@@ -3109,7 +3109,7 @@ app.put('/agents/:name', (req, res) => {
  const agent = agentRegistry.get(slug);
  if (!agent) return res.status(404).json({ error: `Agent "${req.params.name}" not found` });
 
- const { soul, title, skills, tools, model, workspaceFiles, installedSkillIds } = req.body;
+ const { soul, title, skills, tools, model, workspaceFiles, installedSkillIds, avatar } = req.body;
  const workspacePath = `/opt/openclaw-data/config/agents/${agent.agentId}/workspace`;
 
  try {
@@ -3124,6 +3124,9 @@ app.put('/agents/:name', (req, res) => {
  agent.title = title;
  // Update IDENTITY.md with new title
  writeFileSync(`${workspacePath}/IDENTITY.md`, `# Identity\nname: ${agent.name}\ntitle: ${title}\nemoji: 🦀`);
+ }
+ if (avatar !== undefined) {
+ agent.avatar = avatar || null;
  }
  if (skills?.length || soul || title) {
  // Rebuild AGENTS.md with updated skills + team roster
