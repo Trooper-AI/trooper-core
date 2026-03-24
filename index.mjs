@@ -1,7 +1,14 @@
-process.on('unhandledRejection', (err) => console.error('[Bridge] Unhandled rejection:', err?.message || err));
+process.on('unhandledRejection', (err) => {
+  console.error('[Bridge] Unhandled rejection:', err?.message || err);
+  // Lazy import — log-buffer may not be loaded yet during early startup
+  import('./lib/log-buffer.mjs').then(({ captureLog }) => {
+    captureLog('error', `Unhandled rejection: ${err?.message || err}`, { stack: err?.stack });
+  }).catch(() => {});
+});
 // OpenClaw Bridge v2.1 — WebSocket-based native OpenClaw protocol
 // Connects to OpenClaw gateway via persistent WebSocket for full agent capabilities
 // (workspace files, tools, memory, session persistence, sub-agent spawning)
+import { captureLog, recordRun, getLogs, getStats } from './lib/log-buffer.mjs';
 import express from 'express';
 import {
   buildBrowserSessionEndPayload,
@@ -462,6 +469,7 @@ class OpenClawGateway {
  // Start ping/pong heartbeat to keep connection alive
  this._startPing();
  console.log('[OpenClaw] Connected — native protocol (full workspace + tools)');
+ captureLog('info', 'Gateway connected — native protocol');
  // Auto-approve bridge device so sessions_spawn works after gateway restarts
  // Write to paired.json directly (reliable) rather than relying on the CLI flow
  (async () => {
@@ -519,6 +527,7 @@ class OpenClawGateway {
  })
  .catch((err) => {
  console.error('[OpenClaw] Auth failed:', err.message);
+ captureLog('error', `Gateway auth failed: ${err.message}`, { stack: err.stack });
  resolve(false);
  });
  });
@@ -537,6 +546,7 @@ class OpenClawGateway {
  this._connectPromise = null;
  this._stopPing();
  console.log('[OpenClaw] Disconnected (code=' + code + '), reconnecting in ' + (this._reconnectDelay / 1000) + 's...');
+ captureLog('warn', `Gateway disconnected (code=${code}), reconnecting in ${this._reconnectDelay / 1000}s`);
  for (const [id, pending] of this._pendingRequests) {
  pending.reject(new Error('WebSocket disconnected'));
  }
@@ -548,6 +558,7 @@ class OpenClawGateway {
 
  this.ws.on('error', (err) => {
  console.error('[OpenClaw] WebSocket error:', err.message);
+ captureLog('error', `Gateway WebSocket error: ${err.message}`, { stack: err.stack });
  });
 
  setTimeout(() => {
@@ -1886,6 +1897,7 @@ async function handleIncomingTask(req, res) {
  res.status(502).json({ error: 'Agent returned empty response', requestId: id });
  } catch (err) {
  console.error(`[${id}] Agent failed: ${err.message}`);
+ captureLog('error', `Agent failed: ${err.message}`, { requestId: id, agent: agentName, stack: err.stack });
  res.status(502).json({ error: `Agent failed: ${err.message}`, requestId: id });
  }
 }
@@ -2101,6 +2113,8 @@ async function handleIncomingTaskStream(req, res) {
    sendSSE('outcome', { type: 'completed', detail: (completedMatch[1] || '').trim() });
  }
  sendSSE('model_done', { eventType: 'model_done', confidence: 'native', model: model || null, time: Date.now() });
+ recordRun();
+ captureLog('info', `Run completed: ${agentName || 'default'} (${(responseText || '').length} chars)`, { requestId: id, agent: agentName, model });
 
  sendSSE('done', {
  requestId: id, agentId,
@@ -2173,6 +2187,7 @@ async function handleIncomingTaskStream(req, res) {
  } catch (err) {
 
  console.error(`[${id}] SSE agent failed: ${err.message}`);
+ captureLog('error', `SSE agent failed: ${err.message}`, { requestId: id, agent: agentName, stack: err.stack });
  sendSSE('error', { message: err.message, requestId: id });
  } finally {
  if (screenshotPollerInterval) {
@@ -2342,6 +2357,67 @@ app.get('/health', async (req, res) => {
 });
 
 // ── Kubernetes-style health/readiness probes (aligned with OpenClaw v2026.3.1) ──
+// ── Admin endpoints: fleet visibility ──────────────────────────────────────
+
+// GET /admin/logs — query structured logs
+app.get('/admin/logs', (req, res) => {
+ const { level, limit, since, search } = req.query;
+ const logs = getLogs({
+   level: level || undefined,
+   limit: limit ? parseInt(limit) : 100,
+   since: since ? parseInt(since) : undefined,
+   search: search || undefined,
+ });
+ res.json({ logs, total: logs.length });
+});
+
+// GET /admin/health — full health + stats snapshot for fleet dashboard
+app.get('/admin/health', async (req, res) => {
+ const stats = getStats();
+
+ // Gateway status
+ let gatewayVersion = null;
+ try {
+   const r = await fetch('http://127.0.0.1:18789/healthz', { signal: AbortSignal.timeout(2000) });
+   if (r.ok) {
+     const d = await r.json();
+     gatewayVersion = d.version || null;
+   }
+ } catch {}
+
+ // Disk usage
+ let diskUsage = null;
+ try {
+   const dfOut = execSync("df -h / | tail -1 | awk '{print $3, $4, $5}'", { timeout: 2000 }).toString().trim();
+   const [used, avail, pct] = dfOut.split(' ');
+   diskUsage = { used, available: avail, percent: pct };
+ } catch {}
+
+ // Agent registry
+ const agents = [];
+ for (const [slug, reg] of agentRegistry.entries()) {
+   agents.push({ slug, name: reg.name, role: reg.role, title: reg.title });
+ }
+
+ res.json({
+   ...stats,
+   gateway: {
+     connected: gateway.isReady,
+     version: gatewayVersion,
+   },
+   disk: diskUsage,
+   agents,
+   hostname: os.hostname(),
+   platform: `${os.type()} ${os.release()} ${os.arch()}`,
+   nodeVersion: process.version,
+ });
+});
+
+// GET /admin/stats — lightweight stats for polling
+app.get('/admin/stats', (req, res) => {
+ res.json(getStats());
+});
+
 app.get('/healthz', (req, res) => res.status(200).json({ status: 'ok' }));
 app.get('/ready', (req, res) => {
  const ok = gateway.isReady;
