@@ -1140,6 +1140,7 @@ class OpenClawGateway {
  toolLog.push({ tool: toolName, skillName: null, params: toolParams, status: 'called', startedAt: Date.now(), textBefore: textSinceLastTool });
  const toolStartPayload = normalizeToolEventPayload('tool_start', { tool: toolName, params: toolParams, index: toolLog.length - 1, startedAt: Date.now(), confidence: 'native' });
  toolStartPayload.textBefore = textSinceLastTool;
+ toolStartPayload.runId = runId || mainRunId || null;
  if (onEvent) onEvent('tool_start', toolStartPayload);
  if ((String(toolName).toLowerCase() === 'write' || String(toolName).toLowerCase() === 'edit')) {
    const filePath = toolParams.file_path || toolParams.path || toolParams.filePath || '';
@@ -1187,6 +1188,7 @@ class OpenClawGateway {
      }
    }
 
+   toolResultPayload.runId = runId || mainRunId || null;
    if (onEvent) onEvent('tool_result', toolResultPayload);
  }
  return;
@@ -1194,7 +1196,7 @@ class OpenClawGateway {
 
  if (stream === 'assistant' && data?.text) {
  textChunks.push(data.text);
- if (onEvent) onEvent('text', { text: data.text });
+ if (onEvent) onEvent('text', { text: data.text, runId: runId || mainRunId || null });
  }
  // Track ALL lifecycle events (including from nested runIds via _activeSessionListener)
  if (stream === 'lifecycle' && data?.phase === 'start') {
