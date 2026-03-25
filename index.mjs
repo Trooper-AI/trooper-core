@@ -464,7 +464,15 @@ class OpenClawGateway {
 
  _doConnect() {
  return new Promise((resolve) => {
- if (this.ws) { try { this.ws.close(); } catch {} }
+ // Clear any pending reconnect timer to prevent close→reconnect→close loops
+ if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+ if (this.ws) {
+   // Remove listeners before closing to prevent on('close') from scheduling another reconnect
+   this.ws.removeAllListeners('close');
+   this.ws.removeAllListeners('error');
+   this.ws.removeAllListeners('message');
+   try { this.ws.close(); } catch {}
+ }
 
  console.log('[OpenClaw] Connecting to ' + this.url + '...');
  this.ws = new WebSocket(this.url);
