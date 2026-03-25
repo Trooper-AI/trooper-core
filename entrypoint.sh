@@ -24,5 +24,14 @@ mkdir -p /tmp/jiti && chmod 1777 /tmp/jiti
 chmod 777 /home/node/.openclaw/devices 2>/dev/null || true
 chmod 666 /home/node/.openclaw/devices/*.json 2>/dev/null || true
 
+# Identity dir: gateway creates device-auth.json as root during init — fix ownership
+# so internal tool connections (cron, sessions_spawn) can read it as node user
+chmod 755 /home/node/.openclaw/identity 2>/dev/null || true
+chmod 644 /home/node/.openclaw/identity/*.json 2>/dev/null || true
+chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null || true
+
+# Background: re-fix identity perms 30s after start (gateway may create files late)
+(sleep 30 && chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null && chmod 644 /home/node/.openclaw/identity/*.json 2>/dev/null) &
+
 # Hand off to startup.sh (which drops to node for the gateway process)
 exec /bin/bash /opt/startup.sh "$@"
