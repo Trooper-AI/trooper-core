@@ -2322,42 +2322,64 @@ async function handleIncomingTaskStream(req, res) {
     }
   }
   if (historyMessages && historyMessages.length > 0) {
+   // Debug: log message roles/types to understand the history format
+   const roleCounts = {};
+   const typeCounts = {};
+   for (const msg of historyMessages) {
+    const role = msg?.message?.role || msg?.role || 'unknown';
+    roleCounts[role] = (roleCounts[role] || 0) + 1;
+    const content = msg?.message?.content || msg?.content;
+    if (Array.isArray(content)) {
+     for (const block of content) { typeCounts[block.type || 'unknown'] = (typeCounts[block.type || 'unknown'] || 0) + 1; }
+    }
+   }
+   console.log(`[Post-completion] History roles: ${JSON.stringify(roleCounts)}, content types: ${JSON.stringify(typeCounts)}`);
+   // Log first few messages to understand structure
+   for (let i = 0; i < Math.min(3, historyMessages.length); i++) {
+    const m = historyMessages[i];
+    console.log(`[Post-completion] msg[${i}]: role=${m?.message?.role || m?.role} keys=${JSON.stringify(Object.keys(m?.message || m || {}))}`);
+   }
+
    // Extract tool calls from history (toolCall + toolResult pairs)
+   // Support both OpenClaw native format AND Anthropic format
    const toolHistory = [];
    for (const msg of historyMessages) {
-    const content = msg?.message?.content;
-    const role = msg?.message?.role;
+    const m = msg?.message || msg;
+    const content = m?.content;
+    const role = m?.role;
     if (role === 'assistant' && Array.isArray(content)) {
      for (const block of content) {
-      if (block.type === 'toolCall') {
+      if (block.type === 'toolCall' || block.type === 'tool_use') {
        toolHistory.push({
         event: 'tool_start',
-        data: { tool: block.name, params: block.arguments || {}, toolCallId: block.id },
-        time: new Date(msg.timestamp).getTime() || Date.now(),
+        data: { tool: block.name, params: block.arguments || block.input || {}, toolCallId: block.id },
+        time: new Date(msg.timestamp || m.timestamp).getTime() || Date.now(),
        });
       }
      }
     }
-    if (role === 'toolResult' && content) {
+    if ((role === 'toolResult' || role === 'tool') && content) {
      const resultText = Array.isArray(content)
       ? content.filter(c => c.type === 'text').map(c => c.text).join('\n')
-      : typeof content === 'string' ? content : JSON.stringify(content);
+      : typeof content === 'string' ? content : JSON.stringify(content).slice(0, 500);
      toolHistory.push({
       event: 'tool_result',
       data: {
-       tool: msg.message.toolName || 'unknown',
-       toolCallId: msg.message.toolCallId,
-       success: !msg.message.isError,
-       summary: resultText,
-       details: msg.message.details || undefined,
+       tool: m.toolName || m.name || 'unknown',
+       toolCallId: m.toolCallId || m.tool_use_id,
+       success: !m.isError && !m.is_error,
+       summary: resultText.slice(0, 500),
+       details: m.details || undefined,
       },
-      time: new Date(msg.timestamp).getTime() || Date.now(),
+      time: new Date(msg.timestamp || m.timestamp).getTime() || Date.now(),
      });
     }
    }
    if (toolHistory.length > 0) {
     console.log(`[OpenClaw] Post-completion: ${toolHistory.length} tool events from session history`);
     sendSSE('tool_history', { requestId: id, agentId, events: toolHistory });
+   } else {
+    console.log(`[Post-completion] No tool events found in ${historyMessages.length} history messages`);
    }
   }
  } catch (histErr) {
