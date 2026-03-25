@@ -2305,20 +2305,22 @@ async function handleIncomingTaskStream(req, res) {
  // Post-completion: fetch real tool history from gateway session transcript
  // This gives us exec commands, Read/Write calls, browser actions etc.
  try {
-  console.log("[Post-completion] Starting history fetch for " + agentId + " / " + agentName);
-  // Try both chat and task session keys — the agent may have used either
-  const sessionKeySuffixes = ['chat', 'task'];
+  console.log("[Post-completion] Starting history fetch for " + agentId + " / " + agentName + " session=" + sessionKey);
+  // Try the actual session key first, then fallback to chat/task variants
+  const sessionKeysToTry = [sessionKey];
+  const slug2 = (agentName || 'default').toLowerCase().replace(/\s+/g, '-');
+  if (!sessionKey.endsWith(':chat')) sessionKeysToTry.push(`agent:${agentId}:hook:crabhq:${slug2}:chat`);
+  if (!sessionKey.endsWith(':task')) sessionKeysToTry.push(`agent:${agentId}:hook:crabhq:${slug2}:task`);
   let historyMessages = null;
-  for (const suffix of sessionKeySuffixes) {
-    const sessionKey2 = `agent:${agentId}:hook:crabhq:${(agentName || 'default').toLowerCase().replace(/\s+/g, '-')}:${suffix}`;
+  for (const sk of sessionKeysToTry) {
     try {
-      historyMessages = await gateway.fetchSessionHistory(sessionKey2, 100);
+      historyMessages = await gateway.fetchSessionHistory(sk, 100);
       if (historyMessages && historyMessages.length > 0) {
-        console.log(`[Post-completion] Got ${historyMessages.length} messages from ${suffix} session`);
+        console.log(`[Post-completion] Got ${historyMessages.length} messages from ${sk}`);
         break;
       }
     } catch (e) {
-      console.log(`[Post-completion] ${suffix} session fetch failed: ${e.message}`);
+      console.log(`[Post-completion] ${sk} fetch failed: ${e.message}`);
     }
   }
   if (historyMessages && historyMessages.length > 0) {
