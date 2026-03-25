@@ -3809,6 +3809,20 @@ app.delete('/cron/jobs/:id', async (req, res) => {
  }
 });
 
+// Cron: trigger a job immediately using the real OpenClaw cron primitive
+app.post('/cron/jobs/:id/run', async (req, res) => {
+ try {
+   const { exec } = await import('child_process');
+   const { promisify } = await import('util');
+   const run = promisify(exec);
+   const jobId = req.params.id;
+   const { stdout, stderr } = await run(`openclaw cron run ${jobId} 2>&1`, { timeout: 20000 });
+   res.json({ success: true, jobId, stdout, stderr });
+ } catch (e) {
+   res.status(500).json({ error: e.message, stdout: e.stdout || '', stderr: e.stderr || '' });
+ }
+});
+
 // Cron: schedule recurring tasks on OpenClaw
 app.post('/webhook/cron', async (req, res) => {
  const { action, name, schedule, message, sessionTarget, wakeMode, jobId } = req.body;
