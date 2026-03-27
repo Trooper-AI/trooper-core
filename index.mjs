@@ -3401,18 +3401,26 @@ app.put('/agents/:name/workspace', (req, res) => {
  }
  try {
  execSync('mkdir -p ' + workspacePath + '/memory', { timeout: 5000 });
- const { files } = req.body;
+ const { files, overwrite = false } = req.body;
  if (!files || typeof files !== 'object') return res.status(400).json({ error: 'files object required' });
+ const PROTECTED_FILES = new Set(['AGENTS.md', 'SOUL.md', 'BOOTSTRAP.md', 'IDENTITY.md', 'USER.md', 'TOOLS.md']);
  let written = 0;
+ let skipped = 0;
  for (const [fname, content] of Object.entries(files)) {
  if (typeof content !== 'string') continue;
  if (fname.startsWith('_') || fname.includes('/') || fname.includes('..')) continue;
- writeFileSync(workspacePath + '/' + fname, content);
+ const fullPath = workspacePath + '/' + fname;
+ const exists = existsSync(fullPath);
+ if (!overwrite && exists && PROTECTED_FILES.has(fname)) {
+ skipped++;
+ continue;
+ }
+ writeFileSync(fullPath, content);
  written++;
  }
  execSync('chown -R 1000:1000 ' + workspacePath, { timeout: 5000 });
- console.log('✅ Wrote ' + written + ' workspace files for ' + name);
- res.json({ success: true, written });
+ console.log('✅ Wrote ' + written + ' workspace files for ' + name + (skipped ? ' (skipped ' + skipped + ' protected)' : ''));
+ res.json({ success: true, written, skipped });
  } catch (err) {
  res.status(500).json({ error: err.message });
  }
