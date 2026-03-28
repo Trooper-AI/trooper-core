@@ -342,6 +342,9 @@ ${HTTPS_DOMAIN} {
  handle /debug/* {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
+ handle /files {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
  handle /files/* {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
@@ -402,6 +405,9 @@ ${SSLIP_DOMAIN} {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
  handle /debug/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /files {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
  handle /files/* {
