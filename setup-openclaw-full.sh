@@ -2071,15 +2071,12 @@ StandardError=append:/var/log/crabhq-org-runtime.log
 WantedBy=multi-user.target
 CRUNTIME
 
-# CrabsHQ full server (replaces Render — handles tasks, agents, API, WS)
+# CrabsHQ VPS server (local API for tasks, agents — proxies to Render for Firebase/auth)
 cat > /etc/default/crabhq-server << CSENV
 PORT=3001
 NODE_ENV=production
 ORG_ID=${ORG_ID}
 DEFAULT_ORG_ID=${ORG_ID}
-FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
-FIREBASE_CLIENT_EMAIL=${FIREBASE_CLIENT_EMAIL}
-FIREBASE_PRIVATE_KEY=${FIREBASE_PRIVATE_KEY}
 RUNTIME_AUTH_SECRET=${RUNTIME_AUTH_SECRET}
 OPENAI_API_KEY=${OPENAI_API_KEY}
 ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
@@ -2090,13 +2087,14 @@ BRIDGE_PORT=${BRIDGE_PORT}
 OPENCLAW_GATEWAY_URL=http://127.0.0.1:${GATEWAY_PORT}
 OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
 OPENCLAW_HOOK_TOKEN=oc-hook-${HOOK_TOKEN}
+PLATFORM_API_URL=https://control-center-bot.onrender.com
 FRONTEND_URL=https://crabhq.netlify.app
 COMPOSIO_API_KEY=${COMPOSIO_API_KEY}
 CSENV
 
 cat > /etc/systemd/system/crabhq-server.service << CSSVC
 [Unit]
-Description=CrabsHQ Server (full API + task runner)
+Description=CrabsHQ Server (local API + task runner)
 After=network-online.target openclaw-bridge.service openclaw-docker.service
 Wants=network-online.target
 
