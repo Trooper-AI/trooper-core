@@ -2863,6 +2863,35 @@ app.get('/admin/db', (req, res) => {
   }
 });
 
+// System stats (CPU, RAM, disk) — no auth needed, non-sensitive metrics for CrabsHQ dashboard
+app.get('/system-stats', (req, res) => {
+ try {
+  const cpu = (() => {
+   try {
+    const l = execSync('cat /proc/loadavg', { encoding: 'utf8' }).trim().split(' ');
+    const c = parseInt(execSync('nproc', { encoding: 'utf8' }).trim());
+    return { load1m: parseFloat(l[0]), cores: c, usage: Math.min(100, (parseFloat(l[0]) / c) * 100) };
+   } catch { return null; }
+  })();
+  const memory = (() => {
+   try {
+    const lines = execSync('free -m', { encoding: 'utf8' }).split('\n');
+    const memLine = lines.find(l => l.startsWith('Mem:'));
+    if (!memLine) return null;
+    const p = memLine.split(/\s+/);
+    return { total: parseInt(p[1]), used: parseInt(p[2]), percent: (parseInt(p[2]) / parseInt(p[1])) * 100 };
+   } catch { return null; }
+  })();
+  const disk = (() => {
+   try {
+    const d = execSync('df -m / | tail -1', { encoding: 'utf8' }).trim().split(/\s+/);
+    return { total: parseInt(d[1]), used: parseInt(d[2]), percent: parseInt(d[4]) };
+   } catch { return null; }
+  })();
+  res.json({ cpu, memory, disk });
+ } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/healthz', (req, res) => res.status(200).json({ status: 'ok' }));
 app.get('/ready', (req, res) => {
  const ok = gateway.isReady;
