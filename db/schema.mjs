@@ -176,3 +176,118 @@ export const memoryConflicts = sqliteTable('memory_conflicts', {
   created_at: integer('created_at').notNull().default(sql`(unixepoch('now') * 1000)`),
   resolved_at: integer('resolved_at'),
 });
+
+// ── agents ────────────────────────────────────────────────────────────
+export const agents = sqliteTable("agents", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  role: text("role"),
+  avatar: text("avatar"),
+  skills: text("skills"),
+  personality: text("personality"),
+  status: text("status").default("active"),
+  model: text("model"),
+  provider: text("provider"),
+  reports_to: text("reports_to"),
+  last_heartbeat: integer("last_heartbeat"),
+  data: text("data"),
+  created_at: integer("created_at").notNull().default(sql`(unixepoch('now') * 1000)`),
+  updated_at: integer("updated_at").notNull().default(sql`(unixepoch('now') * 1000)`),
+});
+
+// ── humans ────────────────────────────────────────────────────────────
+export const humans = sqliteTable("humans", {
+  id: text("id").primaryKey(),
+  name: text("name"),
+  email: text("email"),
+  avatar: text("avatar"),
+  firebase_uid: text("firebase_uid"),
+  role: text("role"),
+  status: text("status").default("active"),
+  last_seen: integer("last_seen"),
+  data: text("data"),
+  created_at: integer("created_at").notNull().default(sql`(unixepoch('now') * 1000)`),
+});
+
+// ── contexts ──────────────────────────────────────────────────────────
+export const contexts = sqliteTable("contexts", {
+  id: text("id").primaryKey(),
+  type: text("type"),
+  source: text("source"),
+  content: text("content"),
+  metadata: text("metadata"),
+  updated_at: integer("updated_at").notNull().default(sql`(unixepoch('now') * 1000)`),
+  created_at: integer("created_at").notNull().default(sql`(unixepoch('now') * 1000)`),
+});
+
+// ── conversations ─────────────────────────────────────────────────────
+export const conversations = sqliteTable("conversations", {
+  id: text("id").primaryKey(),
+  key: text("key").notNull(),
+  messages: text("messages"),
+  updated_at: integer("updated_at").notNull().default(sql`(unixepoch('now') * 1000)`),
+});
+
+// ── activities ────────────────────────────────────────────────────────
+export const activities = sqliteTable("activities", {
+  id: text("id").primaryKey(),
+  type: text("type"),
+  actor_id: text("actor_id"),
+  actor_name: text("actor_name"),
+  actor_type: text("actor_type"),
+  description: text("description"),
+  metadata: text("metadata"),
+  created_at: integer("created_at").notNull().default(sql`(unixepoch('now') * 1000)`),
+});
+
+// ── notifications ─────────────────────────────────────────────────────
+export const notifications = sqliteTable("notifications", {
+  id: text("id").primaryKey(),
+  type: text("type"),
+  title: text("title"),
+  message: text("message"),
+  actor_id: text("actor_id"),
+  target_id: text("target_id"),
+  read: integer("read").default(0),
+  metadata: text("metadata"),
+  created_at: integer("created_at").notNull().default(sql`(unixepoch('now') * 1000)`),
+});
+
+// ── skills ────────────────────────────────────────────────────────────
+export const skills = sqliteTable("skills", {
+  id: text("id").primaryKey(),
+  name: text("name"),
+  description: text("description"),
+  category: text("category"),
+  data: text("data"),
+  created_at: integer("created_at").notNull().default(sql`(unixepoch('now') * 1000)`),
+  updated_at: integer("updated_at").notNull().default(sql`(unixepoch('now') * 1000)`),
+});
+
+// ── rules ─────────────────────────────────────────────────────────────
+export const rules = sqliteTable("rules", {
+  id: text("id").primaryKey(),
+  name: text("name"),
+  content: text("content"),
+  enabled: integer("enabled").default(1),
+  data: text("data"),
+  created_at: integer("created_at").notNull().default(sql`(unixepoch('now') * 1000)`),
+  updated_at: integer("updated_at").notNull().default(sql`(unixepoch('now') * 1000)`),
+});
+
+// ── playbooks ─────────────────────────────────────────────────────────
+export const playbooks = sqliteTable("playbooks", {
+  id: text("id").primaryKey(),
+  name: text("name"),
+  data: text("data"),
+  created_at: integer("created_at").notNull().default(sql`(unixepoch('now') * 1000)`),
+  updated_at: integer("updated_at").notNull().default(sql`(unixepoch('now') * 1000)`),
+});
+
+// ── policies ──────────────────────────────────────────────────────────
+export const policies = sqliteTable("policies", {
+  id: text("id").primaryKey(),
+  data: text("data"),
+  created_at: integer("created_at").notNull().default(sql`(unixepoch('now') * 1000)`),
+  updated_at: integer("updated_at").notNull().default(sql`(unixepoch('now') * 1000)`),
+});

@@ -198,6 +198,111 @@ export function migrate(sqlite) {
     );
     CREATE INDEX IF NOT EXISTS idx_memory_conflicts_status ON memory_conflicts(status);
     CREATE INDEX IF NOT EXISTS idx_memory_conflicts_memory ON memory_conflicts(memory_id);
+    CREATE TABLE IF NOT EXISTS agents (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      role TEXT,
+      avatar TEXT,
+      skills TEXT,
+      personality TEXT,
+      status TEXT DEFAULT active,
+      model TEXT,
+      provider TEXT,
+      reports_to TEXT,
+      last_heartbeat INTEGER,
+      data TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
+    );
+
+    CREATE TABLE IF NOT EXISTS humans (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      email TEXT,
+      avatar TEXT,
+      firebase_uid TEXT,
+      role TEXT,
+      status TEXT DEFAULT active,
+      last_seen INTEGER,
+      data TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
+    );
+
+    CREATE TABLE IF NOT EXISTS contexts (
+      id TEXT PRIMARY KEY,
+      type TEXT,
+      source TEXT,
+      content TEXT,
+      metadata TEXT,
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+      created_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
+    );
+
+    CREATE TABLE IF NOT EXISTS conversations (
+      id TEXT PRIMARY KEY,
+      key TEXT NOT NULL,
+      messages TEXT,
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
+    );
+
+    CREATE TABLE IF NOT EXISTS activities (
+      id TEXT PRIMARY KEY,
+      type TEXT,
+      actor_id TEXT,
+      actor_name TEXT,
+      actor_type TEXT,
+      description TEXT,
+      metadata TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
+    );
+
+    CREATE TABLE IF NOT EXISTS notifications (
+      id TEXT PRIMARY KEY,
+      type TEXT,
+      title TEXT,
+      message TEXT,
+      actor_id TEXT,
+      target_id TEXT,
+      read INTEGER DEFAULT 0,
+      metadata TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
+    );
+
+    CREATE TABLE IF NOT EXISTS skills (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      description TEXT,
+      category TEXT,
+      data TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
+    );
+
+    CREATE TABLE IF NOT EXISTS rules (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      content TEXT,
+      enabled INTEGER DEFAULT 1,
+      data TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
+    );
+
+    CREATE TABLE IF NOT EXISTS playbooks (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      data TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
+    );
+
+    CREATE TABLE IF NOT EXISTS policies (
+      id TEXT PRIMARY KEY,
+      data TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
+    );
+
   `);
 
   console.log('[DB] Migrations complete.');

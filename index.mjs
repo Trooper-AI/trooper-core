@@ -37,7 +37,7 @@ import { initFirebaseAuth } from './lib/firebase-auth.mjs';
 import { BridgeWSServer } from './lib/ws-server.mjs';
 import { handleChatMessage, getRecentMessages } from './lib/chat-handler.mjs';
 import { createTask, getTask, listTasks, updateTask, deleteTask, addComment, addSubtask, toggleSubtask, deleteSubtask, executeTaskWork, checkoutTask, releaseTask, createProject, listProjects, updateProject, createGoal, listGoals } from './lib/task-handler.mjs';
-import { messages as messagesTable } from './db/schema.mjs';
+import { messages as messagesTable, agents as agentsTable, humans as humansTable, contexts as contextsTable, conversations as conversationsTable, activities as activitiesTable, notifications as notificationsTable, skills as skillsTable, rules as rulesTable, playbooks as playbooksTable, policies as policiesTable } from './db/schema.mjs';
 import { eq, desc } from 'drizzle-orm';
 import { registerApiRoutes } from './lib/api-routes.mjs';
 
@@ -3847,6 +3847,103 @@ app.post('/api/goals', (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+
+// ── Generic Collection REST API ──────────────────────────────────────────────
+// Shared helper — uses eq/desc already imported from drizzle-orm
+function makeCollectionRoutes(app, db, tableDef, collectionName, knownFields) {
+  app.get(`/api/${collectionName}`, (req, res) => {
+    try {
+      const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+      const rows = db.select().from(tableDef).orderBy(desc(tableDef.created_at)).limit(limit).all();
+      res.json({ [collectionName]: rows });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get(`/api/${collectionName}/:id`, (req, res) => {
+    try {
+      const row = db.select().from(tableDef).where(eq(tableDef.id, req.params.id)).get();
+      if (!row) return res.status(404).json({ error: "Not found" });
+      res.json(row);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post(`/api/${collectionName}`, (req, res) => {
+    try {
+      const body = req.body || {};
+      const id = body.id || crypto.randomUUID();
+      const now = Date.now();
+      const row = { id, created_at: now };
+      const extra = {};
+      for (const [k, v] of Object.entries(body)) {
+        if (k === "id") continue;
+        if (knownFields.includes(k)) row[k] = v;
+        else extra[k] = v;
+      }
+      if (knownFields.includes("data") && Object.keys(extra).length > 0) {
+        row.data = JSON.stringify(extra);
+      }
+      if (knownFields.includes("updated_at")) row.updated_at = now;
+      db.insert(tableDef).values(row).run();
+      const created = db.select().from(tableDef).where(eq(tableDef.id, id)).get();
+      bridgeWS.broadcast(`${collectionName}:created`, created);
+      res.json(created);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.patch(`/api/${collectionName}/:id`, (req, res) => {
+    try {
+      const existing = db.select().from(tableDef).where(eq(tableDef.id, req.params.id)).get();
+      if (!existing) return res.status(404).json({ error: "Not found" });
+      const body = req.body || {};
+      const updates = {};
+      const extra = {};
+      for (const [k, v] of Object.entries(body)) {
+        if (k === "id" || k === "created_at") continue;
+        if (knownFields.includes(k)) updates[k] = v;
+        else extra[k] = v;
+      }
+      if (knownFields.includes("data") && Object.keys(extra).length > 0) {
+        const existingData = existing.data ? JSON.parse(existing.data) : {};
+        updates.data = JSON.stringify({ ...existingData, ...extra });
+      }
+      if (knownFields.includes("updated_at")) updates.updated_at = Date.now();
+      db.update(tableDef).set(updates).where(eq(tableDef.id, req.params.id)).run();
+      const updated = db.select().from(tableDef).where(eq(tableDef.id, req.params.id)).get();
+      bridgeWS.broadcast(`${collectionName}:updated`, updated);
+      res.json(updated);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete(`/api/${collectionName}/:id`, (req, res) => {
+    try {
+      db.delete(tableDef).where(eq(tableDef.id, req.params.id)).run();
+      bridgeWS.broadcast(`${collectionName}:deleted`, { id: req.params.id });
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+}
+
+makeCollectionRoutes(app, db, agentsTable, "agents", ["id","name","role","avatar","skills","personality","status","model","provider","reports_to","last_heartbeat","data","created_at","updated_at"]);
+makeCollectionRoutes(app, db, humansTable, "humans", ["id","name","email","avatar","firebase_uid","role","status","last_seen","data","created_at"]);
+makeCollectionRoutes(app, db, contextsTable, "contexts", ["id","type","source","content","metadata","updated_at","created_at"]);
+makeCollectionRoutes(app, db, conversationsTable, "conversations", ["id","key","messages","updated_at"]);
+makeCollectionRoutes(app, db, activitiesTable, "activities", ["id","type","actor_id","actor_name","actor_type","description","metadata","created_at"]);
+makeCollectionRoutes(app, db, notificationsTable, "notifications", ["id","type","title","message","actor_id","target_id","read","metadata","created_at"]);
+makeCollectionRoutes(app, db, skillsTable, "skills", ["id","name","description","category","data","created_at","updated_at"]);
+makeCollectionRoutes(app, db, rulesTable, "rules", ["id","name","content","enabled","data","created_at","updated_at"]);
+makeCollectionRoutes(app, db, playbooksTable, "playbooks", ["id","name","data","created_at","updated_at"]);
+makeCollectionRoutes(app, db, policiesTable, "policies", ["id","data","created_at","updated_at"]);
 
 // ── Messages API ──────────────────────────────────────────────────────────
 // GET /api/messages — recent messages for a channel
