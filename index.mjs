@@ -1952,6 +1952,15 @@ try {
    authChanged = true;
    console.log('[bridge] Migrated auth profile "openai:default" → "openai-codex:default" (OAuth profile detected)');
   }
+  // If openai:default exists as api_key but no openai-codex profile, clone it
+  // so openai-codex/ model prefix can authenticate with the same API key
+  if (openaiProfile && !hasCodexProfile && openaiProfile.type === 'api_key' && openaiProfile.key) {
+   auth.profiles['openai-codex:default'] = { type: 'api_key', provider: 'openai-codex', key: openaiProfile.key };
+   if (!auth.lastGood) auth.lastGood = {};
+   auth.lastGood['openai-codex'] = 'openai-codex:default';
+   authChanged = true;
+   console.log('[bridge] Created openai-codex:default from openai:default API key');
+  }
  }
  if (authChanged) {
   writeFileSync(authPath, JSON.stringify(auth, null, 2));
