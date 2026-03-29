@@ -327,6 +327,18 @@ ${HTTPS_DOMAIN} {
  handle /admin/* {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
+ handle /api/memories/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /api/memories {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /api/api-keys/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /api/api-keys {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
  handle /api/* {
  reverse_proxy 127.0.0.1:3001
  }
@@ -390,6 +402,18 @@ ${SSLIP_DOMAIN} {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
  handle /admin/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /api/memories/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /api/memories {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /api/api-keys/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /api/api-keys {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
  handle /api/* {
