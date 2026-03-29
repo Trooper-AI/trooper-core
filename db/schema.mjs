@@ -147,3 +147,19 @@ export const config = sqliteTable('config', {
   value: text('value'),             // JSON
   updated_at: integer('updated_at').notNull().default(sql`(unixepoch('now') * 1000)`),
 });
+
+// ── memories ──────────────────────────────────────────────────────────
+export const memories = sqliteTable('memories', {
+  id: text('id').primaryKey(),
+  scope: text('scope').default('org'),           // org|user|workflow|runtime|relationship
+  title: text('title').notNull(),
+  summary: text('summary'),
+  details: text('details'),
+  tags: text('tags'),                             // JSON array
+  confidence: text('confidence').default('0.8'),
+  source: text('source'),                         // JSON object
+  created_at: integer('created_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+  updated_at: integer('updated_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+  last_used_at: integer('last_used_at'),
+  deleted_at: integer('deleted_at'),              // soft-delete for sync
+});

@@ -154,6 +154,21 @@ export function migrate(sqlite) {
       timestamp INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
     );
 
+    CREATE TABLE IF NOT EXISTS memories (
+      id TEXT PRIMARY KEY,
+      scope TEXT DEFAULT 'org',
+      title TEXT NOT NULL,
+      summary TEXT,
+      details TEXT,
+      tags TEXT,
+      confidence TEXT DEFAULT '0.8',
+      source TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+      last_used_at INTEGER,
+      deleted_at INTEGER
+    );
+
     -- Indexes
     CREATE INDEX IF NOT EXISTS idx_logs_level_time ON logs(level, timestamp);
     CREATE INDEX IF NOT EXISTS idx_logs_time ON logs(timestamp);
@@ -166,6 +181,9 @@ export function migrate(sqlite) {
     CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status, started_at);
     CREATE INDEX IF NOT EXISTS idx_run_events_run_seq ON run_events(run_id, seq);
     CREATE INDEX IF NOT EXISTS idx_task_comments_task ON task_comments(task_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope);
+    CREATE INDEX IF NOT EXISTS idx_memories_deleted ON memories(deleted_at);
   `);
 
   console.log('[DB] Migrations complete.');
