@@ -408,7 +408,62 @@ const MISSION_CONTROL_URL = process.env.MISSION_CONTROL_URL || process.env.CRABH
 
 // OpenClaw gateway connection config
 const OPENCLAW_URL = process.env.OPENCLAW_URL || 'http://127.0.0.1:18789';
-const OPENCLAW_GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || '';
+const OPENCLAW_CONFIG_PATH = '/opt/openclaw-data/config/openclaw.json';
+
+function cloneJson(value) {
+ return value && typeof value === 'object' ? JSON.parse(JSON.stringify(value)) : {};
+}
+
+function readOpenClawConfig() {
+ try {
+ return JSON.parse(readFileSync(OPENCLAW_CONFIG_PATH, 'utf8'));
+ } catch {
+ return {};
+ }
+}
+
+function writeOpenClawConfig(config) {
+ writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
+ try { execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 }); } catch {}
+}
+
+function readGatewayTokenFromConfig() {
+ const token = readOpenClawConfig()?.gateway?.auth?.token;
+ return typeof token === 'string' && token.trim() ? token.trim() : '';
+}
+
+function getDesiredGatewayToken() {
+ const envToken = typeof process.env.OPENCLAW_GATEWAY_TOKEN === 'string' ? process.env.OPENCLAW_GATEWAY_TOKEN.trim() : '';
+ return envToken || readGatewayTokenFromConfig() || '';
+}
+
+function normalizeOpenClawConfigForWrite(nextConfig, existingConfig = readOpenClawConfig()) {
+ const normalized = cloneJson(nextConfig);
+ const existing = cloneJson(existingConfig);
+ const desiredToken = getDesiredGatewayToken() || existing?.gateway?.auth?.token || '';
+ if (!normalized.gateway || typeof normalized.gateway !== 'object') normalized.gateway = {};
+ if (!normalized.gateway.auth || typeof normalized.gateway.auth !== 'object') normalized.gateway.auth = {};
+ if (desiredToken) normalized.gateway.auth.token = desiredToken;
+ if (!normalized.gateway.auth.mode && existing?.gateway?.auth?.mode) normalized.gateway.auth.mode = existing.gateway.auth.mode;
+ return normalized;
+}
+
+function syncGatewayAuthTokenInConfig() {
+ const existing = readOpenClawConfig();
+ const desiredToken = getDesiredGatewayToken();
+ if (!desiredToken) {
+ return { updated: false, token: '', config: existing };
+ }
+ const currentToken = typeof existing?.gateway?.auth?.token === 'string' ? existing.gateway.auth.token.trim() : '';
+ if (currentToken === desiredToken) {
+ return { updated: false, token: desiredToken, config: existing };
+ }
+ const next = normalizeOpenClawConfigForWrite(existing, existing);
+ writeOpenClawConfig(next);
+ return { updated: true, token: desiredToken, config: next };
+}
+
+const OPENCLAW_GATEWAY_TOKEN = getDesiredGatewayToken();
 const OPENCLAW_HOOK_TOKEN = process.env.OPENCLAW_HOOK_TOKEN || '';
 
 app.use(cors());
@@ -443,6 +498,7 @@ class OpenClawGateway {
  this._authReject = null;
  this._pingInterval = null;
  this._lastSelfApproveMs = 0; // cooldown: don't restart gateway more than once per 5 min
+ this._lastAuthRepairMs = 0;
  this.connect();
  }
 
@@ -457,6 +513,13 @@ class OpenClawGateway {
  }
 
  async connect() {
+ if (!this.connected) {
+   const latestToken = getDesiredGatewayToken();
+   if (latestToken && latestToken !== this.token) {
+     console.log('[OpenClaw] Reloaded gateway token from config before connect');
+     this.token = latestToken;
+   }
+ }
  if (this._connectPromise) return this._connectPromise;
  this._connectPromise = this._doConnect();
  return this._connectPromise;
@@ -694,6 +757,37 @@ class OpenClawGateway {
 
  if (!frame.ok) {
  const errMsg = frame.error?.message || 'Request failed';
+ // If auth drifted after a reinstall/config restore, repair openclaw.json to the bridge's
+ // live token and restart the gateway so the next reconnect uses a consistent token.
+ if (frame.id === this._authRequestId && /token mismatch|token missing|unauthorized/i.test(errMsg)) {
+ console.warn('[OpenClaw] Gateway auth mismatch detected — attempting token repair...');
+ this._pendingRequests.delete(frame.id);
+ const now = Date.now();
+ if (now - this._lastAuthRepairMs >= 30 * 1000) {
+ this._lastAuthRepairMs = now;
+ (async () => {
+ try {
+ const repair = syncGatewayAuthTokenInConfig();
+ if (repair.updated) {
+ console.log('[OpenClaw] Rewrote openclaw.json with live gateway token before restart');
+ }
+ execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
+ this._reconnectDelay = 10000;
+ } catch (repairErr) {
+ console.warn('[OpenClaw] Gateway auth repair failed:', repairErr.message);
+ }
+ })();
+ } else {
+ console.log('[OpenClaw] Gateway auth repair cooldown active — skipping duplicate restart');
+ }
+ if (this._authResolve) {
+ const res = this._authResolve;
+ this._authReject = null;
+ this._authResolve = null;
+ res(null);
+ }
+ return;
+ }
  // Handle pairing required gracefully — resolve (not reject!) to avoid unhandled rejection crash
  if (errMsg === 'pairing required' && frame.id === this._authRequestId) {
  console.log('[OpenClaw] Pairing required — attempting self-approve via paired.json...');
@@ -3823,7 +3917,7 @@ app.post('/llm/vision', async (req, res) => {
  if (!messages || !messages.length) return res.status(400).json({ error: 'messages required' });
 
  const gatewayUrl = process.env.OPENCLAW_URL || 'http://127.0.0.1:18789';
- const gatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN || '';
+ const gatewayToken = getDesiredGatewayToken();
 
  const resp = await fetch(`${gatewayUrl}/v1/chat/completions`, {
  method: 'POST',
@@ -4525,6 +4619,10 @@ app.all('/desktop-api/*', async (req, res) => {
 // Patch: fix device-identity ownership and ensure paired.json has our device, then restart gateway
 app.post('/gateway/patch-auth', (req, res) => {
  try {
+ const repair = syncGatewayAuthTokenInConfig();
+ if (repair.updated) {
+ console.log('[bridge] Repaired gateway auth token in openclaw.json before restart');
+ }
  // Fix identity file ownership so bridge can read it (uses ES module import from top of file)
  execSync('chown node:node /opt/openclaw-bridge/device-identity.json 2>/dev/null || chown 1000:1000 /opt/openclaw-bridge/device-identity.json 2>/dev/null || true', { timeout: 5000 });
  execSync('chmod 600 /opt/openclaw-bridge/device-identity.json 2>/dev/null || true', { timeout: 5000 });
@@ -4544,7 +4642,7 @@ app.post('/gateway/patch-auth', (req, res) => {
  // Restart gateway to apply paired.json changes
  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
  setTimeout(() => gateway.connect(), 15000);
- res.json({ success: true, message: 'Identity fixed and gateway restarted' });
+ res.json({ success: true, message: 'Identity fixed, gateway auth synced, and gateway restarted' });
  } catch (err) {
  res.status(500).json({ error: 'Patch failed', details: err.message });
  }
@@ -4557,6 +4655,7 @@ app.post('/gateway/restart', (req, res) => {
  // Re-approve device and reconnect after restart
  setTimeout(async () => {
  try { execSync(`docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null; docker exec openclaw-openclaw-gateway-1 chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null`, { timeout: 15000 }); } catch {}
+ gateway.token = getDesiredGatewayToken() || gateway.token;
  gateway.connect();
  }, 5000);
  res.json({ success: true, message: 'Gateway container restarted' });
@@ -4579,15 +4678,14 @@ app.get('/gateway/status', (req, res) => {
 
 app.get('/gateway/config', (req, res) => {
  try {
- const config = readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8');
+ const config = readFileSync(OPENCLAW_CONFIG_PATH, 'utf8');
  res.type('application/json').send(config);
  } catch (err) { res.status(500).json({ error: 'Failed to read config', details: err.message }); }
 });
 
 app.put('/gateway/config', (req, res) => {
  try {
- writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(req.body, null, 2), 'utf8');
- try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
+ writeOpenClawConfig(normalizeOpenClawConfigForWrite(req.body));
  console.log('Gateway config updated, restarting...');
  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
  setTimeout(() => gateway.connect(), 5000);
@@ -5921,12 +6019,9 @@ app.post('/callback/result', async (req, res) => {
 const ORG_ID = process.env.ORG_ID || '';
 
 // ── OpenClaw Config (read/write openclaw.json) ──────────────────────
-const OPENCLAW_CONFIG_PATH = '/opt/openclaw-data/config/openclaw.json';
-
 app.get('/config/openclaw', (req, res) => {
  try {
- const data = readFileSync(OPENCLAW_CONFIG_PATH, 'utf8');
- res.json(JSON.parse(data));
+ res.json(readOpenClawConfig());
  } catch (err) {
  if (err.code === 'ENOENT') return res.json({});
  res.status(500).json({ error: err.message });
@@ -5942,9 +6037,7 @@ app.put('/config/openclaw', (req, res) => {
  const existing = readFileSync(OPENCLAW_CONFIG_PATH, 'utf8');
  writeFileSync(OPENCLAW_CONFIG_PATH + '.bak', existing);
  } catch {}
- writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(data, null, 2));
- // Fix permissions
- try { execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 }); } catch {}
+ writeOpenClawConfig(normalizeOpenClawConfigForWrite(data));
  // Restart OpenClaw gateway to pick up changes
  try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', { timeout: 5000 }); } catch {}
  res.json({ success: true });
