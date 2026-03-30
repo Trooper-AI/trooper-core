@@ -2004,18 +2004,24 @@ cd /opt/openclaw
 dlog "Preparing CrabsHQ org runtime..."
 mkdir -p /opt/crabhq-org-runtime /var/lib/crabhq-org-runtime
 
-if [ -z "${CRABHQ_RUNTIME_TARBALL_URL:-}" ] || [ "${CRABHQ_RUNTIME_TARBALL_URL}" = "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; then
-  echo "ERROR: CRABHQ_RUNTIME_TARBALL_URL is required for fresh provisioning" >&2
-  exit 1
+dlog "Cloning CrabsHQ from GitHub (always gets latest)..."
+if git clone --depth 1 https://github.com/absurdfounder/Crabs-HQ.git /tmp/crabhq-clone 2>/dev/null; then
+  cp -r /tmp/crabhq-clone/server /opt/crabhq-org-runtime/
+  rm -rf /tmp/crabhq-clone
+  dlog "CrabsHQ org runtime cloned from GitHub"
+else
+  dlog "Git clone failed, falling back to tarball..."
+  if [ -n "${CRABHQ_RUNTIME_TARBALL_URL:-}" ] && [ "${CRABHQ_RUNTIME_TARBALL_URL}" != "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; then
+    curl -fsSL "$CRABHQ_RUNTIME_TARBALL_URL" -o /tmp/crabhq-org-runtime.tar.gz || { echo "ERROR: failed to download runtime bundle" >&2; exit 1; }
+    tar -xzf /tmp/crabhq-org-runtime.tar.gz -C /opt/crabhq-org-runtime --strip-components=1 || { echo "ERROR: failed to extract runtime bundle" >&2; exit 1; }
+  else
+    echo "ERROR: git clone failed and no CRABHQ_RUNTIME_TARBALL_URL fallback" >&2
+    exit 1
+  fi
 fi
 
-dlog "Downloading CrabsHQ runtime bundle..."
-curl -fsSL "$CRABHQ_RUNTIME_TARBALL_URL" -o /tmp/crabhq-org-runtime.tar.gz || { echo "ERROR: failed to download runtime bundle" >&2; exit 1; }
-tar -xzf /tmp/crabhq-org-runtime.tar.gz -C /opt/crabhq-org-runtime --strip-components=1 || { echo "ERROR: failed to extract runtime bundle" >&2; exit 1; }
-
 if [ ! -f /opt/crabhq-org-runtime/server/package.json ] || [ ! -f /opt/crabhq-org-runtime/server/org-runtime/index.js ]; then
-  echo "ERROR: runtime bundle extracted but expected server files are missing" >&2
-  find /opt/crabhq-org-runtime -maxdepth 3 -type f | sed -n '1,120p' >&2 || true
+  echo "ERROR: runtime files missing after install" >&2
   exit 1
 fi
 
