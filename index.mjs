@@ -3964,6 +3964,35 @@ app.get('/api/messages', (req, res) => {
  }
 });
 
+// ── Vault File Dump (Obsidian → VPS) ────────────────────────────────
+import { mkdirSync as fsMkdirSync, writeFileSync as fsWriteFileSync, existsSync as fsExistsSync } from 'fs';
+app.post('/api/vault/sync', (req, res) => {
+  try {
+    const apiKey = req.headers['x-api-key'];
+    if (!apiKey) return res.status(401).json({ error: 'X-API-Key required' });
+    const { files } = req.body || {};
+    if (!Array.isArray(files)) return res.status(400).json({ error: 'files array required' });
+
+    const vaultDir = '/opt/openclaw-data/vault';
+    if (!fsExistsSync(vaultDir)) fsMkdirSync(vaultDir, { recursive: true });
+
+    let uploaded = 0, skipped = 0;
+    for (const f of files) {
+      if (!f.path || typeof f.content !== 'string') { skipped++; continue; }
+      const safePath = f.path.replace(/\.\.\//g, '').replace(/^\//, '');
+      const fullPath = vaultDir + '/' + safePath;
+      const dir = fullPath.substring(0, fullPath.lastIndexOf('/'));
+      if (dir && !fsExistsSync(dir)) fsMkdirSync(dir, { recursive: true });
+      fsWriteFileSync(fullPath, f.content, 'utf8');
+      uploaded++;
+    }
+    console.log('📥 Vault sync: ' + uploaded + ' files written to ' + vaultDir);
+    res.json({ uploaded, skipped });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Proxy: forward API calls from OpenClaw agent sandbox to CrabsHQ backend
 app.post('/api/proxy/:path(*)', async (req, res) => {
  if (!MISSION_CONTROL_URL) return res.status(503).json({ error: 'No CrabsHQ backend configured' });
