@@ -1011,6 +1011,7 @@ class OpenClawGateway {
  if (onEvent) onEvent('model_start', { eventType: 'model_start', confidence: 'native', model: opts.model || null, time: Date.now() });
  const toolLog = [];
  let lifecycleDepth = 0; // track nested lifecycle start/end for sub-agent detection
+ let emittedMainRunStart = false;
 
  // Sub-agent tracking: tree-based for nested sub-agents
  let mainRunId = null;
@@ -1244,6 +1245,18 @@ function extractPatchFilePaths(patchText = '') {
  }
  // Track ALL lifecycle events (including from nested runIds via _activeSessionListener)
  if (stream === 'lifecycle' && data?.phase === 'start') {
+ if (!isSubAgent && !emittedMainRunStart) {
+ const effectiveRunId = runId || mainRunId || null;
+ if (onEvent) onEvent('start', {
+ requestId: id,
+ agentId: _agentId2,
+ agentName: opts.agentName || 'default',
+ runId: effectiveRunId,
+ startedAt: data.startedAt || Date.now(),
+ time: Date.now(),
+ });
+ emittedMainRunStart = true;
+ }
  lifecycleDepth++;
  }
  if (stream === 'lifecycle' && data?.phase === 'end') {
