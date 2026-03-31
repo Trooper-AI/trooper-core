@@ -14,6 +14,7 @@ import {
   buildBrowserSessionEndPayload,
   buildBrowserSessionPayload,
   buildScreenshotFramePayload,
+  extractHistoryToolEvents,
   normalizeToolEventPayload,
 } from './lib/event-contracts.mjs';
 import { ensureXvnc } from './lib/xvnc.mjs';
@@ -1142,6 +1143,10 @@ class OpenClawGateway {
  let lastHistoryAssistantText = '';
  let lastHistoryThinkingText = '';
  const seenHistoryEventKeys = new Set();
+ const buildHistoryReplayKey = (event) => {
+ const data = event?.data || {};
+ return `${event?.event || 'event'}:${data.toolCallId || data.index || data.tool || ''}:${event?.time || 0}`;
+ };
  const INTERNAL_MEMORY_ARRAY_PREFIX_RE = /^\s*\[\s*\{[\s\S]*?"category"\s*:\s*"[^"]+"[\s\S]*?"key"\s*:\s*"[^"]+"[\s\S]*?"value"\s*:\s*"[^"]+"[\s\S]*?"confidence"\s*:\s*(?:0(?:\.\d+)?|1(?:\.0+)?)\s*[\s\S]*?\}\s*\]\s*/;
  const INTERNAL_INSIGHTS_OBJECT_PREFIX_RE = /^\s*\{\s*"preferences"\s*:\s*\[[\s\S]*?\]\s*,\s*"patterns"\s*:\s*\[[\s\S]*?\]\s*,\s*"expertise"\s*:\s*\[[\s\S]*?\]\s*,\s*"facts"\s*:\s*\[[\s\S]*?\]\s*\}\s*/;
  const stripInternalRunMetadataPrefix = (text = '') => {
@@ -1243,6 +1248,7 @@ class OpenClawGateway {
  console.log(`[SUBAGENT:tool_use] ${subInfo.name} → ${subToolName} params=${JSON.stringify(subToolParams).substring(0, 200)}`);
  if (onEvent) onEvent('subagent_tool_start', {
  tool: subToolName,
+ toolCallId: data.id || data.toolCallId || undefined,
  params: subToolParams,
  subAgentRunId: runId,
  parentRunId: subInfo.parentRunId,
@@ -1253,6 +1259,7 @@ class OpenClawGateway {
  const summary = typeof data.content === 'string' ? data.content : (data.output || '');
  if (onEvent) onEvent('subagent_tool_result', {
  tool: data.name || 'unknown',
+ toolCallId: data.id || data.toolCallId || undefined,
  success: !data.is_error,
  summary,
  subAgentRunId: runId,
@@ -1361,14 +1368,16 @@ function extractPatchFilePaths(patchText = '') {
  if (stream === 'tool_use' && data) {
  const toolName = data.name || data.tool || 'processing';
  const toolParams = data.input || data.params || {};
+ const toolCallId = data.id || data.toolCallId || undefined;
  // Snapshot text before this tool call
  const currentText = textChunks.join('');
  const textSinceLastTool = currentText.slice(lastToolTextSnapshot.length).trim();
  lastToolTextSnapshot = currentText;
- toolLog.push({ tool: toolName, skillName: null, params: toolParams, status: 'called', startedAt: Date.now(), textBefore: textSinceLastTool });
- const toolStartPayload = normalizeToolEventPayload('tool_start', { tool: toolName, params: toolParams, index: toolLog.length - 1, startedAt: Date.now(), confidence: 'native' });
+ toolLog.push({ tool: toolName, toolCallId, skillName: null, params: toolParams, status: 'called', startedAt: Date.now(), textBefore: textSinceLastTool });
+ const toolStartPayload = normalizeToolEventPayload('tool_start', { tool: toolName, toolCallId, params: toolParams, index: toolLog.length - 1, startedAt: Date.now(), confidence: 'native' });
  toolStartPayload.textBefore = textSinceLastTool;
  toolStartPayload.runId = runId || mainRunId || null;
+ toolStartPayload.sessionKey = sessionKey;
  if (onEvent) onEvent('tool_start', toolStartPayload);
  return;
  }
@@ -1390,7 +1399,7 @@ function extractPatchFilePaths(patchText = '') {
       for (const patchPath of patchPaths) relocateIntoProjectFolder(_projectFolder, patchPath);
     }
   }
-   const toolResultPayload = normalizeToolEventPayload('tool_result', { tool: last.tool, params: last.params, success: !data.is_error, summary, raw, durationMs: last.durationMs, index: toolLog.length - 1, startedAt: last.startedAt, confidence: 'native' });
+   const toolResultPayload = normalizeToolEventPayload('tool_result', { tool: last.tool, toolCallId: last.toolCallId, params: last.params, success: !data.is_error, summary, raw, durationMs: last.durationMs, index: toolLog.length - 1, startedAt: last.startedAt, confidence: 'native' });
 
    // Extract details.media from tool_result (OpenClaw v2026.3.22+ — browser/canvas/nodes snapshots)
    const detailsMedia = data.details?.media && typeof data.details.media === 'object' && !Array.isArray(data.details.media) ? data.details.media : null;
@@ -1416,6 +1425,7 @@ function extractPatchFilePaths(patchText = '') {
    }
 
    toolResultPayload.runId = runId || mainRunId || null;
+   toolResultPayload.sessionKey = sessionKey;
    if (onEvent) onEvent('tool_result', toolResultPayload);
  }
  return;
@@ -1424,7 +1434,7 @@ function extractPatchFilePaths(patchText = '') {
  if (stream === 'assistant' && data?.text) {
  textChunks.push(data.text);
  const visibleText = sanitizeVisibleAssistantText(data.text);
- if (visibleText && onEvent) onEvent('text', { text: visibleText, runId: runId || mainRunId || null });
+ if (visibleText && onEvent) onEvent('text', { text: visibleText, runId: runId || mainRunId || null, sessionKey });
  }
  // Track ALL lifecycle events (including from nested runIds via _activeSessionListener)
  if (stream === 'lifecycle' && data?.phase === 'start') {
@@ -1435,6 +1445,7 @@ function extractPatchFilePaths(patchText = '') {
  agentId: _agentId2,
  agentName: opts.agentName || 'default',
  runId: effectiveRunId,
+ sessionKey,
  startedAt: data.startedAt || Date.now(),
  time: Date.now(),
  });
@@ -1639,7 +1650,7 @@ function extractPatchFilePaths(patchText = '') {
  }
  if (stream === 'thinking' && data?.text) {
  const visibleText = sanitizeVisibleAssistantText(data.text);
- if (visibleText && onEvent) onEvent('thinking', { text: visibleText });
+ if (visibleText && onEvent) onEvent('thinking', { text: visibleText, runId: runId || mainRunId || null, sessionKey });
  }
  };
 
@@ -1687,9 +1698,22 @@ function extractPatchFilePaths(patchText = '') {
  if (historyPollInFlight || sawLiveStreamPayload) return;
  historyPollInFlight = true;
  try {
-  const historyMessages = await this.fetchSessionHistory(sessionKey, 30);
-  if (!Array.isArray(historyMessages) || historyMessages.length === 0) return;
-  const runCutoff = runStartedAt - 5000;
+ const historyMessages = await this.fetchSessionHistory(sessionKey, 30);
+ if (!Array.isArray(historyMessages) || historyMessages.length === 0) return;
+ const runCutoff = runStartedAt - 5000;
+  const effectiveRunId = mainRunId || this._pendingRequests.get(id)?.runId || null;
+  const historyToolEvents = extractHistoryToolEvents(historyMessages, {
+   runId: effectiveRunId,
+   sessionKey,
+   source: 'history_poll',
+   cutoffMs: runCutoff,
+  });
+  for (const historyEvent of historyToolEvents) {
+   const key = buildHistoryReplayKey(historyEvent);
+   if (seenHistoryEventKeys.has(key)) continue;
+   seenHistoryEventKeys.add(key);
+   if (onEvent) onEvent(historyEvent.event, historyEvent.data);
+  }
   let latestAssistantText = '';
   let latestThinkingText = '';
   for (const msg of historyMessages) {
@@ -1700,21 +1724,6 @@ function extractPatchFilePaths(patchText = '') {
    const content = m?.content;
    if (role === 'assistant') {
      if (Array.isArray(content)) {
-       for (const block of content) {
-         if (block?.type === 'toolCall' || block?.type === 'tool_use') {
-           const key = `tool_start:${block.id || block.name || ts}`;
-           if (!seenHistoryEventKeys.has(key)) {
-             seenHistoryEventKeys.add(key);
-             if (onEvent) onEvent('tool_start', {
-               tool: block.name || block.tool || 'tool',
-               params: block.arguments || block.input || {},
-               toolCallId: block.id || undefined,
-               runId: mainRunId || null,
-               source: 'history_poll',
-             });
-           }
-         }
-       }
        const textBlocks = content.filter(block => block?.type === 'text').map(block => block?.text || '').filter(Boolean);
        const thinkingBlocks = content.filter(block => block?.type === 'thinking').map(block => block?.text || '').filter(Boolean);
        if (textBlocks.length > 0) latestAssistantText = textBlocks.join('\n\n');
@@ -1723,34 +1732,16 @@ function extractPatchFilePaths(patchText = '') {
        latestAssistantText = content.trim();
      }
    }
-   if ((role === 'toolResult' || role === 'tool') && content) {
-     const resultText = Array.isArray(content)
-       ? content.filter(c => c?.type === 'text').map(c => c?.text || '').join('\n')
-       : typeof content === 'string' ? content : JSON.stringify(content).slice(0, 500);
-     const key = `tool_result:${m.toolCallId || m.tool_use_id || m.name || ts}`;
-     if (!seenHistoryEventKeys.has(key)) {
-       seenHistoryEventKeys.add(key);
-       if (onEvent) onEvent('tool_result', {
-         tool: m.toolName || m.name || 'unknown',
-         toolCallId: m.toolCallId || m.tool_use_id || undefined,
-         success: !m.isError && !m.is_error,
-         summary: resultText.slice(0, 500),
-         runId: mainRunId || null,
-         source: 'history_poll',
-       });
-     }
-   }
   }
-  const effectiveRunId = mainRunId || this._pendingRequests.get(id)?.runId || null;
   const visibleThinkingText = sanitizeVisibleAssistantText(latestThinkingText);
   if (visibleThinkingText && visibleThinkingText !== lastHistoryThinkingText) {
     lastHistoryThinkingText = visibleThinkingText;
-    if (onEvent) onEvent('thinking', { text: visibleThinkingText, runId: effectiveRunId, source: 'history_poll' });
+    if (onEvent) onEvent('thinking', { text: visibleThinkingText, runId: effectiveRunId, sessionKey, source: 'history_poll' });
   }
   const visibleAssistantText = sanitizeVisibleAssistantText(latestAssistantText);
   if (visibleAssistantText && visibleAssistantText !== lastHistoryAssistantText) {
     lastHistoryAssistantText = visibleAssistantText;
-    if (onEvent) onEvent('text', { text: visibleAssistantText, runId: effectiveRunId, source: 'history_poll' });
+    if (onEvent) onEvent('text', { text: visibleAssistantText, runId: effectiveRunId, sessionKey, source: 'history_poll' });
   }
  } catch (err) {
  console.warn('[OpenClaw] Live history poll failed:', err.message);
@@ -1805,8 +1796,9 @@ function extractPatchFilePaths(patchText = '') {
  console.warn(`[OpenClaw] Screenshot check failed: ${e.message}`);
  }
  }
- const formattedToolLog = toolLog.map(t => ({
+const formattedToolLog = toolLog.map(t => ({
  tool: t.tool,
+ toolCallId: t.toolCallId || undefined,
  skillName: t.skillName || undefined,
  params: t.params && Object.keys(t.params).length > 0 ? t.params : undefined,
  success: t.status !== 'failed',
@@ -1815,7 +1807,7 @@ function extractPatchFilePaths(patchText = '') {
  }));
 
  if (response) console.log(`[OpenClaw] Agent streaming response: ${response.length} chars (${toolLog.length} tool calls)`);
- return { response, toolLog: formattedToolLog };
+ return { response, toolLog: formattedToolLog, runId: mainRunId || null, sessionKey };
  } finally {
  if (historyPoller) clearInterval(historyPoller);
  if (subagentDrainTimer) clearTimeout(subagentDrainTimer);
@@ -2608,7 +2600,7 @@ async function handleIncomingTaskStream(req, res) {
  const isTaskWork = !!(context?.taskId);
  const inactivityMs = isTaskWork ? 600000 : 180000;
 
- let response, toolLog;
+ let response, toolLog, gatewayRunId, resolvedSessionKey;
  const streamingCallback = (event, data) => {
  // Forward each event to SSE as it arrives
  sendSSE(event, data);
@@ -2678,7 +2670,7 @@ async function handleIncomingTaskStream(req, res) {
   }
  }
  };
- ({ response, toolLog } = await gateway.runAgentStreaming(fullTask, {
+ ({ response, toolLog, runId: gatewayRunId, sessionKey: resolvedSessionKey } = await gateway.runAgentStreaming(fullTask, {
  agentId, agentName: agentName || 'default', sessionKey,
  thinking: thinking || undefined,
  model: model || undefined,
@@ -2727,13 +2719,15 @@ async function handleIncomingTaskStream(req, res) {
  recordRun();
  captureLog('info', `Run completed: ${agentName || 'default'} (${(responseText || '').length} chars)`, { requestId: id, agent: agentName, model });
 
- sendSSE('done', {
- requestId: id, agentId,
- result: responseText,
- toolLog: toolLog.length > 0 ? toolLog : undefined,
- usage: { input_tokens: estimatedInputTokens + toolOverhead, output_tokens: estimatedOutputTokens, estimated: true },
- desktopRecordingUrl: desktopRecordingUrl || undefined,
- });
+sendSSE('done', {
+requestId: id, agentId,
+result: responseText,
+toolLog: toolLog.length > 0 ? toolLog : undefined,
+usage: { input_tokens: estimatedInputTokens + toolOverhead, output_tokens: estimatedOutputTokens, estimated: true },
+ runId: gatewayRunId || undefined,
+ sessionKey: resolvedSessionKey || sessionKey,
+desktopRecordingUrl: desktopRecordingUrl || undefined,
+});
 
  // Post-completion: fetch real tool history from gateway session transcript
  // This gives us exec commands, Read/Write calls, browser actions etc.
@@ -2775,49 +2769,18 @@ async function handleIncomingTaskStream(req, res) {
     console.log(`[Post-completion] msg[${i}]: role=${m?.message?.role || m?.role} keys=${JSON.stringify(Object.keys(m?.message || m || {}))}`);
    }
 
-   // Extract tool calls from history (toolCall + toolResult pairs)
-   // Support both OpenClaw native format AND Anthropic format
-   const toolHistory = [];
-   for (const msg of historyMessages) {
-    const m = msg?.message || msg;
-    const content = m?.content;
-    const role = m?.role;
-    if (role === 'assistant' && Array.isArray(content)) {
-     for (const block of content) {
-      if (block.type === 'toolCall' || block.type === 'tool_use') {
-       toolHistory.push({
-        event: 'tool_start',
-        data: { tool: block.name, params: block.arguments || block.input || {}, toolCallId: block.id },
-        time: new Date(msg.timestamp || m.timestamp).getTime() || Date.now(),
-       });
-      }
-     }
-    }
-    if ((role === 'toolResult' || role === 'tool') && content) {
-     const resultText = Array.isArray(content)
-      ? content.filter(c => c.type === 'text').map(c => c.text).join('\n')
-      : typeof content === 'string' ? content : JSON.stringify(content).slice(0, 500);
-     toolHistory.push({
-      event: 'tool_result',
-      data: {
-       tool: m.toolName || m.name || 'unknown',
-       toolCallId: m.toolCallId || m.tool_use_id,
-       success: !m.isError && !m.is_error,
-       summary: resultText.slice(0, 500),
-       details: m.details || undefined,
-      },
-      time: new Date(msg.timestamp || m.timestamp).getTime() || Date.now(),
-     });
-    }
-   }
-   // Filter to only tool events from THIS run (after requestStartedAt - 5s buffer)
    const runCutoff = requestStartedAt - 5000;
-   const recentTools = toolHistory.filter(e => (e.time || 0) >= runCutoff);
+   const allHistoryTools = extractHistoryToolEvents(historyMessages, {
+    runId: gatewayRunId || null,
+    sessionKey: resolvedSessionKey || sessionKey,
+    source: 'history_replay',
+   });
+   const recentTools = allHistoryTools.filter((event) => (event.time || 0) >= runCutoff);
    if (recentTools.length > 0) {
-    console.log(`[OpenClaw] Post-completion: ${recentTools.length} tool events for this run (${toolHistory.length} total in session)`);
-    sendSSE('tool_history', { requestId: id, agentId, events: recentTools });
-   } else if (toolHistory.length > 0) {
-    console.log(`[Post-completion] ${toolHistory.length} tool events in session but none from this run (cutoff=${new Date(runCutoff).toISOString()})`);
+    console.log(`[OpenClaw] Post-completion: ${recentTools.length} tool events for this run (${allHistoryTools.length} total in session)`);
+    sendSSE('tool_history', { requestId: id, agentId, runId: gatewayRunId || undefined, sessionKey: resolvedSessionKey || sessionKey, events: recentTools });
+   } else if (allHistoryTools.length > 0) {
+    console.log(`[Post-completion] ${allHistoryTools.length} tool events in session but none from this run (cutoff=${new Date(runCutoff).toISOString()})`);
    } else {
     console.log(`[Post-completion] No tool events found in ${historyMessages.length} history messages`);
    }
