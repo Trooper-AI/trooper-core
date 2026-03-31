@@ -2083,7 +2083,7 @@ Environment=BRIDGE_AUTH_TOKEN=${BRIDGE_AUTH_TOKEN}
 Environment=OPENCLAW_URL=http://127.0.0.1:${GATEWAY_PORT}
 Environment=OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
 Environment=OPENCLAW_HOOK_TOKEN=oc-hook-${HOOK_TOKEN}
-Environment=MISSION_CONTROL_URL=https://control-center-bot.onrender.com
+Environment=MISSION_CONTROL_URL=https://crabs-hq-production.up.railway.app
 Environment=ORG_ID=${ORG_ID}
 Environment=NODE_ENV=production
 Environment=BROWSERBASE_API_KEY=${BROWSERBASE_API_KEY}
@@ -2132,7 +2132,7 @@ BRIDGE_PORT=${BRIDGE_PORT}
 OPENCLAW_GATEWAY_URL=http://127.0.0.1:${GATEWAY_PORT}
 OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
 OPENCLAW_HOOK_TOKEN=oc-hook-${HOOK_TOKEN}
-PLATFORM_API_URL=https://control-center-bot.onrender.com
+PLATFORM_API_URL=https://crabs-hq-production.up.railway.app
 FRONTEND_URL=https://crabhq.netlify.app
 COMPOSIO_API_KEY=${COMPOSIO_API_KEY}
 CSENV
