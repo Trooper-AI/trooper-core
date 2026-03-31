@@ -1146,6 +1146,32 @@ class OpenClawGateway {
  const activeSubAgents = new Map(); // runId → { name, task, startedAt, parentRunId, depth }
  let pendingSubAgentSpawn = null; // set when sessions_spawn tool_use is seen, consumed when new runId appears
  let pendingSpawnRunId = null; // which runId initiated the sessions_spawn
+ let subagentDrainResolve = null;
+ let subagentDrainTimer = null;
+ const subagentDrainQuietMs = Math.max(30000, Math.min(timeoutMs, 180000));
+ const resetSubagentDrainWait = () => {
+ if (!subagentDrainResolve) return;
+ if (!pendingSubAgentSpawn && activeSubAgents.size === 0) {
+ const resolve = subagentDrainResolve;
+ subagentDrainResolve = null;
+ if (subagentDrainTimer) {
+ clearTimeout(subagentDrainTimer);
+ subagentDrainTimer = null;
+ }
+ resolve();
+ return;
+ }
+ if (subagentDrainTimer) clearTimeout(subagentDrainTimer);
+ subagentDrainTimer = setTimeout(() => {
+ const remaining = activeSubAgents.size;
+ const pending = pendingSubAgentSpawn ? 1 : 0;
+ console.warn(`[OpenClaw] Sub-agent drain timed out after ${Math.round(subagentDrainQuietMs / 1000)}s of waiting (${remaining} active, ${pending} pending spawn)`);
+ const resolve = subagentDrainResolve;
+ subagentDrainResolve = null;
+ subagentDrainTimer = null;
+ if (resolve) resolve();
+ }, subagentDrainQuietMs);
+ };
 
  // Debug logging: capture recent raw events for troubleshooting
  const _debugEvents = [];
@@ -1183,12 +1209,14 @@ class OpenClawGateway {
  activeSubAgents.set(runId, { ...info, startedAt: Date.now(), toolCount: 0, parentRunId, depth: parentDepth + 1 });
  pendingSubAgentSpawn = null;
  pendingSpawnRunId = null;
+ resetSubagentDrainWait();
  if (onEvent) onEvent('subagent_start', { subAgentRunId: runId, parentRunId, depth: parentDepth + 1, name: info.name, task: info.task });
  }
 
  // Forward sub-agent events with subAgent tagging (includes parent/depth for tree rendering)
  if (isSubAgent) {
  const subInfo = activeSubAgents.get(runId) || { name: 'Sub-agent', parentRunId: mainRunId, depth: 1 };
+ resetSubagentDrainWait();
  if (stream === 'tool_use' && data) {
  subInfo.toolCount = (subInfo.toolCount || 0) + 1;
  const subToolName = data.name || data.tool || 'unknown';
@@ -1231,6 +1259,7 @@ class OpenClawGateway {
  toolCount: subInfo.toolCount || 0,
  });
  activeSubAgents.delete(runId);
+ resetSubagentDrainWait();
  } else if (stream === 'task_completion' && data) {
  // New v2026.3.1: typed task_completion event from gateway
  console.log(`[SUBAGENT:task_completion] ${subInfo.name} (runId=${runId}) task=${data.status || 'done'}`);
@@ -1245,6 +1274,7 @@ class OpenClawGateway {
  toolCount: subInfo.toolCount || 0,
  });
  activeSubAgents.delete(runId);
+ resetSubagentDrainWait();
  }
  return; // Don't process sub-agent events as main agent events
  }
@@ -1448,6 +1478,7 @@ function extractPatchFilePaths(patchText = '') {
  task: params.task || params.prompt || params.message || params.description || '',
  };
  pendingSpawnRunId = runId; // Track which runId initiated this spawn for parent→child tree
+ resetSubagentDrainWait();
  }
  // Detect ACP agent spawn via tool name or exec command
  if (toolLower === 'acp_spawn' || toolLower === 'acp' ||
@@ -1486,6 +1517,9 @@ function extractPatchFilePaths(patchText = '') {
  if (onEvent) onEvent('subagent_done', { subAgentRunId: subRunId, parentRunId: subInfo.parentRunId, depth: subInfo.depth, subAgentName: subInfo.name, summary: last?.summary || '' });
  }
  activeSubAgents.clear();
+ pendingSubAgentSpawn = null;
+ pendingSpawnRunId = null;
+ resetSubagentDrainWait();
  }
  if (onEvent) onEvent('tool_result', {
  tool: last?.tool || 'unknown',
@@ -1671,6 +1705,14 @@ function extractPatchFilePaths(patchText = '') {
  }, 2500);
  });
 
+ if (pendingSubAgentSpawn || activeSubAgents.size > 0) {
+ console.log(`[OpenClaw] Main agent response finished but ${activeSubAgents.size} sub-agent(s) are still active${pendingSubAgentSpawn ? ' (pending spawn detected)' : ''}; keeping stream open for child activity`);
+ await new Promise((resolve) => {
+ subagentDrainResolve = resolve;
+ resetSubagentDrainWait();
+ });
+ }
+
  const resultText = result?.result?.payloads?.map(p => p.text).filter(Boolean).join('\n\n');
  console.log(`[OpenClaw:DBG] final result keys:`, JSON.stringify(Object.keys(result?.result || {})));
  console.log(`[OpenClaw:DBG] payloads sample:`, JSON.stringify((result?.result?.payloads || []).slice(0,5).map(p => Object.keys(p))));
@@ -1715,6 +1757,7 @@ function extractPatchFilePaths(patchText = '') {
  return { response, toolLog: formattedToolLog };
  } finally {
  if (historyPoller) clearInterval(historyPoller);
+ if (subagentDrainTimer) clearTimeout(subagentDrainTimer);
  // Clean up session listener and event listeners
  this._activeSessionListener = null;
  const listener = this._eventListeners.get(idempotencyKey);
