@@ -11,10 +11,12 @@ process.on('unhandledRejection', (err) => {
 import { captureLog, recordRun, getLogs, getStats } from './lib/log-buffer.mjs';
 import express from 'express';
 import {
+  BRIDGE_EVENT_PAYLOAD_VERSION,
   buildBrowserSessionEndPayload,
   buildBrowserSessionPayload,
   buildScreenshotFramePayload,
   extractHistoryToolEvents,
+  normalizeBridgeEventPayload,
   normalizeToolEventPayload,
 } from './lib/event-contracts.mjs';
 import { ensureXvnc } from './lib/xvnc.mjs';
@@ -1130,6 +1132,24 @@ class OpenClawGateway {
  const timeoutMs = opts.timeoutMs || 180000;
  const runStartedAt = Date.now();
  const _projectFolder = opts.projectFolder || null;
+ let bridgeEventSequence = 0;
+ const rawOnEvent = onEvent;
+ onEvent = rawOnEvent
+   ? (eventName, payload = {}, overrides = {}) => {
+     const normalized = normalizeBridgeEventPayload(eventName, payload, {
+       sessionKey: overrides.sessionKey ?? payload?.sessionKey ?? sessionKey,
+       runId: overrides.runId ?? payload?.runId ?? payload?.subAgentRunId ?? null,
+       source: overrides.source ?? payload?.source ?? 'live_stream',
+       sequence: overrides.sequence ?? bridgeEventSequence++,
+       time: overrides.time ?? payload?.time ?? Date.now(),
+       parentSessionKey: overrides.parentSessionKey ?? payload?.parentSessionKey ?? null,
+       parentRunId: overrides.parentRunId ?? payload?.parentRunId ?? null,
+       childSessionKey: overrides.childSessionKey ?? payload?.childSessionKey ?? null,
+       childRunId: overrides.childRunId ?? payload?.childRunId ?? payload?.subAgentRunId ?? null,
+     });
+     rawOnEvent(eventName, normalized);
+   }
+   : null;
 
  const textChunks = [];
  let lastToolTextSnapshot = ''; // text snapshot at last tool boundary
@@ -2545,16 +2565,30 @@ async function handleIncomingTaskStream(req, res) {
  'X-Accel-Buffering': 'no',
  });
 
+ let sseSequence = 0;
  const sendSSE = (event, data) => {
  if (res.writableEnded) return;
- res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+ const payload = data?.payloadVersion
+   ? data
+   : normalizeBridgeEventPayload(event, data, {
+       sessionKey: data?.sessionKey || sessionKey || null,
+       runId: data?.runId || null,
+       source: data?.source || 'sse_stream',
+       sequence: sseSequence++,
+       time: data?.time || Date.now(),
+       parentSessionKey: data?.parentSessionKey || null,
+       parentRunId: data?.parentRunId || null,
+       childSessionKey: data?.childSessionKey || null,
+       childRunId: data?.childRunId || data?.subAgentRunId || null,
+     });
+ res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
  // Debug: log every SSE event sent to CrabsHQ
- const dataStr = JSON.stringify(data).substring(0, 150);
+ const dataStr = JSON.stringify(payload).substring(0, 150);
  if (event !== 'text' && event !== 'typing_keepalive') {
   logDebugEvent('sse_to_crabhq', { event, data: dataStr });
   console.log(`[SSE→CrabsHQ] event=${event} data=${dataStr}`);
  } else if (event === 'text') {
-  logDebugEvent('sse_to_crabhq', { event, chars: data?.text?.length || 0 });
+  logDebugEvent('sse_to_crabhq', { event, chars: payload?.text?.length || 0 });
  }
  };
 
