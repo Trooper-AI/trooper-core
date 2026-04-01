@@ -45,7 +45,7 @@ import { messages as messagesTable, agents as agentsTable, humans as humansTable
 import { eq, desc } from 'drizzle-orm';
 import { registerApiRoutes } from './lib/api-routes.mjs';
 import { createSSESender } from './lib/sse-stream.mjs';
-import { buildWorkspaceIdentityFiles, normalizeAgentProfile } from './lib/runtime-identity.mjs';
+import { buildExecutionLanePromptBlock, buildWorkspaceIdentityFiles, normalizeAgentProfile } from './lib/runtime-identity.mjs';
 
 // Build a human-readable summary for a completed tool call
 // Used for native tool_use/tool_result events from gateway
@@ -2555,6 +2555,13 @@ async function handleIncomingTask(req, res) {
  console.log(`[${id}] Routing to OpenClaw agent:${agentId} via WebSocket for ${agentName || 'default'} (session: ${sessionKey})${isTaskWork ? ' [TASK]' : ''}...`);
  // Build system prompt with project folder enforcement
  let nonStreamSystemPrompt = registered?.soul ? `You are ${registered.name || "Agent"}, a ${registered.title || "Specialist"}. ${registered.soul}` : (systemPrompt || undefined);
+ const nonStreamLanePrompt = buildExecutionLanePromptBlock({
+ executionLane: context?.executionLane,
+ browserTask: context?.browserTask === true,
+ });
+ if (nonStreamLanePrompt) {
+ nonStreamSystemPrompt = nonStreamSystemPrompt ? `${nonStreamSystemPrompt}\n\n${nonStreamLanePrompt}` : nonStreamLanePrompt;
+ }
  const nonStreamProjectFolder = context?.projectFolder;
  if (nonStreamProjectFolder) {
  const wsBase = '/home/node/.openclaw/workspace';
@@ -2688,15 +2695,16 @@ async function handleIncomingTaskStream(req, res) {
 
  let screenshotPollerInterval = null;
 
- // If this is a browser task (flagged by CrabsHQ), add a browser-focused system prompt
- // to ensure the agent uses the browser tool even if the task description is ambiguous
  const isBrowserTask = context?.browserTask === true;
  let resolvedSystemPrompt = registered?.soul
    ? `You are ${registered.name || "Agent"}, a ${registered.title || "Specialist"}. ${registered.soul}`
    : (systemPrompt || undefined);
- if (isBrowserTask && !registered) {
- const browserHint = 'You have a browser tool available. Use it to complete this task. Navigate to URLs, interact with pages, take screenshots, and report results. Use DuckDuckGo instead of Google for web searches (Google blocks automated browsers).';
- resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${browserHint}` : browserHint;
+ const executionLanePrompt = buildExecutionLanePromptBlock({
+ executionLane: context?.executionLane,
+ browserTask: isBrowserTask,
+ });
+ if (executionLanePrompt) {
+ resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${executionLanePrompt}` : executionLanePrompt;
  }
 
  // ── Project folder enforcement ──
@@ -2711,7 +2719,7 @@ async function handleIncomingTaskStream(req, res) {
  }
 
  try {
- console.log(`[${id}] SSE streaming to OpenClaw agent:${agentId} for ${agentName || 'default'}${isBrowserTask ? ' [browser task]' : ''}...`);
+ console.log(`[${id}] SSE streaming to OpenClaw agent:${agentId} for ${agentName || 'default'}${context?.executionLane ? ` [lane:${context.executionLane}]` : isBrowserTask ? ' [browser task]' : ''}...`);
  // Task work needs longer inactivity timeout — gateway agents do internal tool work
  // that emits WS events. 600s for tasks, 180s for chat.
  const isTaskWork = !!(context?.taskId);
