@@ -352,7 +352,7 @@ function startDesktopRecording() { return startRecording(':1'); }
 function stopDesktopRecording() { return stopRecording(':1'); }
 
 // ── Skill-Reported Browser Sessions ──────────────────────────────────
-// Skills (e.g. browserbase, browserbase-sessions from ClawHub) report their
+// Skills (e.g. browserbase, browserbase-sessions from the skills ecosystem) report their
 // live view URLs here so the bridge can forward them to the frontend.
 // This replaces the old hardcoded Browserbase CDP proxy + session management.
 let skillBrowserSession = null; // { liveViewUrl, sessionId, provider, reportedAt }
@@ -4704,17 +4704,47 @@ app.get('/skills/stats', (req, res) => {
  });
 });
 
-// ── Skill Install/Uninstall (via clawhub inside Docker) ──────────────
+// ── Skill Install/Uninstall (via skills CLI inside Docker) ───────────
+
+function parseSkillsMarketplaceSlug(slug) {
+ const value = String(slug || '').trim();
+ const atIndex = value.lastIndexOf('@');
+ if (atIndex > 0) {
+   const sourceRepo = value.slice(0, atIndex).trim();
+   const skillId = value.slice(atIndex + 1).trim();
+   if (sourceRepo.includes('/') && skillId) {
+     return { sourceRepo, skillId, slug: `${sourceRepo}@${skillId}` };
+   }
+ }
+ const skillId = value.includes('/') ? value.split('/').pop() : value;
+ return { sourceRepo: null, skillId, slug: value };
+}
+
+function buildSkillsMarketplaceSlug(sourceRepo, skillId) {
+ return sourceRepo ? `${sourceRepo}@${skillId}` : skillId;
+}
+
+function shellQuote(value) {
+ return JSON.stringify(String(value));
+}
 
 app.post('/skills/:slug/install', async (req, res) => {
  const slug = req.params.slug;
  if (!slug) return res.status(400).json({ error: 'Skill slug required' });
 
  try {
- console.log(`📦 Installing skill "${slug}" via clawhub...`);
+ const parsed = parseSkillsMarketplaceSlug(slug);
+ const sourceRepo = req.body?.sourceRepo || parsed.sourceRepo;
+ const skillId = req.body?.skillId || parsed.skillId;
+ if (!sourceRepo || !skillId) {
+   return res.status(400).json({ error: 'skills.sh installs require sourceRepo and skillId' });
+ }
+ console.log(`📦 Installing skill "${slug}" via skills.sh...`);
+ const repoUrl = `https://github.com/${sourceRepo}`;
+ const innerCommand = `cd /home/node/.openclaw && npx skills add ${shellQuote(repoUrl)} --skill ${shellQuote(skillId)} -y 2>&1`;
  const output = execSync(
- `docker exec openclaw-openclaw-gateway-1 bash -c 'cd /home/node/.openclaw && npx clawhub install ${slug} --force 2>&1'`,
- { timeout: 60000 }
+ `docker exec openclaw-openclaw-gateway-1 bash -lc ${shellQuote(innerCommand)}`,
+ { timeout: 120000 }
  ).toString();
  console.log(`✅ Skill "${slug}" installed: ${output.trim().split('\n').pop()}`);
 
@@ -4734,15 +4764,18 @@ app.delete('/skills/:slug', async (req, res) => {
  if (!slug) return res.status(400).json({ error: 'Skill slug required' });
 
  try {
- console.log(`🗑️ Uninstalling skill "${slug}" via clawhub...`);
+ const { skillId } = parseSkillsMarketplaceSlug(slug);
+ console.log(`🗑️ Uninstalling skill "${slug}" via skills.sh...`);
+ const innerCommand = `cd /home/node/.openclaw && npx skills remove ${shellQuote(skillId)} -y 2>&1`;
  const output = execSync(
- `docker exec openclaw-openclaw-gateway-1 bash -c 'cd /home/node/.openclaw && npx clawhub uninstall ${slug} 2>&1'`,
+ `docker exec openclaw-openclaw-gateway-1 bash -lc ${shellQuote(innerCommand)}`,
  { timeout: 30000 }
  ).toString();
  console.log(`✅ Skill "${slug}" uninstalled`);
 
  // Also remove from local registry if present
  skillRegistry.delete(slug);
+ skillRegistry.delete(skillId);
 
  try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1', { timeout: 5000 }); } catch {}
 
@@ -4759,10 +4792,18 @@ app.get('/skills/installed', (req, res) => {
  try {
  const skills = [];
  const seen = new Set();
+ const lockPath = '/home/node/.openclaw/skills-lock.json';
+ let lock = { skills: {} };
+ try {
+   if (existsSync(lockPath)) {
+     lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+   }
+ } catch {}
  // Scan all skill directories: workspace, managed, bundled
  const skillDirs = [
    '/opt/openclaw-data/workspace/skills',                    // workspace skills
-   '/home/node/.openclaw/skills',                             // managed skills (clawhub install)
+   '/home/node/.openclaw/skills',                             // managed/project skills (skills.sh install)
+   '/home/node/.openclaw/.agents/skills',                     // universal agent skills
  ];
  // Also try to find bundled skills from the OpenClaw package
  try {
@@ -4775,36 +4816,39 @@ app.get('/skills/installed', (req, res) => {
      const dirs = readdirSync(skillsDir);
      for (const dir of dirs) {
        if (seen.has(dir)) continue;
-       try {
-         const skillMd = readFileSync(`${skillsDir}/${dir}/SKILL.md`, 'utf8');
-         const nameMatch = skillMd.match(/^#\s+(.+)/m);
-         const descMatch = skillMd.match(/^(?:>|description:)\s*(.+)/mi);
-         const summaryMatch = skillMd.match(/^summary:\s*["']?(.+?)["']?\s*$/m);
-         seen.add(dir);
-         skills.push({
-           slug: dir,
-           name: nameMatch ? nameMatch[1].trim() : dir,
-           description: summaryMatch ? summaryMatch[1].trim() : (descMatch ? descMatch[1].trim() : ''),
-           installed: true,
-           source: skillsDir.includes('workspace') ? 'workspace' : skillsDir.includes('managed') ? 'managed' : 'bundled',
-         });
-       } catch {}
+     try {
+       const skillMd = readFileSync(`${skillsDir}/${dir}/SKILL.md`, 'utf8');
+       const nameMatch = skillMd.match(/^#\s+(.+)/m);
+       const descMatch = skillMd.match(/^(?:>|description:)\s*(.+)/mi);
+       const summaryMatch = skillMd.match(/^summary:\s*["']?(.+?)["']?\s*$/m);
+       const lockEntry = lock.skills?.[dir] || null;
+       const sourceRepo = lockEntry?.source || null;
+       const slug = buildSkillsMarketplaceSlug(sourceRepo, dir);
+        seen.add(dir);
+        skills.push({
+          slug,
+          skillId: dir,
+          sourceRepo,
+          name: nameMatch ? nameMatch[1].trim() : dir,
+          description: summaryMatch ? summaryMatch[1].trim() : (descMatch ? descMatch[1].trim() : ''),
+          installed: true,
+          source: sourceRepo
+            ? 'skills.sh'
+            : skillsDir.includes('workspace')
+            ? 'workspace'
+            : (skillsDir.includes('/.openclaw/skills') || skillsDir.includes('/.agents/skills'))
+            ? 'managed'
+            : 'bundled',
+          repository: sourceRepo ? `https://github.com/${sourceRepo}` : null,
+          repo: sourceRepo ? `https://github.com/${sourceRepo}` : null,
+          pageUrl: sourceRepo ? `https://skills.sh/${sourceRepo}/${dir}` : null,
+          sourceUrl: sourceRepo ? `https://skills.sh/${sourceRepo}/${dir}` : null,
+          installCommand: sourceRepo ? `npx skills add https://github.com/${sourceRepo} --skill ${dir}` : null,
+        });
+      } catch {}
      }
    } catch {}
  }
- // Also get available (not installed) skills from clawhub CLI if available
- try {
-   const out = execSync('docker exec openclaw-openclaw-gateway-1 bash -c "cd /home/node/.openclaw && npx clawhub@latest list --json 2>/dev/null || true"', { timeout: 15000 }).toString().trim();
-   if (out && out.startsWith('[')) {
-     const available = JSON.parse(out);
-     for (const s of available) {
-       if (s.slug && !seen.has(s.slug)) {
-         seen.add(s.slug);
-         skills.push({ slug: s.slug, name: s.displayName || s.name || s.slug, description: s.summary || s.description || '', installed: false, source: 'clawhub' });
-       }
-     }
-   }
- } catch {}
  res.json({ skills, total: skills.length });
  } catch (err) {
  res.status(500).json({ error: err.message });
