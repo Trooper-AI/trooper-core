@@ -53,6 +53,8 @@ import {
   stripGatewayErrorPrefix,
 } from './lib/provider-runtime.mjs';
 
+const OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write', 'operator.pairing', 'operator.approvals'];
+
 // Build a human-readable summary for a completed tool call
 // Used for native tool_use/tool_result events from gateway
 // ── SPC AGENTS.md Template ──────────────────────────────────────────
@@ -220,6 +222,34 @@ function buildToolSummary(tool, params, skillName, rawText) {
    }
    return `Completed ${tool || 'task'}`;
  }
+}
+
+function buildExecApprovalRecord(payload = {}) {
+  const request = payload?.request || {};
+  const plan = request?.systemRunPlan || {};
+  const binding = request?.systemRunBinding || {};
+  const commandArgv = Array.isArray(request?.commandArgv) ? request.commandArgv : [];
+  const commandPreview = request?.commandPreview || request?.command || (commandArgv.length ? commandArgv.join(' ') : '');
+  return {
+    id: payload?.id || null,
+    createdAtMs: Number(payload?.createdAtMs || Date.now()),
+    expiresAtMs: Number(payload?.expiresAtMs || 0) || null,
+    request: {
+      ...request,
+      commandPreview,
+      commandArgv,
+    },
+    commandPreview,
+    command: request?.command || commandPreview || '',
+    host: request?.host || binding?.host || null,
+    agentId: request?.agentId || null,
+    sessionKey: request?.sessionKey || null,
+    cwd: request?.cwd || binding?.cwd || null,
+    resolvedPath: request?.resolvedPath || plan?.resolvedPath || null,
+    security: request?.security || plan?.security || null,
+    ask: request?.ask || plan?.ask || null,
+    nodeId: request?.nodeId || plan?.nodeId || null,
+  };
 }
 
 // Browser tool names that trigger live screenshot streaming
@@ -616,7 +646,7 @@ class OpenClawGateway {
  existing[deviceIdentity.deviceId] = {
  deviceId: deviceIdentity.deviceId, publicKey: pubKey,
  displayName: 'CrabsHQ Bridge', platform: 'linux',
- role: 'operator', roles: ['operator'], scopes: ['operator.admin', 'operator.read', 'operator.write', 'operator.pairing'],
+ role: 'operator', roles: ['operator'], scopes: OPERATOR_SCOPES,
  clientId: 'gateway-client', clientMode: 'backend',
  approvedAt: Date.now(), approved: true, ts: Date.now(),
  };
@@ -754,7 +784,7 @@ class OpenClawGateway {
  });
 
  const role = 'operator';
- const scopes = ['operator.admin', 'operator.read', 'operator.write', 'operator.pairing'];
+ const scopes = OPERATOR_SCOPES;
  const signedAtMs = Date.now();
  const nonce = this._connectNonce || undefined;
 
@@ -862,7 +892,7 @@ class OpenClawGateway {
  platform: 'linux',
  role: 'operator',
  roles: ['operator'],
- scopes: ['operator.admin', 'operator.read', 'operator.write', 'operator.pairing'],
+ scopes: OPERATOR_SCOPES,
  clientId: 'gateway-client',
  clientMode: 'backend',
  approvedAt: Date.now(),
@@ -934,6 +964,40 @@ class OpenClawGateway {
 
  pending.resolve(frame.payload);
  this._pendingRequests.delete(frame.id);
+ } else if (frame.type === 'event' && frame.event === 'exec.approval.requested') {
+ const approval = buildExecApprovalRecord(frame.payload || {});
+ if (approval?.id) {
+   execApprovalRegistry.set(approval.id, approval);
+   console.log(`[OpenClaw] Exec approval requested (${approval.id.slice(0, 8)}) ${approval.commandPreview || approval.command || ''}`);
+   captureLog('warn', `Exec approval requested: ${approval.commandPreview || approval.command || approval.id}`, {
+     approvalId: approval.id,
+     agentId: approval.agentId,
+     sessionKey: approval.sessionKey,
+     cwd: approval.cwd,
+     host: approval.host,
+   });
+   bridgeWS.broadcast('exec:approval_requested', {
+     approval,
+     pendingCount: execApprovalRegistry.size,
+     time: Date.now(),
+   });
+ }
+ } else if (frame.type === 'event' && frame.event === 'exec.approval.resolved') {
+ const payload = frame.payload || {};
+ const resolvedApproval = buildExecApprovalRecord({
+   ...(execApprovalRegistry.get(payload?.id) || {}),
+   ...payload,
+ });
+ if (payload?.id) execApprovalRegistry.delete(payload.id);
+ console.log(`[OpenClaw] Exec approval resolved (${payload?.id?.slice?.(0, 8) || 'unknown'}) decision=${payload?.decision || 'unknown'}`);
+ bridgeWS.broadcast('exec:approval_resolved', {
+   approvalId: payload?.id || null,
+   decision: payload?.decision || null,
+   resolvedAtMs: payload?.ts || Date.now(),
+   approval: resolvedApproval,
+   pendingCount: execApprovalRegistry.size,
+   time: Date.now(),
+ });
  } else if (frame.type === 'event' && frame.event === 'agent') {
  const { runId, stream, data } = frame.payload || {};
  // Log ALL stream types including tool events for debugging
@@ -1143,6 +1207,37 @@ class OpenClawGateway {
     this.ws.send(JSON.stringify({
      type: 'req', id, method: 'chat.abort',
      params: { sessionKey },
+    }));
+   });
+   return result || { ok: true };
+  } finally {
+   this._pendingRequests.delete(id);
+  }
+ }
+
+ async resolveExecApproval(approvalId, decision) {
+  if (!approvalId) throw new Error('approvalId is required');
+  if (!decision) throw new Error('decision is required');
+  if (!this.connected) {
+   const ok = await this.connect();
+   if (!ok) throw new Error('Cannot connect to OpenClaw gateway');
+  }
+  const id = randomUUID();
+  try {
+   const result = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+     this._pendingRequests.delete(id);
+     reject(new Error('Exec approval resolve timeout'));
+    }, 10000);
+    this._pendingRequests.set(id, {
+     resolve: (payload) => { clearTimeout(timeout); resolve(payload); },
+     reject: (err) => { clearTimeout(timeout); reject(err); },
+    });
+    this.ws.send(JSON.stringify({
+     type: 'req',
+     id,
+     method: 'exec.approval.resolve',
+     params: { id: approvalId, decision },
     }));
    });
    return result || { ok: true };
@@ -1969,6 +2064,7 @@ async function forwardToMissionControl(taskId, agentName, result, requestId) {
 
 // ── ACP Session Registry (tracks active ACP agent sessions) ─────────
 const acpSessionRegistry = new Map(); // sessionId -> { agent, sessionKey, status, spawnedAt, lastActivity, permissions, output }
+const execApprovalRegistry = new Map(); // approvalId -> { id, createdAtMs, expiresAtMs, request, ...derivedFields }
 
 // Garbage-collect stale ACP sessions every 60 seconds
 setInterval(() => {
@@ -4969,7 +5065,7 @@ app.post('/gateway/patch-auth', (req, res) => {
  try { paired = JSON.parse(readFileSync(PAIRED_PATH, 'utf8')); } catch {}
  if (!paired[deviceIdentity.deviceId]) {
  const pubKey = getDevicePublicKeyBase64Url(deviceIdentity);
- paired[deviceIdentity.deviceId] = { deviceId: deviceIdentity.deviceId, publicKey: pubKey, displayName: 'CrabsHQ Bridge', platform: 'linux', role: 'operator', roles: ['operator'], scopes: ['operator.admin', 'operator.read', 'operator.write', 'operator.pairing'], clientId: 'gateway-client', clientMode: 'backend', approvedAt: Date.now(), approved: true, ts: Date.now() };
+ paired[deviceIdentity.deviceId] = { deviceId: deviceIdentity.deviceId, publicKey: pubKey, displayName: 'CrabsHQ Bridge', platform: 'linux', role: 'operator', roles: ['operator'], scopes: OPERATOR_SCOPES, clientId: 'gateway-client', clientMode: 'backend', approvedAt: Date.now(), approved: true, ts: Date.now() };
  writeFileSync(PAIRED_PATH, JSON.stringify(paired, null, 2));
  execSync('chown -R 1000:1000 ' + DEVICES_DIR + ' 2>/dev/null || true', { timeout: 5000 });
  console.log('[bridge] Added device to paired.json');
@@ -5921,6 +6017,40 @@ app.put('/acp/sessions/:sessionId/permissions', async (req, res) => {
  } catch (e) {
  res.status(500).json({ error: e.message });
  }
+});
+
+app.get('/exec-approvals', async (_req, res) => {
+  const now = Date.now();
+  const approvals = Array.from(execApprovalRegistry.values())
+    .filter((entry) => !entry?.expiresAtMs || entry.expiresAtMs > now)
+    .sort((left, right) => Number(left?.createdAtMs || 0) - Number(right?.createdAtMs || 0));
+  res.json({ approvals, pendingCount: approvals.length });
+});
+
+app.post('/exec-approvals/:approvalId/resolve', async (req, res) => {
+  try {
+    const approvalId = String(req.params.approvalId || '').trim();
+    const decision = String(req.body?.decision || '').trim();
+    if (!approvalId) return res.status(400).json({ error: 'approvalId is required' });
+    if (!['allow-once', 'allow-always', 'deny'].includes(decision)) {
+      return res.status(400).json({ error: 'decision must be allow-once, allow-always, or deny' });
+    }
+    const result = await gateway.resolveExecApproval(approvalId, decision);
+    execApprovalRegistry.delete(approvalId);
+    const approvals = Array.from(execApprovalRegistry.values())
+      .filter((entry) => !entry?.expiresAtMs || entry.expiresAtMs > Date.now())
+      .sort((left, right) => Number(left?.createdAtMs || 0) - Number(right?.createdAtMs || 0));
+    res.json({
+      ok: true,
+      approvalId,
+      decision,
+      result,
+      approvals,
+      pendingCount: approvals.length,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // GET /acp/doctor — ACP diagnostics
