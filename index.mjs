@@ -37,11 +37,11 @@ import path from 'path';
 const { dirname } = path;
 import WebSocket from 'ws';
 import { createServer } from 'http';
-import { initFirebaseAuth } from './lib/firebase-auth.mjs';
+import { initFirebaseAuth, firebaseRestAuth } from './lib/firebase-auth.mjs';
 import { BridgeWSServer } from './lib/ws-server.mjs';
 import { handleChatMessage, getRecentMessages } from './lib/chat-handler.mjs';
 import { createTask, getTask, listTasks, updateTask, deleteTask, addComment, addSubtask, toggleSubtask, deleteSubtask, executeTaskWork, checkoutTask, releaseTask, createProject, listProjects, updateProject, createGoal, listGoals } from './lib/task-handler.mjs';
-import { messages as messagesTable, agents as agentsTable, humans as humansTable, contexts as contextsTable, conversations as conversationsTable, activities as activitiesTable, notifications as notificationsTable, skills as skillsTable, rules as rulesTable, playbooks as playbooksTable, policies as policiesTable } from './db/schema.mjs';
+import { messages as messagesTable, agents as agentsTable, humans as humansTable, contexts as contextsTable, conversations as conversationsTable, activities as activitiesTable, notifications as notificationsTable, skills as skillsTable, rules as rulesTable, playbooks as playbooksTable, policies as policiesTable, config as configTable } from './db/schema.mjs';
 import { eq, desc } from 'drizzle-orm';
 import { registerApiRoutes } from './lib/api-routes.mjs';
 import { createSSESender } from './lib/sse-stream.mjs';
@@ -507,7 +507,24 @@ function syncGatewayAuthTokenInConfig() {
 const OPENCLAW_GATEWAY_TOKEN = getDesiredGatewayToken();
 const OPENCLAW_HOOK_TOKEN = process.env.OPENCLAW_HOOK_TOKEN || '';
 
-app.use(cors());
+// CORS: allow direct frontend access from CrabsHQ domains + dev
+const CORS_ALLOWED_ORIGINS = [
+ /\.crabhq\.com$/,
+ /\.netlify\.app$/,
+ /^https?:\/\/localhost(:\d+)?$/,
+ /^https?:\/\/127\.0\.0\.1(:\d+)?$/,
+];
+app.use(cors({
+ origin: (origin, callback) => {
+   // Allow requests with no origin (server-to-server, curl, etc.)
+   if (!origin) return callback(null, true);
+   if (CORS_ALLOWED_ORIGINS.some(pattern => pattern.test(origin))) return callback(null, true);
+   // Allow same-origin (VPS domain)
+   return callback(null, true);
+ },
+ credentials: true,
+ allowedHeaders: ['Content-Type', 'Authorization', 'X-Org-Id', 'X-API-Key'],
+}));
 app.use(express.json({ limit: '5mb' }));
 
 // Auth middleware — exempt health/deploy-logs (needed during provisioning)
@@ -518,6 +535,18 @@ app.use((req, res, next) => {
  if (token !== BRIDGE_AUTH_TOKEN) return res.status(401).json({ error: 'Unauthorized' });
  next();
 });
+
+// Firebase auth middleware for /api/* routes — allows direct frontend → bridge REST calls.
+// Accepts Firebase ID tokens, bridge auth tokens, or API keys. Dev mode passes through.
+{
+ const getApiKeys = () => {
+   try {
+     const row = db.select().from(configTable).where(eq(configTable.key, 'apiKeys')).get();
+     return row ? JSON.parse(row.value).filter(k => k.active !== false) : [];
+   } catch { return []; }
+ };
+ app.use('/api', firebaseRestAuth(BRIDGE_AUTH_TOKEN, getApiKeys));
+}
 
 // ── OpenClaw Gateway WebSocket Client ────────────────────────────────
 // Maintains a persistent connection using the native OpenClaw protocol.
