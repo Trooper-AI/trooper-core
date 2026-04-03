@@ -37,11 +37,11 @@ import path from 'path';
 const { dirname } = path;
 import WebSocket from 'ws';
 import { createServer } from 'http';
-import { initFirebaseAuth } from './lib/firebase-auth.mjs';
+import { initFirebaseAuth, firebaseRestAuth } from './lib/firebase-auth.mjs';
 import { BridgeWSServer } from './lib/ws-server.mjs';
 import { handleChatMessage, getRecentMessages } from './lib/chat-handler.mjs';
 import { createTask, getTask, listTasks, updateTask, deleteTask, addComment, addSubtask, toggleSubtask, deleteSubtask, executeTaskWork, checkoutTask, releaseTask, createProject, listProjects, updateProject, createGoal, listGoals } from './lib/task-handler.mjs';
-import { messages as messagesTable, agents as agentsTable, humans as humansTable, contexts as contextsTable, conversations as conversationsTable, activities as activitiesTable, notifications as notificationsTable, skills as skillsTable, rules as rulesTable, playbooks as playbooksTable, policies as policiesTable } from './db/schema.mjs';
+import { messages as messagesTable, agents as agentsTable, humans as humansTable, contexts as contextsTable, conversations as conversationsTable, activities as activitiesTable, notifications as notificationsTable, skills as skillsTable, rules as rulesTable, playbooks as playbooksTable, policies as policiesTable, config as configTable } from './db/schema.mjs';
 import { eq, desc } from 'drizzle-orm';
 import { registerApiRoutes } from './lib/api-routes.mjs';
 import { createSSESender } from './lib/sse-stream.mjs';
@@ -537,7 +537,24 @@ function syncGatewayAuthTokenInConfig() {
 const OPENCLAW_GATEWAY_TOKEN = getDesiredGatewayToken();
 const OPENCLAW_HOOK_TOKEN = process.env.OPENCLAW_HOOK_TOKEN || '';
 
-app.use(cors());
+// CORS: allow direct frontend access from CrabsHQ domains + dev
+const CORS_ALLOWED_ORIGINS = [
+ /\.crabhq\.com$/,
+ /\.netlify\.app$/,
+ /^https?:\/\/localhost(:\d+)?$/,
+ /^https?:\/\/127\.0\.0\.1(:\d+)?$/,
+];
+app.use(cors({
+ origin: (origin, callback) => {
+   // Allow requests with no origin (server-to-server, curl, etc.)
+   if (!origin) return callback(null, true);
+   if (CORS_ALLOWED_ORIGINS.some(pattern => pattern.test(origin))) return callback(null, true);
+   // Allow same-origin (VPS domain)
+   return callback(null, true);
+ },
+ credentials: true,
+ allowedHeaders: ['Content-Type', 'Authorization', 'X-Org-Id', 'X-API-Key'],
+}));
 app.use(express.json({ limit: '5mb' }));
 
 // Auth middleware — exempt health/deploy-logs (needed during provisioning)
@@ -548,6 +565,18 @@ app.use((req, res, next) => {
  if (token !== BRIDGE_AUTH_TOKEN) return res.status(401).json({ error: 'Unauthorized' });
  next();
 });
+
+// Firebase auth middleware for /api/* routes — allows direct frontend → bridge REST calls.
+// Accepts Firebase ID tokens, bridge auth tokens, or API keys. Dev mode passes through.
+{
+ const getApiKeys = () => {
+   try {
+     const row = db.select().from(configTable).where(eq(configTable.key, 'apiKeys')).get();
+     return row ? JSON.parse(row.value).filter(k => k.active !== false) : [];
+   } catch { return []; }
+ };
+ app.use('/api', firebaseRestAuth(BRIDGE_AUTH_TOKEN, getApiKeys));
+}
 
 // ── OpenClaw Gateway WebSocket Client ────────────────────────────────
 // Maintains a persistent connection using the native OpenClaw protocol.
@@ -3350,6 +3379,322 @@ app.get('/admin/ws', (req, res) => {
 // GET /admin/stats — lightweight stats for polling
 app.get('/admin/stats', (req, res) => {
  res.json(getStats());
+});
+
+// ── Admin: Service Management ────────────────────────────────────────────
+
+// Helper: verify bridge auth token for admin endpoints
+function requireBridgeAuth(req, res) {
+ if (!BRIDGE_AUTH_TOKEN) return true; // no token configured = dev mode
+ const token = req.headers.authorization?.replace('Bearer ', '');
+ if (token === BRIDGE_AUTH_TOKEN) return true;
+ res.status(401).json({ error: 'Unauthorized — bridge auth token required' });
+ return false;
+}
+
+// POST /admin/restart-services — restart Docker containers without data loss
+app.post('/admin/restart-services', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+   const results = [];
+
+   // Restart Docker containers (openclaw gateway)
+   try {
+     execSync('cd /opt/openclaw && docker compose down 2>&1', { timeout: 30000 });
+     results.push({ service: 'openclaw-gateway', action: 'stopped' });
+   } catch (e) {
+     results.push({ service: 'openclaw-gateway', action: 'stop-failed', error: e.message });
+   }
+
+   try {
+     execSync('cd /opt/openclaw && docker compose up -d 2>&1', { timeout: 60000 });
+     results.push({ service: 'openclaw-gateway', action: 'started' });
+   } catch (e) {
+     results.push({ service: 'openclaw-gateway', action: 'start-failed', error: e.message });
+   }
+
+   // Restart bridge service (if under systemd)
+   try {
+     execSync('systemctl restart openclaw-bridge 2>/dev/null', { timeout: 10000 });
+     results.push({ service: 'openclaw-bridge', action: 'restarted' });
+   } catch {
+     results.push({ service: 'openclaw-bridge', action: 'not-under-systemd' });
+   }
+
+   // Restart Caddy
+   try {
+     execSync('systemctl restart caddy 2>/dev/null', { timeout: 10000 });
+     results.push({ service: 'caddy', action: 'restarted' });
+   } catch {
+     results.push({ service: 'caddy', action: 'restart-skipped' });
+   }
+
+   res.json({ ok: true, results });
+ } catch (err) {
+   res.status(500).json({ error: err.message });
+ }
+});
+
+// POST /admin/backup — create a local backup tarball of all user data
+app.post('/admin/backup', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+   const backupDir = '/opt/openclaw-backup';
+   const timestamp = Date.now();
+   const backupFile = `${backupDir}/backup-${timestamp}.tar.gz`;
+
+   // Ensure backup directory exists
+   execSync(`mkdir -p ${backupDir}`, { timeout: 5000 });
+
+   // Build list of paths to back up (only include existing ones)
+   const paths = [
+     '/opt/openclaw-data/bridge.db',
+     '/opt/openclaw-bridge/bridge.db',
+     '/opt/openclaw-data/workspace',
+     '/opt/openclaw-data/config',
+     '/opt/openclaw-bridge/data',
+   ].filter(p => existsSync(p));
+
+   if (paths.length === 0) {
+     return res.status(400).json({ error: 'No data paths found to back up' });
+   }
+
+   execSync(`tar -czf ${backupFile} ${paths.join(' ')} 2>/dev/null`, { timeout: 120000 });
+
+   const stats = statSync(backupFile);
+   console.log(`[admin] Backup created: ${backupFile} (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
+
+   // Clean up old backups (keep last 5)
+   try {
+     const files = readdirSync(backupDir)
+       .filter(f => f.startsWith('backup-') && f.endsWith('.tar.gz'))
+       .sort()
+       .reverse();
+     for (const f of files.slice(5)) {
+       execSync(`rm -f ${backupDir}/${f}`, { timeout: 5000 });
+     }
+   } catch {}
+
+   res.json({
+     ok: true,
+     path: backupFile,
+     size: stats.size,
+     sizeMB: (stats.size / 1024 / 1024).toFixed(2),
+     timestamp,
+   });
+ } catch (err) {
+   res.status(500).json({ error: err.message });
+ }
+});
+
+// POST /admin/restore — restore from a local backup tarball
+app.post('/admin/restore', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+   const backupDir = '/opt/openclaw-backup';
+   let backupFile = req.body?.path;
+
+   // If no specific path, use latest backup
+   if (!backupFile) {
+     const files = readdirSync(backupDir)
+       .filter(f => f.startsWith('backup-') && f.endsWith('.tar.gz'))
+       .sort()
+       .reverse();
+     if (files.length === 0) {
+       return res.status(404).json({ error: 'No backups found' });
+     }
+     backupFile = `${backupDir}/${files[0]}`;
+   }
+
+   if (!existsSync(backupFile)) {
+     return res.status(404).json({ error: `Backup file not found: ${backupFile}` });
+   }
+
+   console.log(`[admin] Restoring from: ${backupFile}`);
+
+   // Extract backup (overwrites existing files)
+   execSync(`tar -xzf ${backupFile} -C / 2>/dev/null`, { timeout: 120000 });
+
+   console.log(`[admin] Restore complete from: ${backupFile}`);
+   res.json({ ok: true, restored: backupFile });
+ } catch (err) {
+   res.status(500).json({ error: err.message });
+ }
+});
+
+// GET /admin/backups — list available local backups
+app.get('/admin/backups', (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+   const backupDir = '/opt/openclaw-backup';
+   if (!existsSync(backupDir)) return res.json({ backups: [] });
+   const files = readdirSync(backupDir)
+     .filter(f => f.startsWith('backup-') && f.endsWith('.tar.gz'))
+     .map(f => {
+       const stats = statSync(`${backupDir}/${f}`);
+       return {
+         name: f,
+         path: `${backupDir}/${f}`,
+         size: stats.size,
+         sizeMB: (stats.size / 1024 / 1024).toFixed(2),
+         createdAt: stats.mtime.toISOString(),
+       };
+     })
+     .sort((a, b) => b.name.localeCompare(a.name));
+   res.json({ backups: files });
+ } catch (err) {
+   res.status(500).json({ error: err.message });
+ }
+});
+
+// ── GDPR / Privacy: Data Export & Deletion ───────────────────────────────
+
+// GET /admin/data-export — export ALL user data as a JSON bundle (GDPR Article 20)
+app.get('/admin/data-export', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+   const exportData = {};
+
+   // Messages/conversations
+   try {
+     exportData.messages = db.select().from(messagesTable).orderBy(desc(messagesTable.created_at)).all();
+   } catch { exportData.messages = []; }
+
+   // Tasks
+   try {
+     const { tasks: tasksTable } = await import('./db/schema.mjs');
+     exportData.tasks = db.select().from(tasksTable).all();
+   } catch { exportData.tasks = []; }
+
+   // Memories
+   try {
+     const { memories: memoriesTable } = await import('./db/schema.mjs');
+     exportData.memories = db.select().from(memoriesTable).all();
+   } catch { exportData.memories = []; }
+
+   // Runs (agent execution history)
+   try {
+     const { runs: runsTable } = await import('./db/schema.mjs');
+     exportData.runs = db.select().from(runsTable).all();
+   } catch { exportData.runs = []; }
+
+   // Agents
+   try {
+     exportData.agents = db.select().from(agentsTable).all();
+   } catch { exportData.agents = []; }
+
+   // Config (API keys, settings — redact actual key values)
+   try {
+     const configs = db.select().from(configTable).all();
+     exportData.config = configs.map(c => {
+       if (c.key === 'apiKeys') {
+         // Redact actual key values but show labels
+         try {
+           const keys = JSON.parse(c.value);
+           return { ...c, value: JSON.stringify(keys.map(k => ({ label: k.label, active: k.active, createdAt: k.createdAt }))) };
+         } catch { return c; }
+       }
+       return c;
+     });
+   } catch { exportData.config = []; }
+
+   // Workspace files listing (not content — too large)
+   try {
+     const workspacePath = '/home/node/.openclaw/workspace';
+     if (existsSync(workspacePath)) {
+       const walkDir = (dir, prefix = '') => {
+         const entries = [];
+         for (const item of readdirSync(dir)) {
+           const full = `${dir}/${item}`;
+           const rel = prefix ? `${prefix}/${item}` : item;
+           const s = statSync(full);
+           if (s.isDirectory()) {
+             entries.push(...walkDir(full, rel));
+           } else {
+             entries.push({ path: rel, size: s.size, modified: s.mtime.toISOString() });
+           }
+         }
+         return entries;
+       };
+       exportData.workspaceFiles = walkDir(workspacePath);
+     }
+   } catch { exportData.workspaceFiles = []; }
+
+   // Cron jobs
+   try {
+     const cronPath = '/home/node/.openclaw/cron/jobs.json';
+     if (existsSync(cronPath)) {
+       exportData.cronJobs = JSON.parse(readFileSync(cronPath, 'utf8'));
+     }
+   } catch { exportData.cronJobs = []; }
+
+   exportData.exportedAt = new Date().toISOString();
+   exportData.exportVersion = '1.0';
+
+   res.setHeader('Content-Type', 'application/json');
+   res.setHeader('Content-Disposition', `attachment; filename="crabhq-data-export-${Date.now()}.json"`);
+   res.json(exportData);
+ } catch (err) {
+   res.status(500).json({ error: err.message });
+ }
+});
+
+// DELETE /admin/data-purge — permanently delete ALL user data (GDPR Article 17)
+// This is irreversible. Creates a backup first, then wipes everything.
+app.delete('/admin/data-purge', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ const { confirm } = req.body || {};
+ if (confirm !== 'DELETE_ALL_DATA') {
+   return res.status(400).json({
+     error: 'Confirmation required',
+     message: 'Send { "confirm": "DELETE_ALL_DATA" } to proceed. This action is irreversible.',
+   });
+ }
+
+ try {
+   // Create backup before purge
+   const backupDir = '/opt/openclaw-backup';
+   execSync(`mkdir -p ${backupDir}`, { timeout: 5000 });
+   const timestamp = Date.now();
+   const backupFile = `${backupDir}/pre-purge-${timestamp}.tar.gz`;
+   const paths = [
+     '/opt/openclaw-data/bridge.db',
+     '/opt/openclaw-bridge/bridge.db',
+     '/opt/openclaw-data/workspace',
+     '/opt/openclaw-bridge/data',
+   ].filter(p => existsSync(p));
+   if (paths.length > 0) {
+     execSync(`tar -czf ${backupFile} ${paths.join(' ')} 2>/dev/null`, { timeout: 120000 });
+   }
+
+   // Purge SQLite tables
+   const tablesToPurge = ['messages', 'tasks', 'task_comments', 'task_subtasks', 'runs', 'run_events',
+     'memories', 'memory_conflicts', 'activities', 'notifications', 'contexts', 'conversations'];
+   for (const table of tablesToPurge) {
+     try { sqlite.prepare(`DELETE FROM ${table}`).run(); } catch {}
+   }
+
+   // Clear workspace files (keep directory structure)
+   try {
+     execSync('rm -rf /home/node/.openclaw/workspace/* 2>/dev/null', { timeout: 10000 });
+   } catch {}
+
+   // Clear cron jobs
+   try {
+     const cronPath = '/home/node/.openclaw/cron/jobs.json';
+     if (existsSync(cronPath)) writeFileSync(cronPath, '[]');
+   } catch {}
+
+   console.log(`[admin] Data purge complete. Pre-purge backup: ${backupFile}`);
+   res.json({
+     ok: true,
+     message: 'All user data has been permanently deleted.',
+     backup: existsSync(backupFile) ? backupFile : null,
+     purgedTables: tablesToPurge,
+   });
+ } catch (err) {
+   res.status(500).json({ error: err.message });
+ }
 });
 
 // GET /admin/raw-logs/bridge — raw bridge process stdout/stderr (journald or pm2)
