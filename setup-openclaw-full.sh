@@ -1,49 +1,79 @@
 #!/bin/bash
 # Setup OpenClaw + Bridge + Poller on a fresh Ubuntu 24.04 VPS
-# Called via cloud-init (Hetzner user_data) — runs on first boot, no SSH needed.
-# Template variables replaced at runtime by provision.js:
-# {{GATEWAY_TOKEN}} - Unique token for this org's OpenClaw gateway
-# {{OPENAI_API_KEY}} - OpenAI API key (optional)
-# {{ANTHROPIC_API_KEY}} - Anthropic/Claude API key (optional)
-# {{GEMINI_API_KEY}} - Google Gemini API key (optional)
-# {{OPENROUTER_API_KEY}} - OpenRouter API key (optional)
-# {{BRAVE_API_KEY}} - Brave search API key
-# {{BRIDGE_PORT}} - Port for the local bridge (default 3002)
-# {{ORG_ID}} - Organization ID
-# {{OPENCLAW_DOCKER_IMAGE}} - Docker image (default: ghcr.io/openclaw/openclaw:latest)
-# {{PRIMARY_PROVIDER}} - Preferred model provider (anthropic|openai|gemini|openrouter, default: auto-detect)
-# {{PRIMARY_MODEL}} - Preferred model ID (default: auto-detect from provider)
-# {{RUNTIME_AUTH_SECRET}} - Shared secret for central -> org-runtime auth
-# {{CRABHQ_RUNTIME_TARBALL_URL}} - Optional tarball URL for CrabsHQ runtime bundle
+# Works in two modes:
+#   1. Cloud-init (CrabsHQ Cloud): Template vars replaced by provision.js via sed
+#   2. Self-hosted: User exports env vars before running the script
+# Template variables are only used if the env var is NOT already set.
 
 set -e
 
 trap 'EXIT_CODE=$?; FAIL_LINE=$LINENO; dlog "Setup failed at line ${FAIL_LINE} (exit ${EXIT_CODE}). Disk: $(df -h /var/lib/docker 2>/dev/null | tail -1 | awk "{print \$4}") free. Docker: $(docker ps -q 2>/dev/null | wc -l) containers." "failed"; exit ${EXIT_CODE}' ERR
 
-GATEWAY_TOKEN="{{GATEWAY_TOKEN}}"
-OPENAI_API_KEY="{{OPENAI_API_KEY}}"
-ANTHROPIC_API_KEY="{{ANTHROPIC_API_KEY}}"
-GEMINI_API_KEY="{{GEMINI_API_KEY}}"
-OPENROUTER_API_KEY="{{OPENROUTER_API_KEY}}"
-BRAVE_API_KEY="{{BRAVE_API_KEY}}"
-BRIDGE_PORT="{{BRIDGE_PORT}}"
-ORG_ID="{{ORG_ID}}"
-SSH_PUBKEY="{{SSH_PUBKEY}}"
-OPENCLAW_DOCKER_IMAGE="{{OPENCLAW_DOCKER_IMAGE}}"
-BRIDGE_AUTH_TOKEN="{{BRIDGE_AUTH_TOKEN}}"
+# Use env vars if set, otherwise fall back to template placeholders (for cloud-init mode).
+# Template placeholders like {{GATEWAY_TOKEN}} are replaced by provision.js via sed.
+GATEWAY_TOKEN="${GATEWAY_TOKEN:-{{GATEWAY_TOKEN}}}"
+OPENAI_API_KEY="${OPENAI_API_KEY:-{{OPENAI_API_KEY}}}"
+ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-{{ANTHROPIC_API_KEY}}}"
+GEMINI_API_KEY="${GEMINI_API_KEY:-{{GEMINI_API_KEY}}}"
+OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-{{OPENROUTER_API_KEY}}}"
+BRAVE_API_KEY="${BRAVE_API_KEY:-{{BRAVE_API_KEY}}}"
+BRIDGE_PORT="${BRIDGE_PORT:-{{BRIDGE_PORT}}}"
+ORG_ID="${ORG_ID:-{{ORG_ID}}}"
+SSH_PUBKEY="${SSH_PUBKEY:-{{SSH_PUBKEY}}}"
+OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-{{OPENCLAW_DOCKER_IMAGE}}}"
+BRIDGE_AUTH_TOKEN="${BRIDGE_AUTH_TOKEN:-{{BRIDGE_AUTH_TOKEN}}}"
 GATEWAY_PORT=18789
 MEDIA_PORT=18791
-API_URL="{{API_URL}}"
-COMPOSIO_API_KEY="{{COMPOSIO_API_KEY}}"
-CF_API_TOKEN="{{CF_API_TOKEN}}"
-PRIMARY_PROVIDER="{{PRIMARY_PROVIDER}}"
-PRIMARY_MODEL="{{PRIMARY_MODEL}}"
-BROWSERBASE_API_KEY="{{BROWSERBASE_API_KEY}}"
-BROWSERBASE_PROJECT_ID="{{BROWSERBASE_PROJECT_ID}}"
-RUNTIME_AUTH_SECRET="{{RUNTIME_AUTH_SECRET}}"
-CRABHQ_RUNTIME_TARBALL_URL="{{CRABHQ_RUNTIME_TARBALL_URL}}"
+API_URL="${API_URL:-{{API_URL}}}"
+COMPOSIO_API_KEY="${COMPOSIO_API_KEY:-{{COMPOSIO_API_KEY}}}"
+CF_API_TOKEN="${CF_API_TOKEN:-{{CF_API_TOKEN}}}"
+PRIMARY_PROVIDER="${PRIMARY_PROVIDER:-{{PRIMARY_PROVIDER}}}"
+PRIMARY_MODEL="${PRIMARY_MODEL:-{{PRIMARY_MODEL}}}"
+BROWSERBASE_API_KEY="${BROWSERBASE_API_KEY:-{{BROWSERBASE_API_KEY}}}"
+BROWSERBASE_PROJECT_ID="${BROWSERBASE_PROJECT_ID:-{{BROWSERBASE_PROJECT_ID}}}"
+RUNTIME_AUTH_SECRET="${RUNTIME_AUTH_SECRET:-{{RUNTIME_AUTH_SECRET}}}"
+CRABHQ_RUNTIME_TARBALL_URL="${CRABHQ_RUNTIME_TARBALL_URL:-{{CRABHQ_RUNTIME_TARBALL_URL}}}"
 CRABHQ_RUNTIME_PORT=3101
 CRABHQ_RUNTIME_DATA_DIR=/var/lib/crabhq-org-runtime
+
+# Input validation — fail fast if critical vars are missing or still have template placeholders
+_validate_var() {
+  local name="$1" value="$2" required="$3"
+  if [ "$required" = "required" ]; then
+    if [ -z "$value" ] || echo "$value" | grep -q '{{.*}}'; then
+      echo "FATAL: $name is required but not set. Export it before running this script."
+      echo "  Example: export $name='your-value'"
+      exit 1
+    fi
+  else
+    # Optional: clear template placeholder if not replaced
+    if echo "$value" | grep -q '{{.*}}'; then
+      eval "$name=''"
+    fi
+  fi
+}
+_validate_var GATEWAY_TOKEN "$GATEWAY_TOKEN" required
+_validate_var ORG_ID "$ORG_ID" required
+_validate_var BRIDGE_PORT "$BRIDGE_PORT" required
+_validate_var BRIDGE_AUTH_TOKEN "$BRIDGE_AUTH_TOKEN" optional
+_validate_var API_URL "$API_URL" optional
+_validate_var OPENAI_API_KEY "$OPENAI_API_KEY" optional
+_validate_var ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY" optional
+_validate_var GEMINI_API_KEY "$GEMINI_API_KEY" optional
+_validate_var OPENROUTER_API_KEY "$OPENROUTER_API_KEY" optional
+_validate_var BRAVE_API_KEY "$BRAVE_API_KEY" optional
+_validate_var SSH_PUBKEY "$SSH_PUBKEY" optional
+_validate_var OPENCLAW_DOCKER_IMAGE "$OPENCLAW_DOCKER_IMAGE" optional
+_validate_var CF_API_TOKEN "$CF_API_TOKEN" optional
+_validate_var COMPOSIO_API_KEY "$COMPOSIO_API_KEY" optional
+_validate_var PRIMARY_PROVIDER "$PRIMARY_PROVIDER" optional
+_validate_var PRIMARY_MODEL "$PRIMARY_MODEL" optional
+_validate_var RUNTIME_AUTH_SECRET "$RUNTIME_AUTH_SECRET" optional
+_validate_var CRABHQ_RUNTIME_TARBALL_URL "$CRABHQ_RUNTIME_TARBALL_URL" optional
+
+# Apply defaults for optional vars
+OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/absurdfounder/crabhq-gateway:latest}"
+BRIDGE_PORT="${BRIDGE_PORT:-3002}"
 
 # Detect if booting from a pre-built snapshot (skip heavy installs)
 FROM_SNAPSHOT="${CRABHQ_FROM_SNAPSHOT:-0}"
