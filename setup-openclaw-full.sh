@@ -923,20 +923,6 @@ ${MODELS_PROVIDERS}
  "agents_list", "image", "message", "cron", "gateway",
  "llm-task", "lobster"
  ],
- "web": {
- "search": {
- "enabled": true,
- "provider": "brave",
- "apiKey": "${BRAVE_API_KEY}",
- "maxResults": 5,
- "cacheTtlMinutes": 15
- },
- "fetch": {
- "enabled": true,
- "maxChars": 50000,
- "timeoutSeconds": 30
- }
- },
  "exec": {
  "host": "gateway",
  "notifyOnExit": true
@@ -946,7 +932,24 @@ ${MODELS_PROVIDERS}
  "entries": {
  "lobster": { "enabled": true },
  "llm-task": { "enabled": true },
- "acpx": { "enabled": true }
+ "acpx": { "enabled": true },
+ "web-search": {
+ "enabled": true,
+ "config": {
+ "webSearch": {
+ "enabled": true,
+ "provider": "brave",
+ "apiKey": "${BRAVE_API_KEY}",
+ "maxResults": 5,
+ "cacheTtlMinutes": 15
+ },
+ "webFetch": {
+ "enabled": true,
+ "maxChars": 50000,
+ "timeoutSeconds": 30
+ }
+ }
+ }
  }
  },
  "acp": {
