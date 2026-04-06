@@ -2,6 +2,8 @@ name: Publish Org Runtime Bundle
 
 on:
   workflow_dispatch:
+  repository_dispatch:
+    types: [crabhq-server-updated]
   push:
     branches: [main]
     paths:
