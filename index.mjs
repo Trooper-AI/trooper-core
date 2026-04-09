@@ -4611,7 +4611,7 @@ app.put('/agents/:name/workspace', (req, res) => {
  } else {
  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
  const agentId = slug.startsWith('spc-') ? slug : 'spc-' + slug;
- workspacePath = '/opt/openclaw-data/workspace/' + agentId';
+ workspacePath = '/opt/openclaw-data/workspace/' + agentId;
  }
  try {
  execSync('mkdir -p ' + workspacePath + '/memory', { timeout: 5000 });
