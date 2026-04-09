@@ -4153,7 +4153,7 @@ app.post('/files/write', (req, res) => {
  } else {
  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
  const agentId = slug.startsWith('spc-') ? slug : 'spc-' + slug;
- basePath = `/opt/openclaw-data/config/agents/${agentId}/workspace`;
+ basePath = `/opt/openclaw-data/workspace/${agentId}`;
  }
  try {
  let written = 0;
@@ -4369,7 +4369,7 @@ app.post('/agents', (req, res) => {
  }
 
  const agentId = `spc-${id}`;
- const workspacePath = `/opt/openclaw-data/config/agents/${agentId}/workspace`;
+ const workspacePath = `/opt/openclaw-data/workspace/${agentId}`;
  const agentDir = `/opt/openclaw-data/config/agents/${agentId}`;
 
  try {
@@ -4436,7 +4436,7 @@ app.put('/agents/:name', (req, res) => {
  if (!agent) return res.status(404).json({ error: `Agent "${req.params.name}" not found` });
 
  const { soul, title, skills, tools, model, workspaceFiles, installedSkillIds, avatar } = req.body;
- const workspacePath = `/opt/openclaw-data/config/agents/${agent.agentId}/workspace`;
+ const workspacePath = `/opt/openclaw-data/workspace/${agent.agentId}`;
 
  try {
  // Ensure workspace directory exists
@@ -4514,7 +4514,7 @@ app.put('/agents/:name/identity', (req, res) => {
  };
  const workspacePath = isMainAgent
    ? '/opt/openclaw-data/workspace'
-   : `/opt/openclaw-data/config/agents/${existing.agentId}/workspace`;
+   : `/opt/openclaw-data/workspace/${existing.agentId}`;
 
  try {
   syncRuntimeIdentityFiles({
@@ -4578,7 +4578,7 @@ app.get('/agents/:name/workspace', (req, res) => {
  const slug = agentSlug(name);
  const agent = agentRegistry.get(slug);
  if (!agent) return res.status(404).json({ error: `Agent "${name}" not found` });
- workspacePath = `/opt/openclaw-data/config/agents/${agent.agentId}/workspace`;
+ workspacePath = `/opt/openclaw-data/workspace/${agent.agentId}`;
  }
 
  try {
@@ -4611,7 +4611,7 @@ app.put('/agents/:name/workspace', (req, res) => {
  } else {
  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
  const agentId = slug.startsWith('spc-') ? slug : 'spc-' + slug;
- workspacePath = '/opt/openclaw-data/config/agents/' + agentId + '/workspace';
+ workspacePath = '/opt/openclaw-data/workspace/' + agentId';
  }
  try {
  execSync('mkdir -p ' + workspacePath + '/memory', { timeout: 5000 });
