@@ -24,7 +24,7 @@ import { ensureXvnc } from './lib/xvnc.mjs';
 import cors from 'cors';
 import { EventEmitter } from 'events';
 import { execSync, spawn } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, cpSync } from 'fs';
 import { readFile, writeFile, readdir } from 'fs/promises';
 import { db, sqlite, DB_PATH } from './db/index.mjs';
 import { migrate } from './db/migrate.mjs';
@@ -2667,6 +2667,41 @@ function syncRuntimeIdentityFiles({ workspacePath, agentProfile, preserveSharedF
   execSync(`chown -R 1000:1000 ${workspacePath}`, { timeout: 5000 });
 }
 
+function getAgentWorkspacePath(agentId = 'main') {
+  return agentId === 'main'
+    ? '/opt/openclaw-data/workspace'
+    : `/opt/openclaw-data/config/agents/${agentId}/workspace`;
+}
+
+function getLegacyAgentWorkspacePath(agentId = 'main') {
+  return agentId === 'main'
+    ? '/opt/openclaw-data/workspace'
+    : `/opt/openclaw-data/workspace/${agentId}`;
+}
+
+function ensureAgentWorkspacePath(agentId = 'main') {
+  const workspacePath = getAgentWorkspacePath(agentId);
+  mkdirSync(`${workspacePath}/memory`, { recursive: true });
+
+  if (agentId !== 'main') {
+    const legacyPath = getLegacyAgentWorkspacePath(agentId);
+    if (legacyPath !== workspacePath && existsSync(legacyPath)) {
+      try {
+        for (const entry of readdirSync(legacyPath)) {
+          const src = path.join(legacyPath, entry);
+          const dest = path.join(workspacePath, entry);
+          if (existsSync(dest)) continue;
+          cpSync(src, dest, { recursive: true, force: false, errorOnExist: false });
+        }
+      } catch (err) {
+        console.warn(`[workspace] Failed to migrate legacy workspace for ${agentId}: ${err.message}`);
+      }
+    }
+  }
+
+  return workspacePath;
+}
+
 function resolveMissionControlSessionKey({ sessionKey, agentName, context } = {}) {
  if (sessionKey) return sessionKey;
  const taskId = context?.taskId || null;
@@ -4149,11 +4184,11 @@ app.post('/files/write', (req, res) => {
  const name = agentName || 'main';
  let basePath;
  if (name === 'main' || name === 'Team Lead') {
- basePath = '/opt/openclaw-data/workspace';
+ basePath = getAgentWorkspacePath('main');
  } else {
  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
  const agentId = slug.startsWith('spc-') ? slug : 'spc-' + slug;
- basePath = `/opt/openclaw-data/workspace/${agentId}`;
+ basePath = ensureAgentWorkspacePath(agentId);
  }
  try {
  let written = 0;
@@ -4369,12 +4404,12 @@ app.post('/agents', (req, res) => {
  }
 
  const agentId = `spc-${id}`;
- const workspacePath = `/opt/openclaw-data/workspace/${agentId}`;
  const agentDir = `/opt/openclaw-data/config/agents/${agentId}`;
+ const workspacePath = ensureAgentWorkspacePath(agentId);
 
  try {
  // Create workspace directories
- execSync(`mkdir -p ${workspacePath}/memory ${agentDir}/agent ${agentDir}/sessions`, { timeout: 5000 });
+ execSync(`mkdir -p ${agentDir}/agent ${agentDir}/sessions`, { timeout: 5000 });
 
  // Try to read company name from COMPANY.md header
  let _companyName = 'the company';
@@ -4436,7 +4471,7 @@ app.put('/agents/:name', (req, res) => {
  if (!agent) return res.status(404).json({ error: `Agent "${req.params.name}" not found` });
 
  const { soul, title, skills, tools, model, workspaceFiles, installedSkillIds, avatar } = req.body;
- const workspacePath = `/opt/openclaw-data/workspace/${agent.agentId}`;
+ const workspacePath = ensureAgentWorkspacePath(agent.agentId);
 
  try {
  // Ensure workspace directory exists
@@ -4513,8 +4548,8 @@ app.put('/agents/:name/identity', (req, res) => {
    avatar: req.body?.avatar !== undefined ? (req.body.avatar || null) : (existing.avatar || null),
  };
  const workspacePath = isMainAgent
-   ? '/opt/openclaw-data/workspace'
-   : `/opt/openclaw-data/workspace/${existing.agentId}`;
+   ? getAgentWorkspacePath('main')
+   : ensureAgentWorkspacePath(existing.agentId);
 
  try {
   syncRuntimeIdentityFiles({
@@ -4573,12 +4608,12 @@ app.get('/agents/:name/workspace', (req, res) => {
  const name = req.params.name;
  let workspacePath;
  if (name === 'main' || name === 'Team Lead') {
- workspacePath = '/opt/openclaw-data/workspace';
+ workspacePath = getAgentWorkspacePath('main');
  } else {
  const slug = agentSlug(name);
  const agent = agentRegistry.get(slug);
  if (!agent) return res.status(404).json({ error: `Agent "${name}" not found` });
- workspacePath = `/opt/openclaw-data/workspace/${agent.agentId}`;
+ workspacePath = ensureAgentWorkspacePath(agent.agentId);
  }
 
  try {
@@ -4607,11 +4642,11 @@ app.put('/agents/:name/workspace', (req, res) => {
  const name = req.params.name;
  let workspacePath;
  if (name === 'main' || name === 'Team Lead') {
- workspacePath = '/opt/openclaw-data/workspace';
+ workspacePath = getAgentWorkspacePath('main');
  } else {
  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
  const agentId = slug.startsWith('spc-') ? slug : 'spc-' + slug;
- workspacePath = '/opt/openclaw-data/workspace/' + agentId;
+ workspacePath = ensureAgentWorkspacePath(agentId);
  }
  try {
  execSync('mkdir -p ' + workspacePath + '/memory', { timeout: 5000 });
