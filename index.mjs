@@ -4543,8 +4543,31 @@ app.put('/agents/:name/identity', (req, res) => {
  const requestedName = req.params.name;
  const isMainAgent = requestedName === 'main' || requestedName === 'Team Lead';
  const slug = agentSlug(requestedName);
- const existing = isMainAgent ? (agentRegistry.get(slug) || { agentId: 'main', role: 'LEAD', name: requestedName }) : agentRegistry.get(slug);
- if (!existing) return res.status(404).json({ error: `Agent "${requestedName}" not found` });
+ let existing = isMainAgent ? (agentRegistry.get(slug) || { agentId: 'main', role: 'LEAD', name: requestedName }) : agentRegistry.get(slug);
+
+ // Heal missing SPC registry entries: if the caller provides enough info to
+ // construct a profile, create the registry entry on the fly instead of 404'ing.
+ // This lets provision/reconcile flows repair agents whose registry state was
+ // lost (bridge restart, partial restore, etc.) without forcing a separate
+ // POST /agents round-trip.
+ if (!existing) {
+  if (!req.body?.name && !requestedName) {
+   return res.status(404).json({ error: `Agent "${requestedName}" not found` });
+  }
+  const agentId = `spc-${slug}`;
+  existing = {
+   agentId,
+   name: req.body?.name || requestedName,
+   role: req.body?.role || 'SPC',
+   title: req.body?.title || 'Specialist',
+   soul: req.body?.soul || '',
+   skills: Array.isArray(req.body?.skills) ? req.body.skills : [],
+   tools: Array.isArray(req.body?.tools) ? req.body.tools : [],
+   installedSkillIds: Array.isArray(req.body?.installedSkillIds) ? req.body.installedSkillIds : [],
+   avatar: req.body?.avatar || null,
+  };
+  console.log(`🩹 Healing missing registry entry for "${requestedName}" via identity endpoint`);
+ }
 
  const nextProfile = {
    ...existing,
