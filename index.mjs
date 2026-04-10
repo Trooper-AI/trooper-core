@@ -6137,7 +6137,7 @@ function normalizeModelId(model) {
  ];
  const keysToUpdate = providerKeyMap.filter(entry => entry.key !== undefined);
 
- if (keysToUpdate.length > 0) {
+ if (keysToUpdate.length > 0 || openaiCodexAuthProfile?.access) {
  try {
  const authPath = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
  let auth;
@@ -6183,7 +6183,11 @@ function normalizeModelId(model) {
 
  writeFileSync(authPath, JSON.stringify(auth, null, 2));
  await run(`chown 1000:1000 ${authPath} 2>/dev/null; chmod 664 ${authPath}`).catch(() => {});
- console.log(`[bridge] Updated auth-profiles.json for: ${keysToUpdate.map(e => e.provider).join(', ')}${openaiCodexAuthProfile?.access ? ', openai-codex' : ''}`);
+ const updatedProviders = [
+  ...keysToUpdate.map(e => e.provider),
+  ...(openaiCodexAuthProfile?.access ? ['openai-codex'] : []),
+ ];
+ console.log(`[bridge] Updated auth-profiles.json for: ${updatedProviders.join(', ')}`);
 
  // Propagate updated auth-profiles to any existing sub-agent directories
  try {
