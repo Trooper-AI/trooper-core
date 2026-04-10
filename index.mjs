@@ -2617,6 +2617,53 @@ function agentSlug(name) {
  return (name || 'default').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
+function normalizeGatewayModelId(model) {
+ if (!model) return model;
+ let m = String(model).trim();
+ const EXACT_MODEL_MAP = {
+  'gpt': 'openai-codex/gpt-5.4',
+  'gpt-5.4': 'openai-codex/gpt-5.4',
+  'openai/gpt-5.4': 'openai-codex/gpt-5.4',
+  'openai-codex/gpt-5.4': 'openai-codex/gpt-5.4',
+  'gpt-5-4': 'openai-codex/gpt-5.4',
+  'openai/gpt-5-4': 'openai-codex/gpt-5.4',
+  'openai-codex/gpt-5-4': 'openai-codex/gpt-5.4',
+  'gpt-5.2': 'openai/gpt-5.2',
+  'openai/gpt-5.2': 'openai/gpt-5.2',
+  'gpt-5-2': 'openai/gpt-5.2',
+  'openai/gpt-5-2': 'openai/gpt-5.2',
+  'gpt-5.0': 'openai/gpt-5.0',
+  'openai/gpt-5.0': 'openai/gpt-5.0',
+  'gpt-5-0': 'openai/gpt-5.0',
+  'openai/gpt-5-0': 'openai/gpt-5.0',
+  'gpt-5-mini': 'openrouter/openai/gpt-5-mini',
+  'openai/gpt-5-mini': 'openrouter/openai/gpt-5-mini',
+ };
+ if (EXACT_MODEL_MAP[m]) m = EXACT_MODEL_MAP[m];
+ let provider = '';
+ let bare = m;
+ if (m.includes('/')) {
+  const parts = m.split('/');
+  provider = parts[0];
+  bare = parts.slice(1).join('/');
+ }
+ const KNOWN_MODEL_ALIASES = {
+  'claude-4-6-sonnet-20260217': 'claude-sonnet-4-6',
+  'claude-4-5-sonnet-20241022': 'claude-sonnet-4-5',
+  'claude-4-6-opus': 'claude-opus-4-6',
+  'claude-opus-4-6-20260514': 'claude-opus-4-6',
+  'claude-4-5-haiku-20241022': 'claude-haiku-4-5',
+  'claude-haiku-4-5-20241022': 'claude-haiku-4-5',
+  'claude-sonnet-4-5': 'claude-sonnet-4-5',
+  'claude-sonnet-4-6': 'claude-sonnet-4-6',
+  'claude-opus-4-6': 'claude-opus-4-6',
+  'claude-haiku-4-5': 'claude-haiku-4-5',
+ };
+ if (KNOWN_MODEL_ALIASES[bare]) bare = KNOWN_MODEL_ALIASES[bare];
+ if (/^claude/i.test(bare) && provider !== 'anthropic') provider = 'anthropic';
+ return provider ? `${provider}/${bare}` : bare;
+}
+
 function readCompanyNameFromDocs(companyDocs = cachedCompanyDocs) {
   return companyDocs?.match(/^#\s+(.+)$/m)?.[1]?.trim() || 'the company';
 }
@@ -4467,8 +4514,8 @@ app.post('/agents', (req, res) => {
  config.agents.list.push({
  id: agentId,
  ...(model ? { model: {
- primary: normalizeModelId(model),
- ...(fallbacks?.length ? { fallbacks: fallbacks.map(normalizeModelId) } : {}),
+ primary: normalizeGatewayModelId(model),
+ ...(fallbacks?.length ? { fallbacks: fallbacks.map(normalizeGatewayModelId) } : {}),
  } } : {}),
  ...(params ? { params } : {}),
  });
@@ -4528,11 +4575,11 @@ app.put('/agents/:name', (req, res) => {
  if (entry) {
  if (model) {
  entry.model = {
- primary: normalizeModelId(model),
- ...(updateFallbacks?.length ? { fallbacks: updateFallbacks.map(normalizeModelId) } : (entry.model?.fallbacks ? { fallbacks: entry.model.fallbacks } : {})),
+ primary: normalizeGatewayModelId(model),
+ ...(updateFallbacks?.length ? { fallbacks: updateFallbacks.map(normalizeGatewayModelId) } : (entry.model?.fallbacks ? { fallbacks: entry.model.fallbacks } : {})),
  };
  } else if (updateFallbacks?.length && entry.model) {
- entry.model.fallbacks = updateFallbacks.map(normalizeModelId);
+ entry.model.fallbacks = updateFallbacks.map(normalizeGatewayModelId);
  }
  if (updateParams) entry.params = updateParams;
  }
