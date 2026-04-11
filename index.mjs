@@ -6421,41 +6421,69 @@ const hasStoredCodexOAuthProfile = () => {
  } catch (e) { console.error('Failed to patch docker-compose override:', e.message); }
  }
 
- console.log('Restarting OpenClaw containers after key update...');
  const warnings = [..._syncWarnings];
- 
+
+ const runHotReload = async () => {
+ const steps = [];
+ const errors = [];
+ const optionalStep = async (label, command, timeout) => {
+ try {
+ await run(command, { timeout });
+ steps.push(label);
+ return true;
+ } catch (e) {
+ errors.push(`${label}: ${e.message}`);
+ return false;
+ }
+ };
+
+ // Newer OpenClaw builds can reload secrets explicitly; older builds still accept USR1.
+ await optionalStep('secrets.apply', 'docker exec openclaw-openclaw-gateway-1 openclaw secrets apply 2>/dev/null', 20000);
+ await optionalStep('secrets.reload', 'docker exec openclaw-openclaw-gateway-1 openclaw secrets reload 2>/dev/null', 15000);
+ const signaled = await optionalStep('signal.reload', 'docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', 5000);
+ if (signaled) console.log(`[keys] Hot reload requested (${steps.join(', ')})`);
+ else console.warn(`[keys] Hot reload signal failed: ${errors.join(' | ')}`);
+ return { ok: signaled, steps, errors };
+ };
+
+ const restartRequested = req.body?.restartGateway === true || req.body?.restart === true || req.body?.restartContainers === true;
+ let reloadMode = 'hot';
  let restartOk = true;
+ let hotReloadResult = null;
+
+ if (restartRequested) {
+ console.log('Restarting OpenClaw containers after key update (requested)...');
  try {
  await run('cd /opt/openclaw && docker compose down && docker compose up -d', { timeout: 60000 });
+ reloadMode = 'restart';
  } catch (restartErr) {
  warnings.push(`Container restart failed: ${restartErr.message}`);
  restartOk = false;
+ reloadMode = 'manual_restart_required';
  console.error('Container restart failed:', restartErr.message);
  }
 
- // Apply secrets through OpenClaw's native secrets management (v2026.2.24+)
  if (restartOk) {
- try {
- await run('sleep 3 && docker exec openclaw-openclaw-gateway-1 openclaw secrets apply 2>/dev/null', { timeout: 20000 });
- await run('docker exec openclaw-openclaw-gateway-1 openclaw secrets reload 2>/dev/null', { timeout: 15000 });
- console.log('[keys] Secrets applied and reloaded via openclaw secrets');
- } catch (e) { console.warn('[keys] openclaw secrets apply/reload not available (pre-v2026.2.24?):', e.message); }
- }
-
- // Re-approve bridge device after restart so sessions_spawn works
- if (restartOk) {
+ hotReloadResult = await runHotReload();
  try {
  await run(`docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null; docker exec openclaw-openclaw-gateway-1 chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null`, { timeout: 15000 });
  console.log('[keys] Bridge device re-approved after restart');
  } catch (e) { console.warn('[keys] Device auto-approve failed (will retry on connect):', e.message); }
+ setTimeout(() => gateway.connect(), 5000);
+ }
+ } else {
+ hotReloadResult = await runHotReload();
+ if (!hotReloadResult.ok) {
+ reloadMode = 'manual_restart_required';
+ warnings.push('Hot reload signal failed; the key/config was saved, but a manual gateway restart may be required for OpenClaw to pick it up.');
+ }
  }
 
- // Reconnect bridge WebSocket to the restarted gateway
- setTimeout(() => gateway.connect(), 5000);
-
- const response = { status: 'updating', message: 'API keys updated — restarting services' };
+ const response = restartRequested
+ ? { status: restartOk ? 'updating' : 'partial', message: restartOk ? 'API keys updated — restarting services' : 'API keys updated — restart failed', reload: reloadMode }
+ : { status: hotReloadResult?.ok ? 'updated' : 'partial', message: hotReloadResult?.ok ? 'API keys updated — hot reload requested' : 'API keys updated — manual gateway restart may be required', reload: reloadMode };
+ if (hotReloadResult?.steps?.length) response.reloadSteps = hotReloadResult.steps;
  if (warnings.length > 0) response.warnings = warnings;
- if (!restartOk) response.status = 'partial';
  res.json(response);
  } catch (err) {
  console.error('API key update failed:', err.message);
