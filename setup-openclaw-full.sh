@@ -24,6 +24,7 @@ _resolve_input() {
 # Template placeholders like {{GATEWAY_TOKEN}} are replaced by provision.js via sed.
 GATEWAY_TOKEN="$(_resolve_input "${GATEWAY_TOKEN:-}" "{{GATEWAY_TOKEN}}")"
 OPENAI_API_KEY="$(_resolve_input "${OPENAI_API_KEY:-}" "{{OPENAI_API_KEY}}")"
+OPENAI_CODEX_AUTH_PROFILE_B64="$(_resolve_input "${OPENAI_CODEX_AUTH_PROFILE_B64:-}" "{{OPENAI_CODEX_AUTH_PROFILE_B64}}")"
 ANTHROPIC_API_KEY="$(_resolve_input "${ANTHROPIC_API_KEY:-}" "{{ANTHROPIC_API_KEY}}")"
 GEMINI_API_KEY="$(_resolve_input "${GEMINI_API_KEY:-}" "{{GEMINI_API_KEY}}")"
 OPENROUTER_API_KEY="$(_resolve_input "${OPENROUTER_API_KEY:-}" "{{OPENROUTER_API_KEY}}")"
@@ -69,6 +70,7 @@ _validate_var BRIDGE_PORT "$BRIDGE_PORT" required
 _validate_var BRIDGE_AUTH_TOKEN "$BRIDGE_AUTH_TOKEN" optional
 _validate_var API_URL "$API_URL" optional
 _validate_var OPENAI_API_KEY "$OPENAI_API_KEY" optional
+_validate_var OPENAI_CODEX_AUTH_PROFILE_B64 "$OPENAI_CODEX_AUTH_PROFILE_B64" optional
 _validate_var ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY" optional
 _validate_var GEMINI_API_KEY "$GEMINI_API_KEY" optional
 _validate_var OPENROUTER_API_KEY "$OPENROUTER_API_KEY" optional
@@ -1110,16 +1112,9 @@ chmod +x /opt/openclaw-data/startup.sh
 # Auth profiles — dynamically built from all available API keys
 AUTH_PROFILES=""
 AUTH_LASTGOOD=""
-add_auth_profile() {
- local id="$1" provider="$2" key="$3"
- local entry
- # Anthropic OAuth tokens (sk-ant-oat-*) need type "token" with field "token", not "key"
- # Regular API keys (sk-ant-api*) use type "api_key" with field "key"
- if [ "$provider" = "anthropic" ] && echo "$key" | grep -q '^sk-ant-oat'; then
-  entry="\"${id}\": { \"type\": \"token\", \"provider\": \"${provider}\", \"token\": \"${key}\" }"
- else
-  entry="\"${id}\": { \"type\": \"api_key\", \"provider\": \"${provider}\", \"key\": \"${key}\" }"
- fi
+append_auth_profile_entry() {
+ local id="$1" provider="$2"
+ local entry="$3"
  local lastgood="\"${provider}\": \"${id}\""
  if [ -z "$AUTH_PROFILES" ]; then
  AUTH_PROFILES=" $entry"
@@ -1132,11 +1127,59 @@ add_auth_profile() {
  fi
 }
 
+add_auth_profile() {
+ local id="$1" provider="$2" key="$3"
+ local entry
+ # Anthropic OAuth tokens (sk-ant-oat-*) need type "token" with field "token", not "key"
+ # Regular API keys (sk-ant-api*) use type "api_key" with field "key"
+ if [ "$provider" = "anthropic" ] && echo "$key" | grep -q '^sk-ant-oat'; then
+  entry="\"${id}\": { \"type\": \"token\", \"provider\": \"${provider}\", \"token\": \"${key}\" }"
+ else
+  entry="\"${id}\": { \"type\": \"api_key\", \"provider\": \"${provider}\", \"key\": \"${key}\" }"
+ fi
+ append_auth_profile_entry "$id" "$provider" "$entry"
+}
+
+add_raw_auth_profile() {
+ local id="$1" provider="$2" profile_json="$3"
+ append_auth_profile_entry "$id" "$provider" "\"${id}\": ${profile_json}"
+}
+
 if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "__UNSET_ANTHROPIC_API_KEY__" ]; then
  add_auth_profile "anthropic:default" "anthropic" "${ANTHROPIC_API_KEY}"
 fi
 if [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "__UNSET_OPENAI_API_KEY__" ]; then
  add_auth_profile "openai:default" "openai" "${OPENAI_API_KEY}"
+fi
+if [ -n "${OPENAI_CODEX_AUTH_PROFILE_B64:-}" ] && [ "${OPENAI_CODEX_AUTH_PROFILE_B64}" != "__UNSET_OPENAI_CODEX_AUTH_PROFILE_B64__" ]; then
+ CODEX_AUTH_RECORD="$(OPENAI_CODEX_AUTH_PROFILE_B64="$OPENAI_CODEX_AUTH_PROFILE_B64" python3 - <<'PYCODEXAUTH' || true
+import base64
+import json
+import os
+import sys
+
+raw = os.environ.get("OPENAI_CODEX_AUTH_PROFILE_B64", "").strip()
+if not raw:
+    sys.exit(0)
+try:
+    profile = json.loads(base64.b64decode(raw).decode("utf-8"))
+except Exception:
+    sys.exit(0)
+if not isinstance(profile, dict) or not profile.get("access"):
+    sys.exit(0)
+profile["type"] = "oauth"
+profile["provider"] = "openai-codex"
+profile.pop("key", None)
+profile_id = profile.pop("id", None) or "openai-codex:default"
+print(profile_id)
+print(json.dumps(profile, separators=(",", ":")))
+PYCODEXAUTH
+)"
+ CODEX_AUTH_ID="$(printf '%s\n' "$CODEX_AUTH_RECORD" | sed -n '1p')"
+ CODEX_AUTH_PROFILE_JSON="$(printf '%s\n' "$CODEX_AUTH_RECORD" | sed -n '2p')"
+ if [ -n "$CODEX_AUTH_ID" ] && [ -n "$CODEX_AUTH_PROFILE_JSON" ]; then
+  add_raw_auth_profile "$CODEX_AUTH_ID" "openai-codex" "$CODEX_AUTH_PROFILE_JSON"
+ fi
 fi
 if [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "__UNSET_GEMINI_API_KEY__" ]; then
  add_auth_profile "google:default" "google" "${GEMINI_API_KEY}"
@@ -1166,7 +1209,7 @@ AUTHPROF
 # ALSO create auth-profiles.json at the root config level — Control UI reads from here
 cp /opt/openclaw-data/config/agents/main/agent/auth-profiles.json /opt/openclaw-data/config/auth-profiles.json
 
-dlog "Auth profiles configured for: $(echo "$AUTH_LASTGOOD" | grep -o '"[a-z]*"' | tr '\n' ' ' || echo 'none')"
+dlog "Auth profiles configured for: $(echo "$AUTH_LASTGOOD" | grep -o '"[a-z0-9-]*"' | tr '\n' ' ' || echo 'none')"
 
 # ── OpenClaw Workspace Bootstrap ──────────────────────────────────────
 # Workspace files are pushed AFTER deploy via the bridge API (provision.js)

@@ -2630,6 +2630,12 @@ function agentSlug(name) {
  return (name || 'default').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
+function isGatewayInheritedModel(model) {
+ if (!model) return false;
+ const m = String(model).trim().toLowerCase();
+ return m === 'openclaw' || m === 'default' || m === 'inherit' || m === 'global-default';
+}
+
 function normalizeGatewayModelId(model) {
  if (!model) return model;
  let m = String(model).trim();
@@ -2675,6 +2681,14 @@ function normalizeGatewayModelId(model) {
  if (KNOWN_MODEL_ALIASES[bare]) bare = KNOWN_MODEL_ALIASES[bare];
  if (/^claude/i.test(bare) && provider !== 'anthropic') provider = 'anthropic';
  return provider ? `${provider}/${bare}` : bare;
+}
+
+function normalizeGatewayFallbackModels(models) {
+ if (!Array.isArray(models)) return [];
+ return models
+  .filter((candidate) => candidate && !isGatewayInheritedModel(candidate))
+  .map(normalizeGatewayModelId)
+  .filter(Boolean);
 }
 
 function readCompanyNameFromDocs(companyDocs = cachedCompanyDocs) {
@@ -4520,15 +4534,17 @@ app.post('/agents', (req, res) => {
 
  // Add agent to openclaw.json agents.list
  const { fallbacks, params } = req.body;
+ const normalizedModel = model && !isGatewayInheritedModel(model) ? normalizeGatewayModelId(model) : null;
+ const normalizedFallbacks = normalizedModel ? normalizeGatewayFallbackModels(fallbacks) : [];
  updateOpenClawConfig((config) => {
  if (!config.agents.list) config.agents.list = [];
  // Remove existing entry if any
  config.agents.list = config.agents.list.filter(a => a.id !== agentId);
  config.agents.list.push({
  id: agentId,
- ...(model ? { model: {
- primary: normalizeGatewayModelId(model),
- ...(fallbacks?.length ? { fallbacks: fallbacks.map(normalizeGatewayModelId) } : {}),
+ ...(normalizedModel ? { model: {
+ primary: normalizedModel,
+ ...(normalizedFallbacks.length ? { fallbacks: normalizedFallbacks } : {}),
  } } : {}),
  ...(params ? { params } : {}),
  });
@@ -4583,16 +4599,21 @@ app.put('/agents/:name', (req, res) => {
 
  const { fallbacks: updateFallbacks, params: updateParams } = req.body;
  if (model || updateFallbacks || updateParams) {
+ const clearModelOverride = isGatewayInheritedModel(model);
+ const normalizedModel = model && !clearModelOverride ? normalizeGatewayModelId(model) : null;
+ const normalizedFallbacks = normalizeGatewayFallbackModels(updateFallbacks);
  updateOpenClawConfig((config) => {
  const entry = (config.agents.list || []).find(a => a.id === agent.agentId);
  if (entry) {
- if (model) {
+ if (clearModelOverride) {
+ delete entry.model;
+ } else if (normalizedModel) {
  entry.model = {
- primary: normalizeGatewayModelId(model),
- ...(updateFallbacks?.length ? { fallbacks: updateFallbacks.map(normalizeGatewayModelId) } : (entry.model?.fallbacks ? { fallbacks: entry.model.fallbacks } : {})),
+ primary: normalizedModel,
+ ...(normalizedFallbacks.length ? { fallbacks: normalizedFallbacks } : (entry.model?.fallbacks ? { fallbacks: entry.model.fallbacks } : {})),
  };
- } else if (updateFallbacks?.length && entry.model) {
- entry.model.fallbacks = updateFallbacks.map(normalizeGatewayModelId);
+ } else if (normalizedFallbacks.length && entry.model) {
+ entry.model.fallbacks = normalizedFallbacks;
  }
  if (updateParams) entry.params = updateParams;
  }
