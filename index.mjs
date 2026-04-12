@@ -2883,13 +2883,12 @@ function ensureAgentWorkspacePath(agentId = 'main') {
 }
 
 function resolveMissionControlSessionKey({ sessionKey, agentName, context } = {}) {
- if (sessionKey) return sessionKey;
+ if (typeof sessionKey === 'string' && sessionKey.trim()) return sessionKey.trim();
  const taskId = context?.taskId || null;
  const channel = context?.channel || 'general';
  const slug = agentSlug(agentName);
  const registered = agentRegistry.get(slug);
- const isSPC = registered?.role === 'SPC';
- const gatewayAgentId = isSPC ? (registered?.agentId || 'main') : 'main';
+ const gatewayAgentId = resolveNativeGatewayAgentId(registered, slug);
  return taskId
    ? `agent:${gatewayAgentId}:hook:crabhq:${slug}:task:${taskId}`
    : `agent:${gatewayAgentId}:hook:crabhq:${slug}:channel:${channel}`;
@@ -3006,13 +3005,13 @@ async function handleIncomingTask(req, res) {
  const channel = context?.channel || 'general';
  const isSPC = registered?.role === 'SPC';
  const agentId = resolveNativeGatewayAgentId(registered, slug);
- // Session key MUST be in canonical format: agent:{agentId}:{rest}
- // Task-scoped sessions: each task gets isolated context on the gateway
- // Chat messages persist per channel
- const _taskId = context?.taskId;
- const sessionKey = _taskId
-   ? `agent:${agentId}:hook:crabhq:${slug}:task:${_taskId}`
-   : `agent:${agentId}:hook:crabhq:${slug}:channel:${channel}`;
+ // Task-scoped sessions share context per task, chat sessions per channel.
+ // CrabsHQ may also pass explicit labeled system session keys for utility runs.
+ const sessionKey = resolveMissionControlSessionKey({
+   sessionKey: req.body?.sessionKey,
+   agentName,
+   context,
+ });
  const fullTask = buildTaskMessage(req.body);
 
  // Persist any skill credentials to the container environment
@@ -3089,13 +3088,13 @@ async function handleIncomingTaskStream(req, res) {
  const channel = context?.channel || 'general';
  const isSPC = registered?.role === 'SPC';
  const agentId = resolveNativeGatewayAgentId(registered, slug);
- // Session key MUST be in canonical format: agent:{agentId}:{rest}
- // Task-scoped sessions: each task gets isolated context on the gateway
- // Chat messages persist per channel
- const _taskId = context?.taskId;
- const sessionKey = _taskId
-   ? `agent:${agentId}:hook:crabhq:${slug}:task:${_taskId}`
-   : `agent:${agentId}:hook:crabhq:${slug}:channel:${channel}`;
+ // Task-scoped sessions share context per task, chat sessions per channel.
+ // CrabsHQ may also pass explicit labeled system session keys for utility runs.
+ const sessionKey = resolveMissionControlSessionKey({
+   sessionKey: req.body?.sessionKey,
+   agentName,
+   context,
+ });
  const fullTask = buildTaskMessage(req.body);
 
  // Persist any skill credentials to the container environment
