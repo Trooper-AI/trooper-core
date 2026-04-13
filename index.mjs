@@ -2932,10 +2932,75 @@ function buildInstalledSkillsPromptBlock(installedSkills) {
 function resolveNativeGatewayAgentId(registered, slug) {
  const normalizedSlug = String(slug || '').trim().toLowerCase();
  if (registered?.role === 'SPC') {
-  if (registered?.agentId) return registered.agentId;
-  return normalizedSlug.startsWith('spc-') ? normalizedSlug : `spc-${normalizedSlug}`;
+   const registeredAgentId = String(registered?.agentId || '').trim().toLowerCase();
+   if (registeredAgentId && registeredAgentId !== 'main') return registeredAgentId;
+   return normalizedSlug.startsWith('spc-') ? normalizedSlug : `spc-${normalizedSlug}`;
  }
  return 'main';
+}
+
+function normalizeRegistryRole(role, fallback = 'SPC') {
+ const normalized = String(role || fallback || 'SPC').trim().toUpperCase();
+ return normalized === 'LEAD' ? 'LEAD' : 'SPC';
+}
+
+function desiredAgentIdForRole(slug, role) {
+ return normalizeRegistryRole(role) === 'LEAD' ? 'main' : `spc-${slug}`;
+}
+
+function removeOpenClawAgentConfig(agentId) {
+ if (!agentId || agentId === 'main') return;
+ updateOpenClawConfig((config) => {
+  config.agents.list = (config.agents.list || []).filter((entry) => entry.id !== agentId);
+ });
+}
+
+function upsertOpenClawSpcConfig(agentId, { model, fallbacks, params } = {}) {
+ const clearModelOverride = isGatewayInheritedModel(model);
+ const normalizedModel = model && !clearModelOverride ? normalizeGatewayModelId(model) : null;
+ const normalizedFallbacks = normalizeGatewayFallbackModels(fallbacks);
+ updateOpenClawConfig((config) => {
+  if (!config.agents.list) config.agents.list = [];
+  config.agents.list = config.agents.list.filter((entry) => entry.id !== agentId);
+  config.agents.list.push({
+   id: agentId,
+   ...(normalizedModel ? { model: {
+    primary: normalizedModel,
+    ...(normalizedFallbacks.length ? { fallbacks: normalizedFallbacks } : {}),
+   } } : {}),
+   ...(params ? { params } : {}),
+  });
+ });
+}
+
+function ensureSpcAgentRuntime(agentId) {
+ const agentDir = `/opt/openclaw-data/config/agents/${agentId}`;
+ execSync(`mkdir -p ${agentDir}/agent ${agentDir}/sessions`, { timeout: 5000 });
+ try {
+  const mainAuth = readFileSync('/opt/openclaw-data/config/agents/main/agent/auth-profiles.json', 'utf8');
+  writeFileSync(`${agentDir}/agent/auth-profiles.json`, mainAuth);
+ } catch {}
+ execSync(`chown -R 1000:1000 ${agentDir}`, { timeout: 5000 });
+ return ensureAgentWorkspacePath(agentId);
+}
+
+function buildRegisteredAgentProfile({ requestedName, slug, existing = {}, incoming = {} }) {
+ const normalizedRole = normalizeRegistryRole(
+  incoming?.role,
+  existing?.role || (requestedName === 'main' || requestedName === 'Team Lead' ? 'LEAD' : 'SPC'),
+ );
+ return {
+  ...existing,
+  ...incoming,
+  agentId: desiredAgentIdForRole(slug, normalizedRole),
+  name: incoming?.name || existing?.name || requestedName,
+  title: incoming?.title || existing?.title || (normalizedRole === 'LEAD' ? 'Team Lead' : 'Specialist'),
+  role: normalizedRole,
+  skills: Array.isArray(incoming?.skills) ? incoming.skills : (existing.skills || []),
+  tools: Array.isArray(incoming?.tools) ? incoming.tools : (existing.tools || []),
+  installedSkillIds: Array.isArray(incoming?.installedSkillIds) ? incoming.installedSkillIds : (existing.installedSkillIds || []),
+  avatar: incoming?.avatar !== undefined ? (incoming.avatar || null) : (existing.avatar || null),
+ };
 }
 
 function buildCrabsHqSystemPrompt(registered, context = {}, explicitSystemPrompt = undefined) {
@@ -4674,22 +4739,30 @@ app.put('/agents/:name', (req, res) => {
  const agent = agentRegistry.get(slug);
  if (!agent) return res.status(404).json({ error: `Agent "${req.params.name}" not found` });
 
- const { soul, title, skills, tools, model, workspaceFiles, installedSkillIds, avatar } = req.body;
- const workspacePath = ensureAgentWorkspacePath(agent.agentId);
+ const { soul, title, skills, tools, model, workspaceFiles, installedSkillIds, avatar, role, fallbacks: updateFallbacks, params: updateParams } = req.body;
 
  try {
- // Ensure workspace directory exists
- execSync(`mkdir -p ${workspacePath}/memory`, { timeout: 5000 });
-
- const nextProfile = {
-   ...agent,
+ const previousAgentId = agent.agentId;
+ const nextProfile = buildRegisteredAgentProfile({
+  requestedName: req.params.name,
+  slug,
+  existing: agent,
+  incoming: {
    soul: soul ?? agent.soul,
    title: title ?? agent.title,
    skills: skills ?? agent.skills ?? [],
    tools: tools ?? agent.tools ?? [],
    installedSkillIds: installedSkillIds ?? agent.installedSkillIds ?? [],
-   avatar: avatar !== undefined ? (avatar || null) : agent.avatar || null,
- };
+   avatar,
+   role,
+  },
+ });
+ if (previousAgentId && previousAgentId !== nextProfile.agentId && previousAgentId !== 'main') {
+  removeOpenClawAgentConfig(previousAgentId);
+ }
+ const workspacePath = nextProfile.role === 'LEAD'
+  ? getAgentWorkspacePath('main')
+  : ensureSpcAgentRuntime(nextProfile.agentId);
  syncRuntimeIdentityFiles({ workspacePath, agentProfile: nextProfile });
  Object.assign(agent, nextProfile);
 
@@ -4703,36 +4776,19 @@ app.put('/agents/:name', (req, res) => {
 
  saveAgentRegistry();
 
- const { fallbacks: updateFallbacks, params: updateParams } = req.body;
- if (model || updateFallbacks || updateParams) {
- const clearModelOverride = isGatewayInheritedModel(model);
- const normalizedModel = model && !clearModelOverride ? normalizeGatewayModelId(model) : null;
- const normalizedFallbacks = normalizeGatewayFallbackModels(updateFallbacks);
- updateOpenClawConfig((config) => {
- const entry = (config.agents.list || []).find(a => a.id === agent.agentId);
- if (entry) {
- if (clearModelOverride) {
- delete entry.model;
- } else if (normalizedModel) {
- entry.model = {
- primary: normalizedModel,
- ...(normalizedFallbacks.length ? { fallbacks: normalizedFallbacks } : (entry.model?.fallbacks ? { fallbacks: entry.model.fallbacks } : {})),
- };
- } else if (normalizedFallbacks.length && entry.model) {
- entry.model.fallbacks = normalizedFallbacks;
- }
- if (updateParams) entry.params = updateParams;
- }
- });
+ if (nextProfile.role === 'SPC') {
+  upsertOpenClawSpcConfig(nextProfile.agentId, { model, fallbacks: updateFallbacks, params: updateParams });
  }
 
- execSync(`chown -R 1000:1000 /opt/openclaw-data/config/agents/${agent.agentId}`, { timeout: 5000 });
+ if (nextProfile.role === 'SPC') {
+  execSync(`chown -R 1000:1000 /opt/openclaw-data/config/agents/${nextProfile.agentId}`, { timeout: 5000 });
+ }
 
  // Persist updated registry
  saveAgentRegistry();
 
- console.log(`✅ Updated SPC agent: ${req.params.name} (soul:${!!soul} title:${!!title} skills:${!!skills?.length} tools:${!!tools?.length} model:${!!model})`);
- res.json({ success: true, agentId: agent.agentId, updated: { soul: !!soul, title: !!title, skills: !!skills?.length, tools: !!tools?.length, model: !!model } });
+ console.log(`✅ Updated ${nextProfile.role} agent: ${req.params.name} (agentId:${nextProfile.agentId} soul:${!!soul} title:${!!title} skills:${!!skills?.length} tools:${!!tools?.length} model:${!!model})`);
+ res.json({ success: true, agentId: nextProfile.agentId, role: nextProfile.role, updated: { soul: !!soul, title: !!title, skills: !!skills?.length, tools: !!tools?.length, model: !!model } });
  } catch (err) {
  res.status(500).json({ error: `Failed to update agent: ${err.message}` });
  }
@@ -4745,22 +4801,24 @@ app.put('/agents/:name/identity', (req, res) => {
  const existing = isMainAgent ? (agentRegistry.get(slug) || { agentId: 'main', role: 'LEAD', name: requestedName }) : agentRegistry.get(slug);
  if (!existing) return res.status(404).json({ error: `Agent "${requestedName}" not found` });
 
- const nextProfile = {
-   ...existing,
-   ...req.body,
-   name: req.body?.name || existing.name || requestedName,
-   title: req.body?.title || existing.title || (existing.role === 'LEAD' ? 'Team Lead' : 'Specialist'),
-   role: req.body?.role || existing.role || (isMainAgent ? 'LEAD' : 'SPC'),
-   skills: Array.isArray(req.body?.skills) ? req.body.skills : (existing.skills || []),
-   tools: Array.isArray(req.body?.tools) ? req.body.tools : (existing.tools || []),
-   installedSkillIds: Array.isArray(req.body?.installedSkillIds) ? req.body.installedSkillIds : (existing.installedSkillIds || []),
-   avatar: req.body?.avatar !== undefined ? (req.body.avatar || null) : (existing.avatar || null),
- };
- const workspacePath = isMainAgent
+ const previousAgentId = existing.agentId;
+ const nextProfile = buildRegisteredAgentProfile({
+  requestedName,
+  slug,
+  existing,
+  incoming: req.body || {},
+ });
+ if (previousAgentId && previousAgentId !== nextProfile.agentId && previousAgentId !== 'main') {
+  removeOpenClawAgentConfig(previousAgentId);
+ }
+ const workspacePath = nextProfile.role === 'LEAD'
    ? getAgentWorkspacePath('main')
-   : ensureAgentWorkspacePath(existing.agentId);
+   : ensureSpcAgentRuntime(nextProfile.agentId);
 
  try {
+  if (nextProfile.role === 'SPC') {
+   upsertOpenClawSpcConfig(nextProfile.agentId);
+  }
   syncRuntimeIdentityFiles({
    workspacePath,
    agentProfile: nextProfile,
