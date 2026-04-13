@@ -2894,6 +2894,22 @@ function resolveMissionControlSessionKey({ sessionKey, agentName, context } = {}
    : `agent:${gatewayAgentId}:hook:crabhq:${slug}:channel:${channel}`;
 }
 
+function extractAgentIdFromSessionKey(sessionKey) {
+ const value = String(sessionKey || '').trim();
+ if (!value) return null;
+ const match = value.match(/^agent:([^:]+):/i);
+ return match?.[1] ? String(match[1]).trim() : null;
+}
+
+function resolveMissionControlAgentId({ sessionKey, agentName, context, registered = null, slug = '' } = {}) {
+ const resolvedSessionKey = resolveMissionControlSessionKey({ sessionKey, agentName, context });
+ const explicitAgentId = extractAgentIdFromSessionKey(resolvedSessionKey);
+ if (explicitAgentId) return explicitAgentId;
+ const normalizedSlug = slug || agentSlug(agentName);
+ const registryEntry = registered || agentRegistry.get(normalizedSlug);
+ return resolveNativeGatewayAgentId(registryEntry, normalizedSlug);
+}
+
 // Helper: write file inside OpenClaw container
 function writeContainerFile(path, content) {
  const escaped = content.replace(/'/g, "'\\''");
@@ -3074,13 +3090,19 @@ async function handleIncomingTask(req, res) {
  const isTaskWork = !!(context?.taskId);
  const channel = context?.channel || 'general';
  const isSPC = registered?.role === 'SPC';
- const agentId = resolveNativeGatewayAgentId(registered, slug);
  // Task-scoped sessions share context per task, chat sessions per channel.
  // CrabsHQ may also pass explicit labeled system session keys for utility runs.
  const sessionKey = resolveMissionControlSessionKey({
    sessionKey: req.body?.sessionKey,
    agentName,
    context,
+ });
+ const agentId = resolveMissionControlAgentId({
+   sessionKey,
+   agentName,
+   context,
+   registered,
+   slug,
  });
  const fullTask = buildTaskMessage(req.body);
 
@@ -3161,13 +3183,19 @@ async function handleIncomingTaskStream(req, res) {
  const isTaskWork = !!(context?.taskId);
  const channel = context?.channel || 'general';
  const isSPC = registered?.role === 'SPC';
- const agentId = resolveNativeGatewayAgentId(registered, slug);
  // Task-scoped sessions share context per task, chat sessions per channel.
  // CrabsHQ may also pass explicit labeled system session keys for utility runs.
  const sessionKey = resolveMissionControlSessionKey({
    sessionKey: req.body?.sessionKey,
    agentName,
    context,
+ });
+ const agentId = resolveMissionControlAgentId({
+   sessionKey,
+   agentName,
+   context,
+   registered,
+   slug,
  });
  const fullTask = buildTaskMessage(req.body);
 
