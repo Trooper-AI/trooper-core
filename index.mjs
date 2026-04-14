@@ -6212,6 +6212,34 @@ app.get('/config/api-keys', (req, res) => {
 });
 
 let keysUpdateInProgress = false;
+
+function normalizeComposioApiKey(rawValue) {
+ if (rawValue === undefined || rawValue === null) return rawValue;
+ let value = String(rawValue).replace(/^\uFEFF/, '').trim();
+ if (!value) return '';
+
+ const firstNonEmptyLine = value
+ .split(/\r?\n/)
+ .map(line => line.trim())
+ .find(Boolean);
+ value = firstNonEmptyLine || '';
+
+ let changed = true;
+ while (changed && value) {
+ const nextValue = value
+ .replace(/^['"`]+|['"`]+$/g, '')
+ .replace(/^COMPOSIO_API_KEY\s*=\s*/i, '')
+ .replace(/^x-api-key\s*:\s*/i, '')
+ .replace(/^authorization\s*:\s*/i, '')
+ .replace(/^bearer\s+/i, '')
+ .trim();
+ changed = nextValue !== value;
+ value = nextValue;
+ }
+
+ return value;
+}
+
 app.post('/config/api-keys', async (req, res) => {
  if (keysUpdateInProgress) return res.status(409).json({ error: 'Key update already in progress' });
  keysUpdateInProgress = true;
@@ -6242,7 +6270,7 @@ app.post('/config/api-keys', async (req, res) => {
  setEnvVar('OPENAI_API_KEY', openaiKey);
  setEnvVar('GEMINI_API_KEY', geminiKey);
  setEnvVar('BRAVE_API_KEY', braveKey);
- setEnvVar('COMPOSIO_API_KEY', composioKey);
+ setEnvVar('COMPOSIO_API_KEY', normalizeComposioApiKey(composioKey));
  setEnvVar('OPENROUTER_API_KEY', openrouterKey);
  setEnvVar('MISTRAL_API_KEY', mistralKey);
  setEnvVar('QWEN_API_KEY', qwenKey);
@@ -7650,7 +7678,7 @@ function getComposioKey() {
  try {
  const envContent = readFileSync('/opt/openclaw/.env', 'utf8');
  const m = envContent.match(/^COMPOSIO_API_KEY=(.*)$/m);
- return m ? m[1].trim() : '';
+ return m ? normalizeComposioApiKey(m[1]) : '';
  } catch { return ''; }
 }
 app.get('/composio/connections', async (req, res) => {
