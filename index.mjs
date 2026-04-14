@@ -3022,9 +3022,10 @@ function buildRegisteredAgentProfile({ requestedName, slug, existing = {}, incom
 function buildCrabsHqSystemPrompt(registered, context = {}, explicitSystemPrompt = undefined) {
  if (explicitSystemPrompt) {
   let prompt = explicitSystemPrompt;
-  const laneBlock = buildExecutionLanePromptBlock({
+ const laneBlock = buildExecutionLanePromptBlock({
    executionLane: context?.executionLane,
    browserTask: context?.browserTask === true,
+   browserMode: context?.browserMode || '',
    projectRef: context?.projectRef || null,
    deviceRef: context?.deviceRef || null,
   });
@@ -3038,6 +3039,7 @@ function buildCrabsHqSystemPrompt(registered, context = {}, explicitSystemPrompt
   taskTitle: context?.taskTitle || '',
   executionLane: context?.executionLane || '',
   browserTask: context?.browserTask === true,
+  browserMode: context?.browserMode || '',
   projectRef: context?.projectRef || null,
   deviceRef: context?.deviceRef || null,
   senderName: context?.senderName || '',
