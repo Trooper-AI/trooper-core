@@ -472,9 +472,9 @@ const deviceIdentity = loadOrCreateDeviceIdentity();
 const app = express();
 const PORT = parseInt(process.env.BRIDGE_PORT || '3002');
 const server = createServer(app);
-const bridgeWS = new BridgeWSServer({ server, path: '/ws' });
-initFirebaseAuth();
 const BRIDGE_AUTH_TOKEN = process.env.BRIDGE_AUTH_TOKEN || '';
+const bridgeWS = new BridgeWSServer({ server, path: '/ws', bridgeAuthToken: BRIDGE_AUTH_TOKEN });
+initFirebaseAuth();
 const MISSION_CONTROL_URL = process.env.MISSION_CONTROL_URL || process.env.CRABHQ_CALLBACK_URL || '';
 
 // OpenClaw gateway connection config
