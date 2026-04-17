@@ -291,3 +291,16 @@ export const policies = sqliteTable("policies", {
   created_at: integer("created_at").notNull().default(sql`(unixepoch('now') * 1000)`),
   updated_at: integer("updated_at").notNull().default(sql`(unixepoch('now') * 1000)`),
 });
+
+// ── cf_tasks ──────────────────────────────────────────────────────────
+// Metadata-only mirror of the CF Durable Object's view of each task. Lets the
+// DO probe status and request resume on its own crash-recovery.
+export const cfTasks = sqliteTable("cf_tasks", {
+  task_id: text("task_id").primaryKey(),
+  request_id: text("request_id"),
+  status: text("status").notNull().default("running"),
+  step: integer("step").notNull().default(0),
+  callback_url: text("callback_url"),
+  created_at: integer("created_at").notNull().default(sql`(unixepoch('now') * 1000)`),
+  updated_at: integer("updated_at").notNull().default(sql`(unixepoch('now') * 1000)`),
+});
