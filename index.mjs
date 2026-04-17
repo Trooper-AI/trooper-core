@@ -44,6 +44,7 @@ import { createTask, getTask, listTasks, updateTask, deleteTask, addComment, add
 import { messages as messagesTable, agents as agentsTable, humans as humansTable, contexts as contextsTable, conversations as conversationsTable, activities as activitiesTable, notifications as notificationsTable, skills as skillsTable, rules as rulesTable, playbooks as playbooksTable, policies as policiesTable, config as configTable } from './db/schema.mjs';
 import { eq, desc } from 'drizzle-orm';
 import { registerApiRoutes } from './lib/api-routes.mjs';
+import { recordTaskStart, updateTaskStatus, getTask as getCfTask, notifyCallback } from './lib/cf-tracker.mjs';
 import { createSSESender } from './lib/sse-stream.mjs';
 import { ensureDefaultSkillPack } from './lib/default-skill-pack.mjs';
 import {
@@ -3166,10 +3167,22 @@ function ensureSkillCredentials(skillCredentials) {
 // ── Core Task Handler (JSON — backward compatible) ───────────────────
 async function handleIncomingTask(req, res) {
  const { requestId, task, type, source, agentName, context,
- agentContext, systemPrompt, installedSkills, skillCredentials, thinking, model, timestamp } = req.body;
+ agentContext, systemPrompt, installedSkills, skillCredentials, thinking, model, timestamp,
+ callbackUrl } = req.body;
  if (!task) return res.status(400).json({ error: 'Missing task' });
 
  const id = requestId || `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+ // Idempotency gate for the CF control plane. If a previous invocation for
+ // the same taskId already completed, short-circuit with its terminal state.
+ const cfTaskId = context?.taskId || null;
+ if (cfTaskId) {
+   const existing = getCfTask(cfTaskId);
+   if (existing && (existing.status === 'done' || existing.status === 'failed')) {
+     return res.status(200).json({ success: existing.status === 'done', requestId: existing.request_id || id, status: existing.status, idempotent: true });
+   }
+   recordTaskStart({ taskId: cfTaskId, requestId: id, callbackUrl });
+ }
  const slug = agentSlug(agentName);
  const registered = agentRegistry.get(slug);
  const isTaskWork = !!(context?.taskId);
@@ -3257,12 +3270,24 @@ async function handleIncomingTask(req, res) {
  sessionId: skillSession.sessionId,
  provider: skillSession.provider,
  } : null;
+ if (cfTaskId) {
+   updateTaskStatus(cfTaskId, { status: 'done' });
+   notifyCallback(cfTaskId, { status: 'done' }).catch(() => {});
+ }
  return res.json({ success: true, result, requestId: id, via: 'websocket', agentId, browserSession });
+ }
+ if (cfTaskId) {
+   updateTaskStatus(cfTaskId, { status: 'failed' });
+   notifyCallback(cfTaskId, { status: 'failed' }).catch(() => {});
  }
  res.status(502).json({ error: 'Agent returned empty response', requestId: id });
  } catch (err) {
  console.error(`[${id}] Agent failed: ${err.message}`);
  captureLog('error', `Agent failed: ${err.message}`, { requestId: id, agent: agentName, stack: err.stack });
+ if (cfTaskId) {
+   updateTaskStatus(cfTaskId, { status: 'failed' });
+   notifyCallback(cfTaskId, { status: 'failed' }).catch(() => {});
+ }
  res.status(502).json({ error: `Agent failed: ${err.message}`, requestId: id });
  }
 }
@@ -4699,6 +4724,26 @@ app.post('/files/write', (req, res) => {
 app.post('/webhook/crabhq', handleIncomingTask);
 app.post('/webhook/mission-control', handleIncomingTask);
 app.post('/webhook/mission-control/stream', handleIncomingTaskStream);
+
+// Cloudflare control-plane probes. Metadata-only; no task body replay yet —
+// full resume requires persisting the original payload, which is Phase 2.
+app.post('/webhook/crabhq/status', (req, res) => {
+  const { taskId } = req.body || {};
+  if (!taskId) return res.status(400).json({ error: 'Missing taskId' });
+  const row = getCfTask(taskId);
+  if (!row) return res.status(404).json({ error: 'Unknown task' });
+  res.json({ taskId: row.task_id, status: row.status, step: row.step });
+});
+
+app.post('/webhook/crabhq/resume', (req, res) => {
+  const { taskId } = req.body || {};
+  if (!taskId) return res.status(400).json({ error: 'Missing taskId' });
+  const row = getCfTask(taskId);
+  if (!row) return res.status(404).json({ error: 'Unknown task' });
+  // In Phase 1 the Bridge doesn't persist the full payload, so we report the
+  // last known status. Replay-from-disk lands in Phase 2.
+  res.json({ taskId: row.task_id, status: row.status, step: row.step, resumed: false });
+});
 app.post('/webhook/mission-control/stop', async (req, res) => {
  try {
   const sessionKey = resolveMissionControlSessionKey(req.body || {});

@@ -303,6 +303,19 @@ export function migrate(sqlite) {
       updated_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
     );
 
+    -- Cloudflare control-plane tracking. Metadata-only mirror of the DO's
+    -- task state — status + step, no payload duplication. Used to answer
+    -- status probes and to let the DO request a resume after a crash.
+    CREATE TABLE IF NOT EXISTS cf_tasks (
+      task_id    TEXT PRIMARY KEY,
+      request_id TEXT,
+      status     TEXT NOT NULL DEFAULT 'running',
+      step       INTEGER NOT NULL DEFAULT 0,
+      callback_url TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
+    );
+
   `);
 
   console.log('[DB] Migrations complete.');
