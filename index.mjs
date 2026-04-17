@@ -69,6 +69,78 @@ import {
 
 const OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write', 'operator.pairing', 'operator.approvals'];
 
+function looksLikeGeneratedDeviceName(value, deviceId = '') {
+ const text = String(value || '').trim();
+ if (!text) return true;
+ const compact = text.replace(/[-_:]/g, '');
+ const deviceCompact = String(deviceId || '').replace(/[-_:]/g, '');
+ if (deviceCompact && compact.toLowerCase() === deviceCompact.toLowerCase()) return true;
+ if (compact.length >= 24 && /^[a-f0-9]+$/i.test(compact)) return true;
+ if (/^(unknown|unnamed device|device|node)$/i.test(text)) return true;
+ return false;
+}
+
+function firstUsableDeviceName(deviceId, ...values) {
+ for (const value of values) {
+  const text = String(value || '').trim();
+  if (!looksLikeGeneratedDeviceName(text, deviceId)) return text;
+ }
+ return '';
+}
+
+function resolvePairedDisplayName(entry = {}, deviceId = '') {
+ const nested = entry.client || entry.metadata?.client || {};
+ const metadata = entry.metadata || {};
+ const current = firstUsableDeviceName(deviceId, entry.displayName);
+ if (current) return current;
+
+ const candidate = firstUsableDeviceName(
+  deviceId,
+  entry.name,
+  entry.label,
+  entry.title,
+  entry.hostname,
+  entry.hostName,
+  entry.deviceName,
+  entry.clientDisplayName,
+  nested.displayName,
+  nested.name,
+  metadata.displayName,
+  metadata.deviceName,
+  metadata.hostname,
+  metadata.hostName,
+  metadata.name,
+ );
+ if (candidate) return candidate;
+
+ if (deviceIdentity?.deviceId && String(deviceId) === String(deviceIdentity.deviceId)) return 'CrabsHQ Bridge';
+ const platform = String(entry.platform || metadata.platform || nested.platform || '').toLowerCase();
+ if (platform.includes('mac')) return 'Mac Node';
+ if (platform.includes('linux')) return 'Linux Node';
+ if (platform.includes('win')) return 'Windows Node';
+ return 'OpenClaw Device';
+}
+
+function normalizePairedDeviceMap(paired = {}) {
+ let changed = false;
+ const next = {};
+ for (const [key, value] of Object.entries(paired || {})) {
+  const entry = value && typeof value === 'object' ? { ...value } : {};
+  const deviceId = String(entry.deviceId || key || '').trim();
+  if (deviceId && entry.deviceId !== deviceId) {
+   entry.deviceId = deviceId;
+   changed = true;
+  }
+  const displayName = resolvePairedDisplayName(entry, deviceId);
+  if (displayName && entry.displayName !== displayName) {
+   entry.displayName = displayName;
+   changed = true;
+  }
+  next[key] = entry;
+ }
+ return { paired: next, changed };
+}
+
 // Build a human-readable summary for a completed tool call
 // Used for native tool_use/tool_result events from gateway
 
@@ -591,6 +663,8 @@ class OpenClawGateway {
  fs.mkdirSync(DEVICES_DIR, { recursive: true });
  let existing = {};
  try { existing = JSON.parse(fs.readFileSync(PAIRED_JSON_PATH, 'utf8')); } catch {}
+ const normalized = normalizePairedDeviceMap(existing);
+ existing = normalized.paired;
  if (!existing[deviceIdentity.deviceId]) {
  const pubKey = getDevicePublicKeyBase64Url(deviceIdentity);
  existing[deviceIdentity.deviceId] = {
@@ -604,6 +678,11 @@ class OpenClawGateway {
  await _run(`chown -R 1000:1000 ${DEVICES_DIR} 2>/dev/null || true`).catch(() => {});
  console.log('[OpenClaw] Bridge device written to paired.json for sessions_spawn');
  } else {
+ if (normalized.changed) {
+ fs.writeFileSync(PAIRED_JSON_PATH, JSON.stringify(existing, null, 2), { mode: 0o600 });
+ await _run(`chown -R 1000:1000 ${DEVICES_DIR} 2>/dev/null || true`).catch(() => {});
+ console.log('[OpenClaw] Normalized paired device display names');
+ }
  console.log('[OpenClaw] Bridge device already in paired.json');
  }
  } catch (e) { console.warn('[OpenClaw] paired.json auto-approve failed:', e.message); }
@@ -857,6 +936,8 @@ class OpenClawGateway {
  fs.mkdirSync(DEVICES_DIR, { recursive: true });
  let existing = {};
  try { existing = JSON.parse(fs.readFileSync(PAIRED_JSON_PATH, 'utf8')); } catch {}
+ const normalized = normalizePairedDeviceMap(existing);
+ existing = normalized.paired;
  existing[deviceIdentity.deviceId] = deviceEntry;
  fs.writeFileSync(PAIRED_JSON_PATH, JSON.stringify(existing, null, 2), { mode: 0o600 });
  // Fix ownership so gateway container (uid 1000) can read it
@@ -4044,6 +4125,13 @@ app.get('/admin/devices', (req, res) => {
  try {
    let paired = {};
    try { paired = JSON.parse(readFileSync(PAIRED_JSON_PATH_ADMIN, 'utf8')); } catch {}
+   const normalized = normalizePairedDeviceMap(paired);
+   paired = normalized.paired;
+   if (normalized.changed) {
+     mkdirSync(DEVICES_DIR_ADMIN, { recursive: true });
+     writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(paired, null, 2), { mode: 0o600 });
+     try { execSync(`chown -R 1000:1000 ${DEVICES_DIR_ADMIN} 2>/dev/null || true`, { timeout: 5000 }); } catch {}
+   }
 
    const devices = Object.values(paired).map(d => ({
      deviceId: d.deviceId,
@@ -6032,12 +6120,18 @@ app.post('/gateway/patch-auth', (req, res) => {
  execSync('mkdir -p ' + DEVICES_DIR, { timeout: 5000 });
  let paired = {};
  try { paired = JSON.parse(readFileSync(PAIRED_PATH, 'utf8')); } catch {}
+ const normalized = normalizePairedDeviceMap(paired);
+ paired = normalized.paired;
  if (!paired[deviceIdentity.deviceId]) {
  const pubKey = getDevicePublicKeyBase64Url(deviceIdentity);
  paired[deviceIdentity.deviceId] = { deviceId: deviceIdentity.deviceId, publicKey: pubKey, displayName: 'CrabsHQ Bridge', platform: 'linux', role: 'operator', roles: ['operator'], scopes: OPERATOR_SCOPES, clientId: 'gateway-client', clientMode: 'backend', approvedAt: Date.now(), approved: true, ts: Date.now() };
  writeFileSync(PAIRED_PATH, JSON.stringify(paired, null, 2));
  execSync('chown -R 1000:1000 ' + DEVICES_DIR + ' 2>/dev/null || true', { timeout: 5000 });
  console.log('[bridge] Added device to paired.json');
+ } else if (normalized.changed) {
+ writeFileSync(PAIRED_PATH, JSON.stringify(paired, null, 2));
+ execSync('chown -R 1000:1000 ' + DEVICES_DIR + ' 2>/dev/null || true', { timeout: 5000 });
+ console.log('[bridge] Normalized paired device display names');
  }
  // Restart gateway to apply paired.json changes
  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
