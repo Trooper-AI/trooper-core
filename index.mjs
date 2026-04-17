@@ -44,7 +44,7 @@ import { createTask, getTask, listTasks, updateTask, deleteTask, addComment, add
 import { messages as messagesTable, agents as agentsTable, humans as humansTable, contexts as contextsTable, conversations as conversationsTable, activities as activitiesTable, notifications as notificationsTable, skills as skillsTable, rules as rulesTable, playbooks as playbooksTable, policies as policiesTable, config as configTable } from './db/schema.mjs';
 import { eq, desc } from 'drizzle-orm';
 import { registerApiRoutes } from './lib/api-routes.mjs';
-import { recordTaskStart, updateTaskStatus, getTask as getCfTask, notifyCallback } from './lib/cf-tracker.mjs';
+import { recordTaskStart, updateTaskStatus, getTask as getCfTask, getTaskPayload as getCfTaskPayload, notifyCallback, markInFlight, clearInFlight, isInFlight } from './lib/cf-tracker.mjs';
 import { createSSESender } from './lib/sse-stream.mjs';
 import { ensureDefaultSkillPack } from './lib/default-skill-pack.mjs';
 import {
@@ -3181,7 +3181,8 @@ async function handleIncomingTask(req, res) {
    if (existing && (existing.status === 'done' || existing.status === 'failed')) {
      return res.status(200).json({ success: existing.status === 'done', requestId: existing.request_id || id, status: existing.status, idempotent: true });
    }
-   recordTaskStart({ taskId: cfTaskId, requestId: id, callbackUrl });
+   recordTaskStart({ taskId: cfTaskId, requestId: id, callbackUrl, payload: req.body });
+   markInFlight(cfTaskId);
  }
  const slug = agentSlug(agentName);
  const registered = agentRegistry.get(slug);
@@ -3272,12 +3273,14 @@ async function handleIncomingTask(req, res) {
  } : null;
  if (cfTaskId) {
    updateTaskStatus(cfTaskId, { status: 'done' });
+   clearInFlight(cfTaskId);
    notifyCallback(cfTaskId, { status: 'done' }).catch(() => {});
  }
  return res.json({ success: true, result, requestId: id, via: 'websocket', agentId, browserSession });
  }
  if (cfTaskId) {
    updateTaskStatus(cfTaskId, { status: 'failed' });
+   clearInFlight(cfTaskId);
    notifyCallback(cfTaskId, { status: 'failed' }).catch(() => {});
  }
  res.status(502).json({ error: 'Agent returned empty response', requestId: id });
@@ -3286,6 +3289,7 @@ async function handleIncomingTask(req, res) {
  captureLog('error', `Agent failed: ${err.message}`, { requestId: id, agent: agentName, stack: err.stack });
  if (cfTaskId) {
    updateTaskStatus(cfTaskId, { status: 'failed' });
+   clearInFlight(cfTaskId);
    notifyCallback(cfTaskId, { status: 'failed' }).catch(() => {});
  }
  res.status(502).json({ error: `Agent failed: ${err.message}`, requestId: id });
@@ -4725,14 +4729,16 @@ app.post('/webhook/crabhq', handleIncomingTask);
 app.post('/webhook/mission-control', handleIncomingTask);
 app.post('/webhook/mission-control/stream', handleIncomingTaskStream);
 
-// Cloudflare control-plane probes. Metadata-only; no task body replay yet —
-// full resume requires persisting the original payload, which is Phase 2.
+// Cloudflare control-plane probes. The status probe is pure metadata.
+// /resume replays the locally persisted payload through handleIncomingTask
+// so a Bridge restart can recover an in-flight task. Payload never leaves
+// this host — CF only learns status + step via the async callback.
 app.post('/webhook/crabhq/status', (req, res) => {
   const { taskId } = req.body || {};
   if (!taskId) return res.status(400).json({ error: 'Missing taskId' });
   const row = getCfTask(taskId);
   if (!row) return res.status(404).json({ error: 'Unknown task' });
-  res.json({ taskId: row.task_id, status: row.status, step: row.step });
+  res.json({ taskId: row.task_id, status: row.status, step: row.step, inFlight: isInFlight(taskId) });
 });
 
 app.post('/webhook/crabhq/resume', (req, res) => {
@@ -4740,9 +4746,24 @@ app.post('/webhook/crabhq/resume', (req, res) => {
   if (!taskId) return res.status(400).json({ error: 'Missing taskId' });
   const row = getCfTask(taskId);
   if (!row) return res.status(404).json({ error: 'Unknown task' });
-  // In Phase 1 the Bridge doesn't persist the full payload, so we report the
-  // last known status. Replay-from-disk lands in Phase 2.
-  res.json({ taskId: row.task_id, status: row.status, step: row.step, resumed: false });
+  if (row.status === 'done' || row.status === 'failed') {
+    return res.json({ taskId: row.task_id, status: row.status, step: row.step, resumed: false, reason: 'terminal' });
+  }
+  if (isInFlight(taskId)) {
+    return res.json({ taskId: row.task_id, status: row.status, step: row.step, resumed: false, reason: 'already-running' });
+  }
+  const payload = getCfTaskPayload(taskId);
+  if (!payload) {
+    return res.status(409).json({ error: 'No persisted payload to replay', taskId });
+  }
+  const syntheticRes = {
+    status() { return this; },
+    json() { return this; },
+    send() { return this; },
+  };
+  handleIncomingTask({ body: payload, ip: req.ip || '' }, syntheticRes)
+    .catch((err) => console.warn(`[resume] ${taskId} replay failed: ${err.message}`));
+  res.json({ taskId: row.task_id, status: 'running', step: row.step, resumed: true });
 });
 app.post('/webhook/mission-control/stop', async (req, res) => {
  try {

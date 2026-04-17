@@ -312,11 +312,21 @@ export function migrate(sqlite) {
       status     TEXT NOT NULL DEFAULT 'running',
       step       INTEGER NOT NULL DEFAULT 0,
       callback_url TEXT,
+      payload    TEXT,
       created_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
       updated_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
     );
 
   `);
+
+  // Defensive: if an earlier migrate created cf_tasks without `payload`
+  // (Phase 1 schema), add the column now. SQLite fails loudly if the
+  // column already exists, so swallow that one specific error.
+  try {
+    sqlite.exec(`ALTER TABLE cf_tasks ADD COLUMN payload TEXT`);
+  } catch (err) {
+    if (!/duplicate column name/i.test(err?.message || '')) throw err;
+  }
 
   console.log('[DB] Migrations complete.');
 }
