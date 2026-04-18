@@ -68,7 +68,7 @@ import {
   stripGatewayErrorPrefix,
 } from './lib/provider-runtime.mjs';
 
-const OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write', 'operator.pairing', 'operator.approvals'];
+const OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write', 'operator.pairing', 'operator.approvals', 'operator.talk.secrets'];
 
 function looksLikeGeneratedDeviceName(value, deviceId = '') {
  const text = String(value || '').trim();
@@ -136,6 +136,47 @@ function normalizePairedDeviceMap(paired = {}) {
   if (displayName && entry.displayName !== displayName) {
    entry.displayName = displayName;
    changed = true;
+  }
+  const clientId = String(entry.clientId || '').toLowerCase();
+  const clientMode = String(entry.clientMode || '').toLowerCase();
+  const shouldCarryOperatorScopes = String(entry.role || '').toLowerCase() === 'operator'
+   && (
+    deviceId === deviceIdentity?.deviceId
+    || clientId === 'gateway-client'
+    || clientId === 'cli'
+    || clientMode === 'backend'
+    || clientMode === 'cli'
+    || clientMode === 'probe'
+    || String(entry.displayName || '').toLowerCase() === 'agent'
+   );
+  if (shouldCarryOperatorScopes) {
+   const mergedScopes = Array.from(new Set([
+    ...(Array.isArray(entry.scopes) ? entry.scopes : []),
+    ...(Array.isArray(entry.approvedScopes) ? entry.approvedScopes : []),
+    ...OPERATOR_SCOPES,
+   ].map(scope => String(scope || '').trim()).filter(Boolean)));
+   if (JSON.stringify(entry.scopes || []) !== JSON.stringify(mergedScopes)) {
+    entry.scopes = mergedScopes;
+    changed = true;
+   }
+   if (JSON.stringify(entry.approvedScopes || []) !== JSON.stringify(mergedScopes)) {
+    entry.approvedScopes = mergedScopes;
+    changed = true;
+   }
+   if (Array.isArray(entry.tokens)) {
+    const nextTokens = entry.tokens.map((token) => {
+     if (!token || typeof token !== 'object') return token;
+     if (String(token.role || entry.role || '').toLowerCase() !== 'operator') return token;
+     const tokenScopes = Array.from(new Set([
+      ...(Array.isArray(token.scopes) ? token.scopes : []),
+      ...mergedScopes,
+     ].map(scope => String(scope || '').trim()).filter(Boolean)));
+     if (JSON.stringify(token.scopes || []) === JSON.stringify(tokenScopes)) return token;
+     changed = true;
+     return { ...token, scopes: tokenScopes };
+    });
+    entry.tokens = nextTokens;
+   }
   }
   next[key] = entry;
  }
@@ -2117,7 +2158,36 @@ const formattedToolLog = toolLog.map(t => ({
  if (val === listener) this._eventListeners.delete(key);
  }
  }
+  }
  }
+
+ async request(method, params = {}, { timeoutMs = 10000 } = {}) {
+  if (!method) throw new Error('Gateway request method is required');
+  const ok = await this.ensureConnected();
+  if (!ok || !this.isReady) throw new Error('Cannot connect to OpenClaw gateway');
+
+  const id = randomUUID();
+  try {
+   const result = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+     this._pendingRequests.delete(id);
+     reject(new Error(`${method} timeout`));
+    }, timeoutMs);
+    this._pendingRequests.set(id, {
+     resolve: (payload) => { clearTimeout(timeout); resolve(payload); },
+     reject: (err) => { clearTimeout(timeout); reject(err); },
+    });
+    this.ws.send(JSON.stringify({
+     type: 'req',
+     id,
+     method,
+     params: params || {},
+    }));
+   });
+   return result;
+  } finally {
+   this._pendingRequests.delete(id);
+  }
  }
 
  get isReady() { return this.connected && this.ws?.readyState === WebSocket.OPEN; }
@@ -4148,6 +4218,38 @@ app.get('/admin/backups', (req, res) => {
 const PAIRED_JSON_PATH_ADMIN = '/opt/openclaw-data/config/devices/paired.json';
 const DEVICES_DIR_ADMIN = '/opt/openclaw-data/config/devices';
 
+function arrayFromPayload(payload, keys = []) {
+ if (Array.isArray(payload)) return payload;
+ if (!payload || typeof payload !== 'object') return [];
+ for (const key of keys) {
+  const value = payload[key];
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === 'object') {
+   const nested = arrayFromPayload(value, keys);
+   if (nested.length) return nested;
+  }
+ }
+ return [];
+}
+
+function normalizeNodeInventoryPayload(rawNodeList = {}, rawDevicePairs = {}) {
+ const nodes = arrayFromPayload(rawNodeList, ['nodes', 'liveNodes', 'items', 'data']);
+ const pending = arrayFromPayload(rawNodeList, ['pending', 'pendingNodes', 'requests']);
+ const paired = arrayFromPayload(rawNodeList, ['paired', 'pairedNodes', 'approved']);
+ const devicePending = arrayFromPayload(rawDevicePairs, ['pending', 'requests']);
+ const devicePaired = arrayFromPayload(rawDevicePairs, ['paired', 'devices', 'items']);
+ return {
+  nodes,
+  liveNodes: nodes,
+  pending,
+  paired,
+  devicePairs: {
+   pending: devicePending,
+   paired: devicePaired,
+  },
+ };
+}
+
 // GET /admin/devices — list all paired devices
 app.get('/admin/devices', (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
@@ -4176,6 +4278,60 @@ app.get('/admin/devices', (req, res) => {
    res.json({ devices, total: devices.length });
  } catch (err) {
    res.status(500).json({ error: err.message });
+ }
+});
+
+// GET /admin/nodes — canonical native OpenClaw node inventory
+app.get('/admin/nodes', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+   const rawNodeList = await gateway.request('node.list', {}, { timeoutMs: 10000 });
+   let rawDevicePairs = {};
+   try {
+     rawDevicePairs = await gateway.request('device.pair.list', {}, { timeoutMs: 10000 });
+   } catch (pairErr) {
+     rawDevicePairs = { error: pairErr.message };
+   }
+   const normalized = normalizeNodeInventoryPayload(rawNodeList, rawDevicePairs);
+   res.json({
+     ok: true,
+     source: 'openclaw-gateway',
+     method: 'node.list',
+     ...normalized,
+     raw: {
+       nodeList: rawNodeList || null,
+       devicePairs: rawDevicePairs || null,
+     },
+   });
+ } catch (err) {
+   res.status(502).json({
+     ok: false,
+     source: 'openclaw-gateway',
+     method: 'node.list',
+     error: err.message,
+   });
+ }
+});
+
+// GET /admin/nodes/status — live native OpenClaw node health/status where supported
+app.get('/admin/nodes/status', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+   const rawStatus = await gateway.request('node.status', {}, { timeoutMs: 10000 });
+   res.json({
+     ok: true,
+     source: 'openclaw-gateway',
+     method: 'node.status',
+     nodes: arrayFromPayload(rawStatus, ['nodes', 'liveNodes', 'items', 'data']),
+     raw: rawStatus || null,
+   });
+ } catch (err) {
+   res.status(502).json({
+     ok: false,
+     source: 'openclaw-gateway',
+     method: 'node.status',
+     error: err.message,
+   });
  }
 });
 
