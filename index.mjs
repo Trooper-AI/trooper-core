@@ -1127,6 +1127,7 @@ class OpenClawGateway {
  const _agentId = opts.agentId || 'main';
  const sessionKey = opts.sessionKey || `agent:${_agentId}:hook:crabhq:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
  const timeoutMs = opts.timeoutMs || 180000;
+ const { explicitModel } = resolveGatewayModelSelection(opts.model);
 
  const textChunks = [];
  const toolCalls = []; // Capture tool usage for TOOL_LOG
@@ -1172,7 +1173,7 @@ class OpenClawGateway {
  message, sessionKey, idempotencyKey,
  agentId: opts.agentId || undefined,
  thinking: opts.thinking || undefined,
- model: opts.model || undefined,
+ model: explicitModel || undefined,
  extraSystemPrompt: opts.extraSystemPrompt || undefined,
  deliver: false,
  },
@@ -1415,6 +1416,7 @@ class OpenClawGateway {
  const timeoutMs = opts.timeoutMs || 180000;
  const runStartedAt = Date.now();
  const _projectFolder = opts.projectFolder || null;
+ const { explicitModel, effectiveModel: effectiveRequestedModel } = resolveGatewayModelSelection(opts.model);
  let bridgeEventSequence = 0;
  const rawOnEvent = onEvent;
  onEvent = rawOnEvent
@@ -1436,7 +1438,6 @@ class OpenClawGateway {
 
  const textChunks = [];
  let lastToolTextSnapshot = ''; // text snapshot at last tool boundary
- const effectiveRequestedModel = opts.model || readConfiguredDefaultModelId() || null;
  if (onEvent) onEvent('model_start', { eventType: 'model_start', confidence: 'native', model: effectiveRequestedModel, time: Date.now() });
  const toolLog = [];
  let lifecycleDepth = 0; // track nested lifecycle start/end for sub-agent detection
@@ -2024,7 +2025,7 @@ function extractPatchFilePaths(patchText = '') {
  message, sessionKey, idempotencyKey,
  agentId: opts.agentId || undefined,
  thinking: opts.thinking || undefined,
- model: opts.model || undefined,
+ model: explicitModel || undefined,
  extraSystemPrompt: opts.extraSystemPrompt || undefined,
  deliver: false,
  },
@@ -2887,6 +2888,19 @@ function normalizeGatewayModelId(model) {
  return provider ? `${provider}/${bare}` : bare;
 }
 
+function resolveExplicitGatewayModel(model) {
+ if (!model || isGatewayInheritedModel(model)) return null;
+ return normalizeGatewayModelId(model);
+}
+
+function resolveGatewayModelSelection(model) {
+ const explicitModel = resolveExplicitGatewayModel(model);
+ return {
+  explicitModel,
+  effectiveModel: explicitModel || readConfiguredDefaultModelId() || null,
+ };
+}
+
 function normalizeGatewayFallbackModels(models) {
  if (!Array.isArray(models)) return [];
  return models
@@ -3340,7 +3354,7 @@ async function handleIncomingTask(req, res) {
  const runOpts = {
  agentId, agentName: agentName || 'default', sessionKey,
  thinking: thinking || undefined,
- model: model || undefined,
+ model: resolveExplicitGatewayModel(model) || undefined,
  extraSystemPrompt: nonStreamSystemPrompt,
  timeoutMs: isTaskWork ? 600000 : 180000,
  };
@@ -3556,6 +3570,7 @@ const emitViewportScreenshotFrame = ({
  // that emits WS events. 600s for tasks, 180s for chat.
  const isTaskWork = !!(context?.taskId);
  const inactivityMs = isTaskWork ? 600000 : 180000;
+ const { explicitModel: streamingExplicitModel, effectiveModel: streamingEffectiveModel } = resolveGatewayModelSelection(model);
 
 	 let response, toolLog, gatewayRunId, resolvedSessionKey;
 	 let abortedForPlanMode = false;
@@ -3643,7 +3658,7 @@ const emitViewportScreenshotFrame = ({
  ({ response, toolLog, runId: gatewayRunId, sessionKey: resolvedSessionKey } = await gateway.runAgentStreaming(fullTask, {
  agentId, agentName: agentName || 'default', sessionKey,
  thinking: thinking || undefined,
- model: model || undefined,
+ model: streamingExplicitModel || undefined,
  extraSystemPrompt: resolvedSystemPrompt,
  timeoutMs: inactivityMs,
  projectFolder,
@@ -3688,9 +3703,9 @@ const responseText = response || '';
  } else if (completedMatch) {
    sendSSE('outcome', { type: 'completed', detail: (completedMatch[1] || '').trim() });
  }
- sendSSE('model_done', { eventType: 'model_done', confidence: 'native', model: model || readConfiguredDefaultModelId() || null, time: Date.now() });
+ sendSSE('model_done', { eventType: 'model_done', confidence: 'native', model: streamingEffectiveModel, time: Date.now() });
  recordRun();
- captureLog('info', `Run completed: ${agentName || 'default'} (${(responseText || '').length} chars)`, { requestId: id, agent: agentName, model });
+ captureLog('info', `Run completed: ${agentName || 'default'} (${(responseText || '').length} chars)`, { requestId: id, agent: agentName, model: streamingEffectiveModel });
 
 sendSSE('done', {
 requestId: id, agentId,
@@ -3785,7 +3800,7 @@ desktopRecordingUrl: desktopRecordingUrl || undefined,
  const rawRuntime = resolveProviderRuntimeContext({
   provider: err.provider || null,
   model: err.model || null,
-  fallbackModel: model || null,
+  fallbackModel: streamingEffectiveModel || null,
   error: rawErrMessage,
  });
  const errMessage = normalizeProviderErrorMessage(rawErrMessage, rawRuntime) || 'Bridge error';
@@ -5909,6 +5924,7 @@ app.post('/agents/sync-knowledge', (req, res) => {
 app.post('/webhook/background', async (req, res) => {
  const { task, agentName, type, sessionKey, model, thinking, timeoutSeconds } = req.body;
  if (!task) return res.status(400).json({ error: 'Missing task' });
+ const explicitModel = resolveExplicitGatewayModel(model);
 
  if (gateway.isReady) {
  try {
@@ -5916,7 +5932,7 @@ app.post('/webhook/background', async (req, res) => {
  agentName: agentName || 'CrabsHQ',
  sessionKey: sessionKey || `agent:main:hook:crabhq:bg:${Date.now()}`,
  thinking: thinking || undefined,
- model: model || undefined,
+ model: explicitModel || undefined,
  }).catch(err => console.error('Background agent failed:', err.message));
  return res.status(202).json({ status: 'accepted', via: 'websocket' });
  } catch {}
@@ -5931,7 +5947,7 @@ app.post('/webhook/background', async (req, res) => {
  message: task, name: agentName || 'CrabsHQ',
  sessionKey: sessionKey || `agent:main:hook:crabhq:${Date.now()}`,
  wakeMode: 'now', deliver: false,
- model: model || undefined, thinking: thinking || undefined,
+ model: explicitModel || undefined, thinking: thinking || undefined,
  timeoutSeconds: timeoutSeconds || 120,
  }),
  });
