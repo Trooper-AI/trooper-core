@@ -21,12 +21,18 @@ if command -v Xvnc &>/dev/null; then
   fi
 fi
 
-# Belt-and-suspenders: fix permissions for node user
+# Belt-and-suspenders: keep runtime permissions aligned with entrypoint.sh.
+# The bridge-side helpers may run under a different UID than the in-container
+# node user, so config/device paths must stay traversable and group/world
+# readable instead of being re-hardened back to 600/700 here.
 chown -R 1000:1000 /home/node/.openclaw 2>/dev/null || true
 chown -R 1000:1000 /home/node/.npm 2>/dev/null || true
-chmod 700 /home/node/.openclaw 2>/dev/null || true
-chmod 600 /home/node/.openclaw/openclaw.json 2>/dev/null || true
-find /home/node/.openclaw/agents -name 'auth-profiles.json' -exec chmod 600 {} \; 2>/dev/null || true
+find /home/node/.openclaw -type d -exec chmod 755 {} \; 2>/dev/null || true
+find /home/node/.openclaw -name '*.json' -exec chmod 664 {} \; 2>/dev/null || true
+chmod 777 /home/node/.openclaw/devices 2>/dev/null || true
+chmod 666 /home/node/.openclaw/devices/*.json 2>/dev/null || true
+chmod 755 /home/node/.openclaw/identity 2>/dev/null || true
+chmod 644 /home/node/.openclaw/identity/*.json 2>/dev/null || true
 
 # Startup optimizations (recommended by openclaw doctor)
 export NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache

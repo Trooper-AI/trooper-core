@@ -977,24 +977,7 @@ ${MODELS_PROVIDERS}
  "entries": {
  "lobster": { "enabled": true },
  "llm-task": { "enabled": true },
- "acpx": { "enabled": true },
- "web-search": {
- "enabled": true,
- "config": {
- "webSearch": {
- "enabled": true,
- "provider": "brave",
- "apiKey": "${BRAVE_API_KEY}",
- "maxResults": 5,
- "cacheTtlMinutes": 15
- },
- "webFetch": {
- "enabled": true,
- "maxChars": 50000,
- "timeoutSeconds": 30
- }
- }
- }
+ "acpx": { "enabled": true }
  }
  },
  "acp": {
@@ -2641,18 +2624,21 @@ else
   echo "Firewall: installed and enabled"
 fi
 
-# Fix file permissions: secrets should be owner-only readable
+# Fix file permissions. Keep them consistent with the runtime bootstrap and the
+# host bridge access model: config dirs must stay traversable, config JSON must
+# stay readable, and devices/cron state must remain writable for temp-file
+# replacement flows used by the gateway.
 chmod 600 /opt/openclaw/.env 2>/dev/null || true
-chmod 600 /opt/openclaw-data/config/openclaw.json 2>/dev/null || true
-chmod 600 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
-chmod 600 /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
-# Devices and cron dirs: owner-only (not world-writable)
-chmod 700 /opt/openclaw-data/config/devices 2>/dev/null || true
-chmod 600 /opt/openclaw-data/config/devices/*.json 2>/dev/null || true
-chmod 700 /opt/openclaw-data/config/cron 2>/dev/null || true
-chmod 600 /opt/openclaw-data/config/cron/*.json 2>/dev/null || true
-chmod 700 /opt/openclaw-data/config/cron/runs 2>/dev/null || true
-echo "File permissions: hardened"
+find /opt/openclaw-data/config -type d -exec chmod 755 {} \; 2>/dev/null || true
+chmod 664 /opt/openclaw-data/config/openclaw.json 2>/dev/null || true
+chmod 664 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
+chmod 664 /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
+chmod 777 /opt/openclaw-data/config/devices 2>/dev/null || true
+chmod 666 /opt/openclaw-data/config/devices/*.json 2>/dev/null || true
+chmod 777 /opt/openclaw-data/config/cron 2>/dev/null || true
+chmod 666 /opt/openclaw-data/config/cron/*.json 2>/dev/null || true
+chmod 777 /opt/openclaw-data/config/cron/runs 2>/dev/null || true
+echo "File permissions: aligned for runtime + bridge access"
 
 # Configure unattended-upgrades for automatic security updates
 cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'UUCFG'
