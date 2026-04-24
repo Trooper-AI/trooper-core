@@ -4299,12 +4299,17 @@ app.get('/health', async (req, res) => {
    browserError = error.message;
  }
 
+ const gatewayHealthy = !!gateway.isReady;
+ const healthStatus = !setupDone ? 'installing' : gatewayHealthy ? 'ok' : 'degraded';
+
  res.json({
- status: setupDone ? 'ok' : 'installing',
+ status: healthStatus,
  service: 'openclaw-bridge',
+ reason: healthStatus === 'degraded' ? 'gateway_unpaired' : null,
  gateway: {
-   connected: gateway.isReady,
-   paired: gateway.isReady,
+   status: gatewayHealthy ? 'ok' : 'degraded',
+   connected: gatewayHealthy,
+   paired: gatewayHealthy,
  },
  browser: {
    available: browserAvailable,
@@ -4319,9 +4324,9 @@ app.get('/health', async (req, res) => {
  },
  agents: {
    count: pendingRequests.size,
-   main: gateway.isReady ? 'connected' : 'disconnected',
+   main: gatewayHealthy ? 'connected' : 'disconnected',
  },
- mode: gateway.isReady ? 'websocket' : 'poller-fallback',
+ mode: gatewayHealthy ? 'websocket' : 'poller-fallback',
  pending: pendingRequests.size, skills: skillRegistry.size,
  uptime: Math.floor(process.uptime()),
  });
