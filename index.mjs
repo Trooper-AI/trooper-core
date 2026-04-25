@@ -23,7 +23,7 @@ import {
 import { ensureXvnc } from './lib/xvnc.mjs';
 import cors from 'cors';
 import { EventEmitter } from 'events';
-import { execSync, spawn } from 'child_process';
+import { execFileSync, execSync, spawn } from 'child_process';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, lstatSync, rmSync, cpSync } from 'fs';
 import { readFile, writeFile, readdir } from 'fs/promises';
 import { db, sqlite, DB_PATH } from './db/index.mjs';
@@ -6831,8 +6831,9 @@ function ensureContainerSkillDir(root, alias) {
   'mkdir -p "$target"',
   'chown -R 1000:1000 "$target"',
  ].join('; ');
- execSync(
-  `docker exec openclaw-openclaw-gateway-1 bash -lc ${shellQuote(command)}`,
+ execFileSync(
+  'docker',
+  ['exec', 'openclaw-openclaw-gateway-1', 'bash', '-lc', command],
   { timeout: 10000 }
  );
 }
@@ -6868,6 +6869,35 @@ function readRuntimeSkillFiles(slug) {
   if (candidates.length > 0) return candidates[0];
  }
  return null;
+}
+
+function stripAnsi(value = '') {
+ return String(value || '').replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
+}
+
+function formatExecError(err) {
+ return stripAnsi(err?.stderr?.toString() || err?.stdout?.toString() || err?.message || String(err || '')).trim();
+}
+
+function extractAvailableSkillsFromCliOutput(output = '') {
+ const text = stripAnsi(output).replace(/\[[0-9]+[A-Z] blob data\]/g, '\n');
+ const markerIndex = text.toLowerCase().indexOf('available skills');
+ if (markerIndex < 0) return [];
+ const tail = text.slice(markerIndex);
+ const skills = [];
+ for (const match of tail.matchAll(/^\s*(?:[│|]\s*)?-\s+([a-z0-9][a-z0-9._-]*)\s*$/gim)) {
+  skills.push(match[1]);
+ }
+ return [...new Set(skills)];
+}
+
+function runSkillsCliInstall(sourceRepo, skillId) {
+ const innerCommand = `cd /home/node/.openclaw && npx skills add ${shellQuote(sourceRepo)} --skill ${shellQuote(skillId)} -y 2>&1`;
+ return execFileSync(
+  'docker',
+  ['exec', 'openclaw-openclaw-gateway-1', 'bash', '-lc', innerCommand],
+  { timeout: 120000, maxBuffer: 8 * 1024 * 1024 }
+ ).toString();
 }
 
 async function materializeSkillForRuntime({ slug, sourceRepo, skillId, sourcePath, content, files } = {}) {
@@ -6906,77 +6936,106 @@ app.post('/skills/:slug/install', async (req, res) => {
  const slug = req.params.slug;
  if (!slug) return res.status(400).json({ error: 'Skill slug required' });
 
- try {
- const parsed = parseSkillsMarketplaceSlug(slug);
- const sourceRepo = req.body?.sourceRepo || parsed.sourceRepo;
- const sourcePath = req.body?.sourcePath || null;
- const skillId = req.body?.skillId || sanitizeSkillDirName(sourcePath) || parsed.skillId;
- if (!sourceRepo || !skillId) {
-   return res.status(400).json({ error: 'skills.sh installs require sourceRepo and skillId' });
- }
- console.log(`📦 Installing skill "${slug}" via skills.sh...`);
- const innerCommand = `cd /home/node/.openclaw && npx skills add ${shellQuote(sourceRepo)} --skill ${shellQuote(skillId)} -y 2>&1`;
- let output = '';
- let cliError = '';
- try {
-  output = execSync(
-  `docker exec openclaw-openclaw-gateway-1 bash -lc ${shellQuote(innerCommand)}`,
-  { timeout: 120000 }
-  ).toString();
-  console.log(`✅ Skill "${slug}" installed: ${output.trim().split('\n').pop()}`);
- } catch (err) {
-  cliError = err.stderr?.toString() || err.stdout?.toString() || err.message;
-  console.error(`❌ skills.sh install failed for "${slug}":`, cliError);
- }
+	 try {
+	  const parsed = parseSkillsMarketplaceSlug(slug);
+	  const sourceRepo = req.body?.sourceRepo || parsed.sourceRepo;
+	  const sourcePath = req.body?.sourcePath || null;
+	  const skillId = req.body?.skillId || sanitizeSkillDirName(sourcePath) || parsed.skillId;
+	  if (!sourceRepo || !skillId) {
+	   return res.status(400).json({ error: 'skills.sh installs require sourceRepo and skillId' });
+	  }
 
- let runtimeSnapshot = null;
- if (!cliError) {
-  runtimeSnapshot = readRuntimeSkillFiles(slug) || readRuntimeSkillFiles(skillId);
- }
+	  let resolvedSkillId = skillId;
+	  let resolvedSlug = buildSkillsMarketplaceSlug(sourceRepo, resolvedSkillId);
+	  console.log(`📦 Installing skill "${slug}" via skills.sh...`);
+	  let output = '';
+	  let cliError = '';
+	  try {
+	   output = runSkillsCliInstall(sourceRepo, resolvedSkillId);
+	   console.log(`✅ Skill "${slug}" installed: ${output.trim().split('\n').pop()}`);
+	  } catch (err) {
+	   cliError = formatExecError(err);
+	   console.error(`❌ skills.sh install failed for "${slug}":`, cliError);
+	   const availableSkills = extractAvailableSkillsFromCliOutput(cliError);
+	   if (availableSkills.length === 1 && availableSkills[0] !== resolvedSkillId) {
+	    const retrySkillId = availableSkills[0];
+	    console.warn(`↪️ Retrying skills.sh install for "${slug}" with available skill "${retrySkillId}"`);
+	    try {
+	     resolvedSkillId = retrySkillId;
+	     resolvedSlug = buildSkillsMarketplaceSlug(sourceRepo, resolvedSkillId);
+	     output = runSkillsCliInstall(sourceRepo, resolvedSkillId);
+	     cliError = '';
+	     console.log(`✅ Skill "${slug}" installed as "${resolvedSkillId}": ${output.trim().split('\n').pop()}`);
+	    } catch (retryErr) {
+	     cliError = formatExecError(retryErr);
+	     console.error(`❌ skills.sh retry failed for "${slug}" as "${retrySkillId}":`, cliError);
+	    }
+	   }
+	  }
 
- let materialized = null;
- if (!cliError && runtimeSnapshot?.files && Object.keys(runtimeSnapshot.files).length > 0) {
-  materialized = await materializeSkillForRuntime({
-   slug,
-   sourceRepo,
-   skillId,
-   sourcePath,
-   files: runtimeSnapshot.files,
-  });
- } else if (cliError || !runtimeSnapshot) {
-  materialized = await materializeSkillForRuntime({
-   slug,
-   sourceRepo,
-   skillId,
-   sourcePath,
-   content: req.body?.content,
-   files: req.body?.files,
-  });
- }
+	  let runtimeSnapshot = null;
+	  if (!cliError) {
+	   runtimeSnapshot = readRuntimeSkillFiles(resolvedSlug)
+	    || readRuntimeSkillFiles(resolvedSkillId)
+	    || readRuntimeSkillFiles(slug)
+	    || readRuntimeSkillFiles(skillId);
+	  }
 
- if (cliError && !materialized?.ok) {
-   return res.status(500).json({ error: `Install failed: ${cliError}`, materialized });
- }
+	  let materialized = null;
+	  if (cliError) {
+	   return res.status(502).json({
+	    error: `skills.sh install failed: ${cliError}`,
+	    cliError,
+	    runtimeReady: false,
+	   });
+	  }
+	  if (runtimeSnapshot?.files && Object.keys(runtimeSnapshot.files).length > 0) {
+	   materialized = await materializeSkillForRuntime({
+	    slug: resolvedSlug,
+	    sourceRepo,
+	    skillId: resolvedSkillId,
+	    sourcePath,
+	    files: runtimeSnapshot.files,
+	   });
+	  } else if (!runtimeSnapshot && sourcePath) {
+	   materialized = await materializeSkillForRuntime({
+	    slug: resolvedSlug,
+	    sourceRepo,
+	    skillId: resolvedSkillId,
+	    sourcePath,
+	    content: req.body?.content,
+	    files: req.body?.files,
+	   });
+	  }
 
- // Signal OpenClaw to reload (SIGUSR1)
- try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1', { timeout: 5000 }); } catch {}
+	  if (!runtimeSnapshot && !materialized?.ok) {
+	   return res.status(500).json({
+	    error: 'skills.sh install completed, but no runtime skill files were discovered afterward',
+	    materialized,
+	    runtimeReady: false,
+	   });
+	  }
 
- const effectiveRuntimeFiles = materialized?.files || runtimeSnapshot?.files || {};
+	  // Signal OpenClaw to reload (SIGUSR1)
+	  try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1', { timeout: 5000 }); } catch {}
 
- res.json({
-  success: true,
-  slug,
-  output: output.trim(),
-  materialized,
-  files: effectiveRuntimeFiles,
-  runtimeReady: Object.keys(effectiveRuntimeFiles).length > 0,
-  warning: cliError
-   ? `skills.sh install failed; ${materialized?.ok ? 'materialized provided skill files directly instead' : 'runtime materialization also failed'}`
-   : Object.keys(effectiveRuntimeFiles).length === 0
-    ? 'skills.sh install completed but no runtime files were discovered afterward'
-    : null,
- });
- } catch (err) {
+	  const effectiveRuntimeFiles = materialized?.files || runtimeSnapshot?.files || {};
+
+	  res.json({
+	   success: true,
+	   slug,
+	   requestedSkillId: skillId,
+	   resolvedSlug,
+	   resolvedSkillId,
+	   output: output.trim(),
+	   materialized,
+	   files: effectiveRuntimeFiles,
+	   runtimeReady: Object.keys(effectiveRuntimeFiles).length > 0,
+	   warning: Object.keys(effectiveRuntimeFiles).length === 0
+	    ? 'skills.sh install completed but no runtime files were discovered afterward'
+	    : null,
+	  });
+	 } catch (err) {
  const stderr = err.stderr?.toString() || err.stdout?.toString() || err.message;
  console.error(`❌ Failed to install skill "${slug}":`, stderr);
  res.status(500).json({ error: `Install failed: ${stderr}` });
