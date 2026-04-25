@@ -1282,8 +1282,9 @@ cat > /opt/openclaw-data/workspace/BOOT.md << 'BOOTMD'
 
 On startup:
 1. Read MEMORY.md and today's memory file to restore context
-2. Check if any tasks are in_progress or blocked — report status
-3. Say nothing if everything is normal (NO_REPLY)
+2. Read graphify-out/GRAPH_REPORT.md before broad codebase, architecture, or research work
+3. Check if any tasks are in_progress or blocked — report status
+4. Say nothing if everything is normal (NO_REPLY)
 BOOTMD
 
 # Team Lead AGENTS.md — core operating rules for lead agents
@@ -1303,6 +1304,7 @@ You are the Team Lead. You coordinate the team, delegate tasks to SPCs, and ensu
 - Monitor SPC progress and aggregate results
 - Report back to mission control with deliverables
 - Use `memory_search` to recall past work before starting new tasks
+- Read `graphify-out/GRAPH_REPORT.md` before broad codebase, architecture, or research work, then verify with raw files and tools
 
 ## Task Delegation
 When you receive a task:
@@ -1360,6 +1362,7 @@ Format (auto-generated, ~500 tokens):
 - **Read COMPANY.md first** — know the company, its products, its voice
 - **Read CAPABILITIES.md** — model routing slots & API reference for all capabilities (image gen, video, TTS, social search, web search, etc.)
 - **Read MEMORIES.md** — structured team knowledge (facts, preferences, decisions, learnings)
+- **Read graphify-out/GRAPH_REPORT.md** — relationship and architecture map for code, docs, and memory
 - **Use memory_search before starting work** — check if the team has done related work before
 - **Write daily notes to memory/YYYY-MM-DD.md** — log delegations, outcomes, key decisions
 - **Facts** go in MEMORIES.md: "This repo uses pnpm", "Staging API at X"
@@ -1836,7 +1839,8 @@ run_cmd apt-get install -y -qq --no-install-recommends \
  lxqt-core lxqt-panel lxqt-runner \
  pcmanfm-qt feh papirus-icon-theme \
  fonts-dejavu fonts-liberation \
- xdg-utils wget 2>/dev/null || true
+ xdg-utils wget \
+ python3 python3-venv python3-pip 2>/dev/null || true
 # Install snap Firefox (Ubuntu 24.04 doesn't have firefox-esr deb)
 run_cmd snap install firefox 2>/dev/null || true
 echo "[setup] LXQt desktop packages installed"
