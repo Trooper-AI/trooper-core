@@ -1,5 +1,10 @@
 name: Build Gateway Image
 on:
+  workflow_dispatch:
+  schedule:
+    # Rebuild regularly so `FROM ghcr.io/openclaw/openclaw:latest` actually
+    # picks up upstream OpenClaw fixes even when our bridge code has not changed.
+    - cron: '17 7 * * *'
   push:
     branches: [main]
 
@@ -18,5 +23,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v5
         with:
+          pull: true
           push: true
           tags: ghcr.io/absurdfounder/crabhq-gateway:latest

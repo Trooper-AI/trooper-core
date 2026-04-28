@@ -520,6 +520,43 @@ function readOpenClawConfig() {
  }
 }
 
+function redactDiagnosticValue(value) {
+ if (typeof value === 'string') return redactDiagnosticText(value);
+ if (Array.isArray(value)) return value.map(redactDiagnosticValue);
+ if (!value || typeof value !== 'object') return value;
+ const redacted = {};
+ for (const [key, entryValue] of Object.entries(value)) {
+  if (/(key|token|secret|password|credential|private|auth|cookie)/i.test(key)) {
+   redacted[key] = entryValue ? '[redacted]' : entryValue;
+  } else {
+   redacted[key] = redactDiagnosticValue(entryValue);
+  }
+ }
+ return redacted;
+}
+
+function redactDiagnosticText(text = '') {
+ return String(text)
+  .replace(/(Bearer\s+)[A-Za-z0-9._~+/-]+=*/gi, '$1[redacted]')
+  .replace(/((?:api[_-]?key|token|secret|password|credential|private[_-]?key)\s*[:=]\s*)[^\s,'"<>]+/gi, '$1[redacted]')
+  .replace(/\b(sk-[A-Za-z0-9_-]{12,}|sk-or-[A-Za-z0-9_-]{12,}|AIza[0-9A-Za-z_-]{20,})\b/g, '[redacted]');
+}
+
+function readRuntimeEnvSummary() {
+ const envPath = '/opt/openclaw/.env';
+ let envContent = '';
+ try { envContent = readFileSync(envPath, 'utf8'); } catch {}
+ const present = {};
+ for (const line of envContent.split(/\r?\n/)) {
+  const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
+  if (!match) continue;
+  const [, key, value] = match;
+  if (!/(KEY|TOKEN|SECRET|URL|MODEL|PROVIDER|BASE)/i.test(key)) continue;
+  present[key] = value ? true : false;
+ }
+ return { path: envPath, present };
+}
+
 function writeOpenClawConfig(config) {
  writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
  try { execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 }); } catch {}
@@ -7460,6 +7497,9 @@ function buildOpenClawCapabilitiesPayload() {
    nativeNodes: true,
    nativeNodeRemove: true,
    commandCatalog: true,
+   modelCatalog: true,
+   diagnosticsExport: true,
+   voiceCapabilities: true,
   },
   openclaw: {
    nativeAgentRpc: true,
@@ -7467,6 +7507,9 @@ function buildOpenClawCapabilitiesPayload() {
    nativeAbort: true,
    nativeNodeRemove: true,
    commandCatalog: true,
+   modelCatalog: true,
+   diagnosticsExport: true,
+   fullAgentVoice: true,
   },
   modelRouting: {
    localProviderBaseUrlOnly: true,
@@ -7477,7 +7520,9 @@ function buildOpenClawCapabilitiesPayload() {
   image: {
    customImage: process.env.OPENCLAW_DOCKER_IMAGE || 'ghcr.io/absurdfounder/crabhq-gateway:latest',
    baseImage: 'ghcr.io/openclaw/openclaw:latest',
+   rebuildRequiredForLatestBase: true,
   },
+  voice: buildVoiceCapabilitiesPayload(),
   timestamp: Date.now(),
  };
 }
@@ -7500,6 +7545,71 @@ app.get('/commands/list', async (req, res) => {
  } catch (err) {
   res.status(502).json({ ok: false, source: 'openclaw-gateway', method: 'commands.list', error: err.message });
  }
+});
+
+app.get('/models/list', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+  const raw = await gateway.request('models.list', {}, { timeoutMs: 15000 });
+  res.json({ ok: true, source: 'openclaw-gateway', method: 'models.list', raw });
+ } catch (err) {
+  res.status(502).json({ ok: false, source: 'openclaw-gateway', method: 'models.list', error: err.message });
+ }
+});
+
+app.get('/diagnostics/export', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ const startedAt = Date.now();
+ const safeExec = (command, timeout = 10000) => {
+  try {
+   return { ok: true, output: execSync(command, { timeout, encoding: 'utf8' }).trim() };
+  } catch (err) {
+   return { ok: false, error: err.message, output: String(err.stdout || '').trim() };
+  }
+ };
+ const callGateway = async (method, params = {}, timeoutMs = 10000) => {
+  try {
+   const raw = await gateway.request(method, params, { timeoutMs });
+   return { ok: true, raw };
+  } catch (err) {
+   return { ok: false, error: err.message };
+  }
+ };
+ const [commands, models, nodes, health] = await Promise.all([
+  callGateway('commands.list'),
+  callGateway('models.list'),
+  callGateway('node.list').catch(() => ({ ok: false, error: 'node.list unavailable' })),
+  fetch('http://127.0.0.1:18789/healthz', { signal: AbortSignal.timeout(3000) })
+   .then((r) => r.ok ? r.json() : { ok: false, status: r.status })
+   .catch((err) => ({ ok: false, error: err.message })),
+ ]);
+ const doctor = safeExec('docker exec openclaw-openclaw-gateway-1 openclaw doctor --json 2>&1', 25000);
+ const version = safeExec('docker exec openclaw-openclaw-gateway-1 openclaw --version 2>&1', 10000);
+ const gatewayImage = safeExec("docker inspect openclaw:local --format='{{.Id}} {{.Created}}' 2>/dev/null", 10000);
+ const bridgeGit = safeExec('git -C /opt/openclaw-bridge log -1 --format="%h %ci" 2>/dev/null', 5000);
+ res.json({
+  ok: true,
+  generatedAt: new Date().toISOString(),
+  durationMs: Date.now() - startedAt,
+  capabilities: buildOpenClawCapabilitiesPayload(),
+  health,
+  versions: {
+   openclaw: version,
+   gatewayImage,
+   bridgeGit,
+   node: process.version,
+  },
+  doctor: doctor.ok ? (() => {
+   try { return redactDiagnosticValue(JSON.parse(doctor.output)); } catch { return { raw: redactDiagnosticText(doctor.output) }; }
+  })() : redactDiagnosticValue(doctor),
+  gateway: {
+   commands,
+   models,
+   nodes,
+  },
+  config: redactDiagnosticValue(readOpenClawConfig()),
+  env: readRuntimeEnvSummary(),
+ });
 });
 
 // ── API Keys Management ──────────────────────────────────────────────
@@ -9387,16 +9497,39 @@ app.get('/api/browser-session', (req, res) => {
  res.json(session || { active: false });
 });
 
+function readEnvValue(name) {
+ if (process.env[name]) return String(process.env[name]).trim();
+ try {
+  const envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+  const match = envContent.match(new RegExp(`^${name}=(.*)$`, 'm'));
+  return match ? match[1].trim() : '';
+ } catch {
+  return '';
+ }
+}
+
+function buildVoiceCapabilitiesPayload() {
+ const openaiKey = readEnvValue('OPENAI_API_KEY');
+ const geminiKey = readEnvValue('GEMINI_API_KEY') || readEnvValue('GOOGLE_API_KEY');
+ const elevenLabsKey = readEnvValue('ELEVENLABS_API_KEY');
+ return {
+  tts: Boolean(openaiKey || geminiKey || elevenLabsKey),
+  stt: Boolean(openaiKey),
+  fullAgentVoice: true,
+  providers: {
+   openai: Boolean(openaiKey),
+   gemini: Boolean(geminiKey),
+   elevenlabs: Boolean(elevenLabsKey),
+  },
+  ttsModel: process.env.OPENAI_TTS_MODEL || 'gpt-4o-mini-tts',
+  fallbackTtsModel: 'tts-1',
+  note: 'CrabsHQ can proxy OpenAI STT/TTS today; native OpenClaw full-agent voice is available through the gateway capability layer.',
+ };
+}
+
 // ── Voice capabilities check ─────────────────────────────────────────
 app.get('/capabilities/voice', (req, res) => {
- let hasKey = !!process.env.OPENAI_API_KEY;
- if (!hasKey) {
-  try {
-   const envContent = readFileSync('/opt/openclaw/.env', 'utf8');
-   hasKey = /^OPENAI_API_KEY=.+/m.test(envContent);
-  } catch {}
- }
- res.json({ tts: hasKey, stt: hasKey });
+ res.json(buildVoiceCapabilitiesPayload());
 });
 
 // ── TTS Endpoint (OpenAI TTS API) ────────────────────────────────────
@@ -9405,26 +9538,29 @@ app.post('/tts', async (req, res) => {
   const { text, voice } = req.body || {};
   if (!text || typeof text !== 'string') return res.status(400).json({ error: 'text is required' });
 
-  // Read OpenAI API key from /opt/openclaw/.env
-  let openaiKey = process.env.OPENAI_API_KEY || '';
-  if (!openaiKey) {
-   try {
-    const envContent = readFileSync('/opt/openclaw/.env', 'utf8');
-    const match = envContent.match(/^OPENAI_API_KEY=(.*)$/m);
-    if (match) openaiKey = match[1].trim();
-   } catch {}
-  }
+  const openaiKey = readEnvValue('OPENAI_API_KEY');
   if (!openaiKey) return res.status(500).json({ error: 'OpenAI API key not configured' });
 
-  const ttsRes = await fetch('https://api.openai.com/v1/audio/speech', {
-   method: 'POST',
-   headers: { 'Authorization': `Bearer ${openaiKey}`, 'Content-Type': 'application/json' },
-   body: JSON.stringify({ model: 'tts-1', voice: voice || 'nova', input: text.substring(0, 4096) }),
-  });
+  const input = text.substring(0, 4096);
+  const models = Array.from(new Set([
+   process.env.OPENAI_TTS_MODEL || 'gpt-4o-mini-tts',
+   'tts-1',
+  ].filter(Boolean)));
+  let ttsRes = null;
+  let lastTtsError = '';
+  for (const model of models) {
+   ttsRes = await fetch('https://api.openai.com/v1/audio/speech', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${openaiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, voice: voice || 'nova', input }),
+   });
+   if (ttsRes.ok) break;
+   lastTtsError = await ttsRes.text().catch(() => 'Unknown error');
+   if (![400, 404].includes(Number(ttsRes.status))) break;
+  }
 
   if (!ttsRes.ok) {
-   const err = await ttsRes.text().catch(() => 'Unknown error');
-   return res.status(ttsRes.status).json({ error: `OpenAI TTS failed: ${err}` });
+   return res.status(ttsRes.status).json({ error: `OpenAI TTS failed: ${lastTtsError || 'Unknown error'}` });
   }
 
   res.set('Content-Type', 'audio/mpeg');
@@ -9440,14 +9576,7 @@ app.post('/tts', async (req, res) => {
 app.post('/stt', express.raw({ type: '*/*', limit: '25mb' }), async (req, res) => {
  try {
   // Read OpenAI API key
-  let openaiKey = process.env.OPENAI_API_KEY || '';
-  if (!openaiKey) {
-   try {
-    const envContent = readFileSync('/opt/openclaw/.env', 'utf8');
-    const match = envContent.match(/^OPENAI_API_KEY=(.*)$/m);
-    if (match) openaiKey = match[1].trim();
-   } catch {}
-  }
+  const openaiKey = readEnvValue('OPENAI_API_KEY');
   if (!openaiKey) return res.status(500).json({ error: 'OpenAI API key not configured' });
 
   const audioBuffer = req.body;

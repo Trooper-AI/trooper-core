@@ -1643,7 +1643,9 @@ fi
 
 # Run openclaw setup/doctor (use node directly — openclaw CLI is not in PATH)
 docker compose exec -T -w /app openclaw-gateway node dist/index.js setup --workspace /home/node/.openclaw/workspace 2>/dev/null || true
-docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --fix 2>/dev/null || true
+docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --repair 2>/dev/null \
+  || docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --fix 2>/dev/null \
+  || true
 
 # ── [6/9] Bridge + Sandbox + Poller (PARALLEL where possible) ─────────
 # Download bridge, create poller, and start sandbox build concurrently
