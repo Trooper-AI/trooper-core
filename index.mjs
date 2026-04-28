@@ -4741,6 +4741,52 @@ app.get('/admin/nodes/status', async (req, res) => {
  }
 });
 
+async function removeNativeOpenClawNode(nodeId) {
+ const safeNodeId = String(nodeId || '').trim();
+ if (!safeNodeId) throw new Error('nodeId is required');
+ const attempts = [
+  { method: 'node.pair.remove', params: { nodeId: safeNodeId } },
+  { method: 'node.pair.remove', params: { id: safeNodeId } },
+  { method: 'node.remove', params: { nodeId: safeNodeId } },
+  { method: 'nodes.remove', params: { nodeId: safeNodeId } },
+  { method: 'device.pair.remove', params: { deviceId: safeNodeId } },
+  { method: 'device.pair.remove', params: { id: safeNodeId } },
+ ];
+ const errors = [];
+ for (const attempt of attempts) {
+  try {
+   const raw = await gateway.request(attempt.method, attempt.params, { timeoutMs: 10000 });
+   return { ok: true, method: attempt.method, raw: raw || null };
+  } catch (err) {
+   errors.push(`${attempt.method}: ${err.message}`);
+  }
+ }
+ return { ok: false, error: errors[errors.length - 1] || 'Native node remove failed', attempts: errors };
+}
+
+async function handleAdminNodeRemove(req, res) {
+ if (!requireBridgeAuth(req, res)) return;
+ const nodeId = req.params?.nodeId || req.body?.nodeId || req.body?.id || req.body?.deviceId;
+ if (!nodeId) return res.status(400).json({ ok: false, error: 'nodeId is required' });
+ try {
+  const result = await removeNativeOpenClawNode(nodeId);
+  if (result.ok) {
+   return res.json({ ok: true, nodeId, source: 'openclaw-gateway', ...result });
+  }
+  return res.status(502).json({ ok: false, nodeId, source: 'openclaw-gateway', ...result });
+ } catch (err) {
+  return res.status(500).json({ ok: false, nodeId, error: err.message });
+ }
+}
+
+// Native OpenClaw node removal. CrabsHQ tries these endpoint shapes in order.
+app.delete('/admin/nodes/:nodeId', handleAdminNodeRemove);
+app.post('/admin/nodes/remove', express.json(), handleAdminNodeRemove);
+app.post('/admin/nodes', express.json(), (req, res, next) => {
+ if (String(req.body?.action || '').toLowerCase() === 'remove') return handleAdminNodeRemove(req, res);
+ return next();
+});
+
 // PATCH /admin/devices/:deviceId — update mutable paired-device metadata
 app.patch('/admin/devices/:deviceId', express.json(), (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
@@ -7402,6 +7448,60 @@ app.get('/logs', (req, res) => {
  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+function buildOpenClawCapabilitiesPayload() {
+ return {
+  ok: true,
+  source: 'crabhq-openclawbridge',
+  version: '2.1.0',
+  verified: true,
+  endpoints: {
+   missionControlStream: true,
+   missionControlStop: true,
+   nativeNodes: true,
+   nativeNodeRemove: true,
+   commandCatalog: true,
+  },
+  openclaw: {
+   nativeAgentRpc: true,
+   nativeRunRegistry: true,
+   nativeAbort: true,
+   nativeNodeRemove: true,
+   commandCatalog: true,
+  },
+  modelRouting: {
+   localProviderBaseUrlOnly: true,
+   llamaCppProvider: true,
+   ollamaProvider: true,
+   providerNativeReasoning: true,
+  },
+  image: {
+   customImage: process.env.OPENCLAW_DOCKER_IMAGE || 'ghcr.io/absurdfounder/crabhq-gateway:latest',
+   baseImage: 'ghcr.io/openclaw/openclaw:latest',
+  },
+  timestamp: Date.now(),
+ };
+}
+
+app.get('/capabilities/openclaw', (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ res.json(buildOpenClawCapabilitiesPayload());
+});
+
+app.get('/capabilities', (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ res.json(buildOpenClawCapabilitiesPayload());
+});
+
+app.get('/commands/list', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+  const raw = await gateway.request('commands.list', {}, { timeoutMs: 10000 });
+  res.json({ ok: true, source: 'openclaw-gateway', method: 'commands.list', raw });
+ } catch (err) {
+  res.status(502).json({ ok: false, source: 'openclaw-gateway', method: 'commands.list', error: err.message });
+ }
+});
+
 // ── API Keys Management ──────────────────────────────────────────────
 
 const PROVIDER_ENV_NAME_MAP = Object.freeze({
@@ -7429,6 +7529,7 @@ const PROVIDER_ENV_NAME_MAP = Object.freeze({
  'vercel-ai-gateway': ['AI_GATEWAY_API_KEY'],
  kilocode: ['KILOCODE_API_KEY'],
  'cloudflare-ai-gateway': ['CLOUDFLARE_AI_GATEWAY_API_KEY'],
+ ollama: ['OLLAMA_BASE_URL'],
  synthetic: ['SYNTHETIC_API_KEY'],
  volcengine: ['VOLCANO_ENGINE_API_KEY'],
  byteplus: ['BYTEPLUS_API_KEY'],
@@ -7516,6 +7617,7 @@ app.post('/config/api-keys', async (req, res) => {
   nvidiaKey, qianfanKey, stepfunKey, veniceKey, huggingfaceKey, aiGatewayKey, kilocodeKey,
   cloudflareAiGatewayKey, syntheticKey, volcanoEngineKey, byteplusKey, defaultModel, defaultFallbacks,
   imageModel, pdfModel, openaiCodexAuthProfile, localProvider, removeLocalProvider,
+  ollamaProvider, removeOllamaProvider, ollamaBaseUrl,
  } = body;
  const providerKeyPayloads = {
   anthropic: anthropicKey,
@@ -7542,6 +7644,7 @@ app.post('/config/api-keys', async (req, res) => {
   'vercel-ai-gateway': aiGatewayKey,
   kilocode: kilocodeKey,
   'cloudflare-ai-gateway': cloudflareAiGatewayKey,
+  ollama: ollamaBaseUrl,
   synthetic: syntheticKey,
   volcengine: volcanoEngineKey,
   byteplus: byteplusKey,
@@ -7563,6 +7666,8 @@ app.post('/config/api-keys', async (req, res) => {
   openaiCodexAuthProfile,
   localProvider,
   removeLocalProvider,
+  ollamaProvider,
+  removeOllamaProvider,
  ].some(k => k !== undefined);
  if (!hasAnyKey) {
  keysUpdateInProgress = false;
@@ -7760,22 +7865,30 @@ const hasStoredCodexOAuthProfile = () => {
  } catch (e) { console.error('Failed to update native models in openclaw.json:', e.message); _syncWarnings.push(`Native model update failed: ${e.message}`); }
  }
 
- // Update local-llamacpp provider in openclaw.json models.providers
- if (localProvider || removeLocalProvider) {
+ // Update local providers in openclaw.json models.providers. OpenClaw supports
+ // baseUrl-only local provider config, so do not write dummy keys/adapters here.
+ if (localProvider || removeLocalProvider || ollamaProvider || removeOllamaProvider) {
  try {
  const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
  if (!config.models) config.models = {};
  if (!config.models.providers) config.models.providers = {};
  if (localProvider && typeof localProvider === 'object') {
    config.models.providers['local-llamacpp'] = localProvider;
-   console.log(`[bridge] Added local-llamacpp provider to openclaw.json: ${JSON.stringify(localProvider.models?.map(m => m.id) || [])}`);
+   console.log(`[bridge] Added local-llamacpp provider to openclaw.json: ${localProvider.baseUrl || '(no baseUrl)'}`);
  } else if (removeLocalProvider) {
    delete config.models.providers['local-llamacpp'];
    console.log('[bridge] Removed local-llamacpp provider from openclaw.json');
  }
+ if (ollamaProvider && typeof ollamaProvider === 'object') {
+   config.models.providers.ollama = ollamaProvider;
+   console.log(`[bridge] Added Ollama provider to openclaw.json: ${ollamaProvider.baseUrl || '(no baseUrl)'}`);
+ } else if (removeOllamaProvider) {
+   delete config.models.providers.ollama;
+   console.log('[bridge] Removed Ollama provider from openclaw.json');
+ }
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
  await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
- } catch (e) { console.error('Failed to update local provider in openclaw.json:', e.message); _syncWarnings.push(`Local provider update failed: ${e.message}`); }
+ } catch (e) { console.error('Failed to update local providers in openclaw.json:', e.message); _syncWarnings.push(`Local provider update failed: ${e.message}`); }
  }
 
  // Update auth-profiles.json for ALL providers
@@ -7785,7 +7898,7 @@ const hasStoredCodexOAuthProfile = () => {
  const AUTH_PROFILE_PROVIDER_REMAP = { gemini: 'google' };
  // These payload fields are not LLM providers and don't belong in auth-profiles.
  const AUTH_PROFILE_SKIP = new Set([
- 'browserbaseProjectId', 'brave', 'composio', 'exa', 'tavily', 'serpapi', 'searchapi', 'browserbase',
+ 'browserbaseProjectId', 'brave', 'composio', 'exa', 'tavily', 'serpapi', 'searchapi', 'browserbase', 'ollama',
  ]);
  const providerKeyMap = Object.entries(providerKeyPayloads)
  .filter(([provider, key]) => typeof key === 'string' && !AUTH_PROFILE_SKIP.has(provider))
@@ -8088,6 +8201,7 @@ app.get('/config/provider-settings', (req, res) => {
   const pendingBridgeApply = readConfigKey('pendingBridgeApply') || false;
   const defaultModel = modelRouting.chat || readConfigKey('defaultModel') || null;
   const chatThinkingLevel = readConfigKey('chatThinkingLevel') || 'auto';
+  const ollamaBaseUrl = readConfigKey('ollamaBaseUrl') || readProviderEnvValue(envContent, 'ollama') || null;
 
   res.json({
    providers,
@@ -8098,6 +8212,7 @@ app.get('/config/provider-settings', (req, res) => {
    pendingBridgeApply,
    defaultModel,
    chatThinkingLevel,
+   ollamaBaseUrl,
   });
  } catch (err) {
   res.status(500).json({ error: err.message });
@@ -8134,13 +8249,14 @@ app.get('/config/provider-keys-internal', (req, res) => {
 
 app.put('/config/provider-settings', (req, res) => {
  try {
-  const { modelRouting, providerModels, modelRoutingFallbacks, pendingBridgeApply, defaultModel, chatThinkingLevel } = req.body;
+  const { modelRouting, providerModels, modelRoutingFallbacks, pendingBridgeApply, defaultModel, chatThinkingLevel, ollamaBaseUrl } = req.body;
   if (modelRouting !== undefined) writeConfigKey('modelRouting', modelRouting);
   if (providerModels !== undefined) writeConfigKey('providerModels', providerModels);
   if (modelRoutingFallbacks !== undefined) writeConfigKey('modelRoutingFallbacks', modelRoutingFallbacks);
   if (pendingBridgeApply !== undefined) writeConfigKey('pendingBridgeApply', pendingBridgeApply);
   if (defaultModel !== undefined) writeConfigKey('defaultModel', defaultModel);
   if (chatThinkingLevel !== undefined) writeConfigKey('chatThinkingLevel', chatThinkingLevel || 'auto');
+  if (ollamaBaseUrl !== undefined) writeConfigKey('ollamaBaseUrl', String(ollamaBaseUrl || '').trim().replace(/\/+$/, ''));
   res.json({ ok: true });
  } catch (err) {
   res.status(500).json({ error: err.message });

@@ -1,3 +1,5 @@
+# Keep the CrabsHQ gateway current by rebuilding this image; it inherits the
+# latest upstream OpenClaw runtime at build time, then layers our bridge code.
 FROM ghcr.io/openclaw/openclaw:latest
 
 USER root
