@@ -1145,6 +1145,7 @@ chown -R 1000:1000 /home/node/.openclaw 2>/dev/null || true
 chown -R 1000:1000 /home/node/.npm 2>/dev/null || true
 find /home/node/.openclaw -type d -exec chmod 755 {} \; 2>/dev/null || true
 find /home/node/.openclaw -name '*.json' -exec chmod 664 {} \; 2>/dev/null || true
+chmod 666 /home/node/.openclaw/openclaw.json /home/node/.openclaw/auth-profiles.json /home/node/.openclaw/agents/main/agent/auth-profiles.json 2>/dev/null || true
 mkdir -p /var/lib/openclaw/plugin-runtime-deps 2>/dev/null || true
 chown -R 1000:1000 /var/lib/openclaw 2>/dev/null || true
 chmod -R u+rwX,go+rX /var/lib/openclaw 2>/dev/null || true
@@ -1551,9 +1552,9 @@ chmod -R u+rwX,go+rX /var/lib/openclaw
 chmod 755 /opt/openclaw-data/config
 find /opt/openclaw-data/config -type d -exec chmod 755 {} \;
 # Config files: readable by both container (uid 1000) and host node user
-chmod 664 /opt/openclaw-data/config/openclaw.json
-chmod 664 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json
-chmod 664 /opt/openclaw-data/config/auth-profiles.json
+chmod 666 /opt/openclaw-data/config/openclaw.json
+chmod 666 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json
+chmod 666 /opt/openclaw-data/config/auth-profiles.json
 
 # Devices dir and cron dir must be writable by BOTH container (uid 1000) and host bridge process.
 # Use 777 so any UID can read/write device approval and cron state.
@@ -1578,9 +1579,9 @@ if [ "$HOST_NODE_UID" != "1000" ]; then
   chown -R "$HOST_NODE_UID" /opt/openclaw-data/config/devices 2>/dev/null || true
   # Container still needs read access — both UIDs can read via group or mode
   chmod 666 /opt/openclaw/.env 2>/dev/null || true
-  chmod 660 /opt/openclaw-data/config/openclaw.json 2>/dev/null || true
-  chmod 660 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
-  chmod 660 /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
+  chmod 666 /opt/openclaw-data/config/openclaw.json 2>/dev/null || true
+  chmod 666 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
+  chmod 666 /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
 fi
 
 cd /opt/openclaw
@@ -2610,7 +2611,7 @@ chmod -R u+rwX,go+rX /var/lib/openclaw
 # and host bridge (uid varies) can access files. chown -R resets dir perms to 700.
 find /opt/openclaw-data/config -type d -exec chmod 755 {} \;
 # Config files need to be readable by both UIDs
-chmod 664 /opt/openclaw-data/config/openclaw.json /opt/openclaw-data/config/agents/main/agent/auth-profiles.json /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
+chmod 666 /opt/openclaw-data/config/openclaw.json /opt/openclaw-data/config/agents/main/agent/auth-profiles.json /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
 HOST_NODE_UID=$(id -u node 2>/dev/null || echo 1000)
 if [ "$HOST_NODE_UID" != "1000" ]; then
   # Host node user needs write access for bridge API key sync, model updates
@@ -2768,9 +2769,9 @@ fi
 # replacement flows used by the gateway.
 chmod 600 /opt/openclaw/.env 2>/dev/null || true
 find /opt/openclaw-data/config -type d -exec chmod 755 {} \; 2>/dev/null || true
-chmod 664 /opt/openclaw-data/config/openclaw.json 2>/dev/null || true
-chmod 664 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
-chmod 664 /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
+chmod 666 /opt/openclaw-data/config/openclaw.json 2>/dev/null || true
+chmod 666 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
+chmod 666 /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
 chmod 777 /opt/openclaw-data/config/devices 2>/dev/null || true
 chmod 666 /opt/openclaw-data/config/devices/*.json 2>/dev/null || true
 chmod 777 /opt/openclaw-data/config/cron 2>/dev/null || true

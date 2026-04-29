@@ -19,6 +19,7 @@ chmod -R u+rwX,go+rX /var/lib/openclaw 2>/dev/null || true
 find /home/node/.openclaw -type d -exec chmod 755 {} \; 2>/dev/null || true
 # Config files readable by everyone (secrets protected by container isolation)
 find /home/node/.openclaw -name '*.json' -exec chmod 664 {} \; 2>/dev/null || true
+chmod 666 /home/node/.openclaw/openclaw.json /home/node/.openclaw/auth-profiles.json /home/node/.openclaw/agents/main/agent/auth-profiles.json 2>/dev/null || true
 
 # Clear jiti cache — previous runs may have created files as root.
 # Use chmod 1777 (world-writable + sticky) so both root and node can create/read files.

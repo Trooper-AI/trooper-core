@@ -570,9 +570,37 @@ function readWorkspaceTextFile(fileName, maxChars = 50000) {
  }
 }
 
+function normalizeOpenClawRuntimePermissions({ docker = true } = {}) {
+ const hostCmd = [
+  'mkdir -p /opt/openclaw-data/config/devices /opt/openclaw-data/config/identity /opt/openclaw-data/config/agents /opt/openclaw-data/workspace /var/lib/openclaw/plugin-runtime-deps',
+  'chown -R 1000:1000 /opt/openclaw-data/config /opt/openclaw-data/workspace /var/lib/openclaw 2>/dev/null || true',
+  'find /opt/openclaw-data/config /opt/openclaw-data/workspace -type d -exec chmod 755 {} + 2>/dev/null || true',
+  'find /opt/openclaw-data/config /opt/openclaw-data/workspace -type f -exec chmod u+rw,go+r {} + 2>/dev/null || true',
+  'chmod 666 /opt/openclaw-data/config/openclaw.json /opt/openclaw-data/config/auth-profiles.json /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true',
+  'chmod 777 /opt/openclaw-data/config/devices /opt/openclaw-data/config/cron /opt/openclaw-data/config/cron/runs 2>/dev/null || true',
+  'chmod 666 /opt/openclaw-data/config/devices/*.json /opt/openclaw-data/config/cron/*.json 2>/dev/null || true',
+  'chmod -R u+rwX,go+rX /var/lib/openclaw 2>/dev/null || true',
+ ].join('; ');
+ try { execSync(hostCmd, { timeout: 15000 }); } catch {}
+ if (!docker) return;
+ const containerCmd = [
+  'mkdir -p /home/node/.openclaw/devices /home/node/.openclaw/identity /home/node/.openclaw/agents /home/node/.openclaw/workspace /var/lib/openclaw/plugin-runtime-deps',
+  'chown -R 1000:1000 /home/node/.openclaw /var/lib/openclaw 2>/dev/null || true',
+  'find /home/node/.openclaw -type d -exec chmod 755 {} + 2>/dev/null || true',
+  'find /home/node/.openclaw -type f -exec chmod u+rw,go+r {} + 2>/dev/null || true',
+  'chmod 666 /home/node/.openclaw/openclaw.json /home/node/.openclaw/auth-profiles.json /home/node/.openclaw/agents/main/agent/auth-profiles.json 2>/dev/null || true',
+  'chmod 777 /home/node/.openclaw/devices /home/node/.openclaw/cron /home/node/.openclaw/cron/runs 2>/dev/null || true',
+  'chmod 666 /home/node/.openclaw/devices/*.json /home/node/.openclaw/cron/*.json 2>/dev/null || true',
+  'chmod -R u+rwX,go+rX /var/lib/openclaw 2>/dev/null || true',
+ ].join('; ');
+ try {
+  execSync(`docker exec openclaw-openclaw-gateway-1 bash -lc ${JSON.stringify(containerCmd)}`, { timeout: 20000 });
+ } catch {}
+}
+
 function writeOpenClawConfig(config) {
  writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
- try { execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 }); } catch {}
+ normalizeOpenClawRuntimePermissions();
 }
 
 function readGatewayTokenFromConfig() {
@@ -766,13 +794,13 @@ class OpenClawGateway {
  clientId: 'gateway-client', clientMode: 'backend',
  approvedAt: Date.now(), approved: true, ts: Date.now(),
  };
- fs.writeFileSync(PAIRED_JSON_PATH, JSON.stringify(existing, null, 2), { mode: 0o600 });
- await _run(`chown -R 1000:1000 ${DEVICES_DIR} 2>/dev/null || true`).catch(() => {});
+ fs.writeFileSync(PAIRED_JSON_PATH, JSON.stringify(existing, null, 2), { mode: 0o666 });
+ normalizeOpenClawRuntimePermissions();
  console.log('[OpenClaw] Bridge device written to paired.json for sessions_spawn');
  } else {
  if (normalized.changed) {
- fs.writeFileSync(PAIRED_JSON_PATH, JSON.stringify(existing, null, 2), { mode: 0o600 });
- await _run(`chown -R 1000:1000 ${DEVICES_DIR} 2>/dev/null || true`).catch(() => {});
+ fs.writeFileSync(PAIRED_JSON_PATH, JSON.stringify(existing, null, 2), { mode: 0o666 });
+ normalizeOpenClawRuntimePermissions();
  console.log('[OpenClaw] Normalized paired device display names');
  }
  console.log('[OpenClaw] Bridge device already in paired.json');
@@ -1031,9 +1059,9 @@ class OpenClawGateway {
  const normalized = normalizePairedDeviceMap(existing);
  existing = normalized.paired;
  existing[deviceIdentity.deviceId] = deviceEntry;
- fs.writeFileSync(PAIRED_JSON_PATH, JSON.stringify(existing, null, 2), { mode: 0o600 });
- // Fix ownership so gateway container (uid 1000) can read it
- await _run(`chown -R 1000:1000 ${DEVICES_DIR} 2>/dev/null || true`).catch(() => {});
+ fs.writeFileSync(PAIRED_JSON_PATH, JSON.stringify(existing, null, 2), { mode: 0o666 });
+ // Fix ownership so gateway container (uid 1000) can read it and create pending tmp files.
+ normalizeOpenClawRuntimePermissions();
  console.log('[OpenClaw] Written to paired.json — restarting gateway to apply...');
  } catch (writeErr) {
  console.warn('[OpenClaw] Could not write paired.json directly:', writeErr.message, '— falling back to docker exec approve');
@@ -2648,7 +2676,7 @@ try {
  }
  if (changed) {
  writeFileSync(configPath, JSON.stringify(config, null, 2));
- try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
+ normalizeOpenClawRuntimePermissions();
  }
 } catch (e) { /* config not available yet */ }
 
@@ -2670,7 +2698,7 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
     } catch {}
    }
    writeFileSync(target, serialized);
-   try { execSync(`chown 1000:1000 ${target} 2>/dev/null; chmod 664 ${target} 2>/dev/null`, { timeout: 3000 }); } catch {}
+   normalizeOpenClawRuntimePermissions();
   } catch (err) {
    console.warn(`[bridge] Failed to mirror auth profiles to ${target}: ${err.message}`);
   }
@@ -2742,7 +2770,7 @@ ensureAllAgentWorkspaceBootstrapFiles();
 try {
  const { changed } = ensureOpenAiCodexProviderTransport();
  if (changed) {
-  try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
+  normalizeOpenClawRuntimePermissions();
   console.log('[bridge] Repaired models.providers.openai-codex transport (openai-codex-responses)');
  }
 } catch (e) { /* config not available yet */ }
@@ -4636,6 +4664,7 @@ app.post('/admin/restore', async (req, res) => {
 
    // Extract backup (overwrites existing files)
    execSync(`tar -xzf ${backupFile} -C / 2>/dev/null`, { timeout: 120000 });
+   normalizeOpenClawRuntimePermissions();
 
    console.log(`[admin] Restore complete from: ${backupFile}`);
    res.json({ ok: true, restored: backupFile });
@@ -4716,8 +4745,8 @@ app.get('/admin/devices', (req, res) => {
    paired = normalized.paired;
    if (normalized.changed) {
      mkdirSync(DEVICES_DIR_ADMIN, { recursive: true });
-     writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(paired, null, 2), { mode: 0o600 });
-     try { execSync(`chown -R 1000:1000 ${DEVICES_DIR_ADMIN} 2>/dev/null || true`, { timeout: 5000 }); } catch {}
+     writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(paired, null, 2), { mode: 0o666 });
+     normalizeOpenClawRuntimePermissions();
    }
 
    const devices = Object.values(paired).map(d => ({
@@ -4859,8 +4888,8 @@ app.patch('/admin/devices/:deviceId', express.json(), (req, res) => {
      updatedAt: Date.now(),
    };
    mkdirSync(DEVICES_DIR_ADMIN, { recursive: true });
-   writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(paired, null, 2), { mode: 0o600 });
-   try { execSync(`chown -R 1000:1000 ${DEVICES_DIR_ADMIN} 2>/dev/null || true`, { timeout: 5000 }); } catch {}
+   writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(paired, null, 2), { mode: 0o666 });
+   normalizeOpenClawRuntimePermissions();
 
    console.log(`[admin] Device renamed: ${deviceId} → ${displayName}`);
    res.json({ ok: true, device: { deviceId, displayName } });
@@ -4885,7 +4914,8 @@ app.delete('/admin/devices/:deviceId', (req, res) => {
    delete paired[deviceId];
 
    mkdirSync(DEVICES_DIR_ADMIN, { recursive: true });
-   writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(paired, null, 2), { mode: 0o600 });
+   writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(paired, null, 2), { mode: 0o666 });
+   normalizeOpenClawRuntimePermissions();
 
    // Also remove device-specific config files if they exist
    try {
@@ -4918,7 +4948,8 @@ app.delete('/admin/devices', (req, res) => {
 
    const removedCount = Object.keys(paired).length - Object.keys(kept).length;
    mkdirSync(DEVICES_DIR_ADMIN, { recursive: true });
-   writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(kept, null, 2), { mode: 0o600 });
+   writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(kept, null, 2), { mode: 0o666 });
+   normalizeOpenClawRuntimePermissions();
 
    console.log(`[admin] Removed ${removedCount} devices (kept bridge device)`);
    res.json({ ok: true, removed: removedCount, kept: Object.keys(kept).length });
@@ -7263,11 +7294,11 @@ app.post('/gateway/patch-auth', (req, res) => {
  const pubKey = getDevicePublicKeyBase64Url(deviceIdentity);
  paired[deviceIdentity.deviceId] = { deviceId: deviceIdentity.deviceId, publicKey: pubKey, displayName: 'CrabsHQ Bridge', platform: 'linux', role: 'operator', roles: ['operator'], scopes: OPERATOR_SCOPES, clientId: 'gateway-client', clientMode: 'backend', approvedAt: Date.now(), approved: true, ts: Date.now() };
  writeFileSync(PAIRED_PATH, JSON.stringify(paired, null, 2));
- execSync('chown -R 1000:1000 ' + DEVICES_DIR + ' 2>/dev/null || true', { timeout: 5000 });
+ normalizeOpenClawRuntimePermissions();
  console.log('[bridge] Added device to paired.json');
  } else if (normalized.changed) {
  writeFileSync(PAIRED_PATH, JSON.stringify(paired, null, 2));
- execSync('chown -R 1000:1000 ' + DEVICES_DIR + ' 2>/dev/null || true', { timeout: 5000 });
+ normalizeOpenClawRuntimePermissions();
  console.log('[bridge] Normalized paired device display names');
  }
  // Restart gateway to apply paired.json changes
@@ -7907,7 +7938,7 @@ app.post('/config/api-keys', async (req, res) => {
  config.tools.allow.push('web_search');
  }
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
- await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
+ normalizeOpenClawRuntimePermissions();
  } catch (e) { console.error('Failed to update openclaw.json:', e.message); }
  }
 
@@ -8024,7 +8055,7 @@ const hasStoredCodexOAuthProfile = () => {
    console.log(`[bridge] Updating pdf model to: ${config.agents.defaults.pdfModel || '(none)'}`);
  }
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
- await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
+ normalizeOpenClawRuntimePermissions();
  } catch (e) { console.error('Failed to update native models in openclaw.json:', e.message); _syncWarnings.push(`Native model update failed: ${e.message}`); }
  }
 
@@ -8052,7 +8083,7 @@ const hasStoredCodexOAuthProfile = () => {
    console.log('[bridge] Removed Ollama provider from openclaw.json');
  }
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
- await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
+ normalizeOpenClawRuntimePermissions();
  } catch (e) { console.error('Failed to update local providers in openclaw.json:', e.message); _syncWarnings.push(`Local provider update failed: ${e.message}`); }
  }
 
@@ -8184,7 +8215,7 @@ const hasStoredCodexOAuthProfile = () => {
  }
  if (changed) {
  writeFileSync(configPath, JSON.stringify(config, null, 2));
- await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
+ normalizeOpenClawRuntimePermissions();
  }
  } catch (e) { console.error('Failed to update openclaw.json providers:', e.message); }
  }
