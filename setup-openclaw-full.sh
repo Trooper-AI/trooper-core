@@ -884,7 +884,8 @@ fi
 # Optional: local llama.cpp provider (for self-hosted setups running llama-server on the VPS)
 if [ -n "${LOCAL_MODEL_PORT:-}" ]; then
  add_provider ' "local-llamacpp": {
- "baseUrl": "http://localhost:'"${LOCAL_MODEL_PORT}"'/v1"
+ "baseUrl": "http://localhost:'"${LOCAL_MODEL_PORT}"'/v1",
+ "api": "openai-completions"
  }'
 fi
 
@@ -1250,6 +1251,9 @@ if [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "__UNSET_GEMINI_API_
 fi
 if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "__UNSET_OPENROUTER_API_KEY__" ]; then
  add_auth_profile "openrouter:default" "openrouter" "${OPENROUTER_API_KEY}"
+fi
+if [ -n "${LOCAL_MODEL_PORT:-}" ]; then
+ add_auth_profile "local-llamacpp:default" "local-llamacpp" "local-llamacpp-not-required"
 fi
 
 # Fallback: if no keys, create empty profiles

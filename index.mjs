@@ -2689,6 +2689,9 @@ try {
 // not type "api_key"/"key" with field "key". Fix any that were created incorrectly.
 const AUTH_PROFILES_PATH = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
 const AUTH_PROFILES_ROOT_PATH = '/opt/openclaw-data/config/auth-profiles.json';
+const LOCAL_LLAMA_PROVIDER = 'local-llamacpp';
+const LOCAL_LLAMA_AUTH_PROFILE_ID = `${LOCAL_LLAMA_PROVIDER}:default`;
+const LOCAL_LLAMA_DUMMY_API_KEY = 'local-llamacpp-not-required';
 
 function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
  const serialized = JSON.stringify(authDoc, null, 2);
@@ -2721,6 +2724,129 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
    }
   }
  } catch {}
+}
+
+function readAuthProfilesOrDefault() {
+ try {
+  return JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+ } catch {
+  return { version: 1, profiles: {}, lastGood: {} };
+ }
+}
+
+function normalizeLocalLlamaBaseUrl(baseUrl) {
+ const raw = String(baseUrl || `http://127.0.0.1:${process.env.LOCAL_MODEL_PORT || 18790}/v1`)
+ .trim()
+ .replace(/\/+$/, '');
+ return /\/v1$/i.test(raw) ? raw : `${raw}/v1`;
+}
+
+function normalizeLocalLlamaProvider(provider = {}) {
+ const baseUrl = normalizeLocalLlamaBaseUrl(provider.baseUrl);
+ const models = Array.isArray(provider.models) ? provider.models : [];
+ return {
+  ...provider,
+  baseUrl,
+  api: provider.api || 'openai-completions',
+  models,
+ };
+}
+
+function ensureLocalLlamaAuthProfile(reason = 'sync') {
+ try {
+  const auth = readAuthProfilesOrDefault();
+  if (!auth.version) auth.version = 1;
+  if (!auth.profiles) auth.profiles = {};
+  if (!auth.lastGood) auth.lastGood = {};
+  auth.profiles[LOCAL_LLAMA_AUTH_PROFILE_ID] = {
+   type: 'api_key',
+   provider: LOCAL_LLAMA_PROVIDER,
+   key: LOCAL_LLAMA_DUMMY_API_KEY,
+  };
+  auth.lastGood[LOCAL_LLAMA_PROVIDER] = LOCAL_LLAMA_AUTH_PROFILE_ID;
+  writeMirroredAuthProfiles(auth);
+  console.log(`[bridge] Ensured local-llamacpp auth profile (${reason})`);
+  return true;
+ } catch (err) {
+  console.warn(`[bridge] Failed to ensure local-llamacpp auth profile (${reason}): ${err.message}`);
+  return false;
+ }
+}
+
+function removeLocalLlamaAuthProfile(reason = 'remove-local-provider') {
+ try {
+  const auth = readAuthProfilesOrDefault();
+  let changed = false;
+  if (auth.profiles?.[LOCAL_LLAMA_AUTH_PROFILE_ID]) {
+   delete auth.profiles[LOCAL_LLAMA_AUTH_PROFILE_ID];
+   changed = true;
+  }
+  if (auth.lastGood?.[LOCAL_LLAMA_PROVIDER] === LOCAL_LLAMA_AUTH_PROFILE_ID) {
+   delete auth.lastGood[LOCAL_LLAMA_PROVIDER];
+   changed = true;
+  }
+  if (changed) {
+   writeMirroredAuthProfiles(auth);
+   console.log(`[bridge] Removed local-llamacpp auth profile (${reason})`);
+  }
+ } catch (err) {
+  console.warn(`[bridge] Failed to remove local-llamacpp auth profile (${reason}): ${err.message}`);
+ }
+}
+
+async function fetchProbeStatus(url, headers = {}) {
+ const controller = new AbortController();
+ const timeout = setTimeout(() => controller.abort(), 2500);
+ try {
+  const response = await fetch(url, { headers, signal: controller.signal });
+  return { ok: response.ok, status: response.status };
+ } catch (err) {
+  return { ok: false, error: err.name === 'AbortError' ? 'timeout' : err.message };
+ } finally {
+  clearTimeout(timeout);
+ }
+}
+
+async function probeLocalLlamaProvider(provider) {
+ const baseUrl = normalizeLocalLlamaBaseUrl(provider?.baseUrl);
+ const rootUrl = baseUrl.replace(/\/v1$/i, '');
+ const modelIds = Array.isArray(provider?.models) ? provider.models.map(m => m?.id).filter(Boolean) : [];
+ const authHeader = { authorization: `Bearer ${LOCAL_LLAMA_DUMMY_API_KEY}` };
+ const [health, models] = await Promise.all([
+  fetchProbeStatus(`${rootUrl}/health`),
+  fetchProbeStatus(`${baseUrl}/models`, authHeader),
+ ]);
+ const modelsLabel = models.error ? `error=${models.error}` : `status=${models.status}`;
+ const healthLabel = health.error ? `error=${health.error}` : `status=${health.status}`;
+ console.log(
+  `[bridge] local-llamacpp probe baseUrl=${baseUrl} models=[${modelIds.join(', ') || 'none'}] ` +
+  `health(${healthLabel}) v1.models(${modelsLabel})`
+ );
+}
+
+try {
+ const configPath = '/opt/openclaw-data/config/openclaw.json';
+ const config = JSON.parse(readFileSync(configPath, 'utf8'));
+ const provider = config.models?.providers?.[LOCAL_LLAMA_PROVIDER];
+ if (provider && typeof provider === 'object') {
+  const normalizedProvider = normalizeLocalLlamaProvider(provider);
+  config.models.providers[LOCAL_LLAMA_PROVIDER] = normalizedProvider;
+  writeFileSync(configPath, JSON.stringify(config, null, 2));
+  normalizeOpenClawRuntimePermissions();
+  const authReady = ensureLocalLlamaAuthProfile('startup-migration');
+  const modelIds = Array.isArray(normalizedProvider.models)
+   ? normalizedProvider.models.map(m => m?.id).filter(Boolean)
+   : [];
+  console.log(
+   `[bridge] Startup verified local-llamacpp provider: baseUrl=${normalizedProvider.baseUrl} ` +
+   `api=${normalizedProvider.api || '(default)'} models=[${modelIds.join(', ') || 'none'}] authProfile=${authReady ? 'ready' : 'failed'}`
+  );
+  probeLocalLlamaProvider(normalizedProvider).catch(err => {
+   console.warn(`[bridge] local-llamacpp startup probe failed: ${err.message}`);
+  });
+ }
+} catch (err) {
+ if (err?.code !== 'ENOENT') console.warn(`[bridge] Startup local-llamacpp migration skipped: ${err.message}`);
 }
 
 function ensureWorkspaceBootstrapFiles(workspacePath = '/opt/openclaw-data/workspace') {
@@ -8063,19 +8189,32 @@ const hasStoredCodexOAuthProfile = () => {
  } catch (e) { console.error('Failed to update native models in openclaw.json:', e.message); _syncWarnings.push(`Native model update failed: ${e.message}`); }
  }
 
- // Update local providers in openclaw.json models.providers. OpenClaw supports
- // baseUrl-only local provider config, so do not write dummy keys/adapters here.
+ // Update local providers in openclaw.json models.providers. Local llama.cpp is
+ // OpenAI-compatible, but the agent runner still expects an auth profile, so we
+ // mirror a harmless dummy key that the local server does not require.
  if (localProvider || removeLocalProvider || ollamaProvider || removeOllamaProvider) {
  try {
  const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
  if (!config.models) config.models = {};
  if (!config.models.providers) config.models.providers = {};
  if (localProvider && typeof localProvider === 'object') {
-   config.models.providers['local-llamacpp'] = localProvider;
-   if (localProvider.baseUrl) writeConfigKey('localModelUrl', String(localProvider.baseUrl).trim().replace(/\/+$/, ''));
-   console.log(`[bridge] Added local-llamacpp provider to openclaw.json: ${localProvider.baseUrl || '(no baseUrl)'}`);
+   const normalizedLocalProvider = normalizeLocalLlamaProvider(localProvider);
+   config.models.providers[LOCAL_LLAMA_PROVIDER] = normalizedLocalProvider;
+   if (normalizedLocalProvider.baseUrl) writeConfigKey('localModelUrl', normalizedLocalProvider.baseUrl);
+   const authReady = ensureLocalLlamaAuthProfile('local-provider-sync');
+   const localModelIds = Array.isArray(normalizedLocalProvider.models)
+    ? normalizedLocalProvider.models.map(m => m?.id).filter(Boolean)
+    : [];
+   console.log(
+    `[bridge] Added local-llamacpp provider to openclaw.json: baseUrl=${normalizedLocalProvider.baseUrl} ` +
+    `api=${normalizedLocalProvider.api || '(default)'} models=[${localModelIds.join(', ') || 'none'}] authProfile=${authReady ? 'ready' : 'failed'}`
+   );
+   probeLocalLlamaProvider(normalizedLocalProvider).catch(err => {
+    console.warn(`[bridge] local-llamacpp probe failed: ${err.message}`);
+   });
  } else if (removeLocalProvider) {
-   delete config.models.providers['local-llamacpp'];
+   delete config.models.providers[LOCAL_LLAMA_PROVIDER];
+   removeLocalLlamaAuthProfile();
    console.log('[bridge] Removed local-llamacpp provider from openclaw.json');
  }
  if (ollamaProvider && typeof ollamaProvider === 'object') {
