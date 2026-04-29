@@ -885,7 +885,10 @@ fi
 if [ -n "${LOCAL_MODEL_PORT:-}" ]; then
  add_provider ' "local-llamacpp": {
  "baseUrl": "http://localhost:'"${LOCAL_MODEL_PORT}"'/v1",
- "api": "openai-completions"
+ "api": "openai-completions",
+ "models": [
+ { "id": "local-model", "name": "Local Model", "contextWindow": 262144 }
+ ]
  }'
 fi
 
@@ -1125,39 +1128,21 @@ cat > /opt/openclaw-data/startup.sh << 'STARTUP'
 GATEWAY_PORT="${1:-18789}"
 
 # Start Xvnc on :99 for live browser view
-if command -v Xvnc &>/dev/null; then
-  if ! pgrep -f "Xvnc :99" >/dev/null 2>&1 && [ -f /tmp/.X99-lock ]; then
-    echo "[startup] Removing stale /tmp/.X99-lock"
-    rm -f /tmp/.X99-lock || true
-  fi
-  if ! pgrep -f "Xvnc :99" >/dev/null 2>&1; then
-    echo "[startup] Starting Xvnc on :99 (port 5999)..."
-    Xvnc :99 -geometry 1920x1080 -depth 24 -rfbport 5999 -localhost \
-      -SecurityTypes None -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents &
-    sleep 0.5
-    echo "[startup] Xvnc started on :99"
-  fi
+if command -v Xvnc &>/dev/null && ! pgrep -f "Xvnc :99" >/dev/null 2>&1; then
+  echo "[startup] Starting Xvnc on :99 (port 5999)..."
+  Xvnc :99 -geometry 1920x1080 -depth 24 -rfbport 5999 -localhost \
+    -SecurityTypes None -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents &
+  sleep 0.5
+  echo "[startup] Xvnc started on :99"
 fi
 
-repair_openclaw_permissions() {
-  # Restore rewrites config/sessions after container start, so keep mutable
-  # OpenClaw data writable for both the host bridge and container node user.
-  chown -R 1000:1000 /home/node/.openclaw 2>/dev/null || true
-  chown -R 1000:1000 /home/node/.npm 2>/dev/null || true
-  find /home/node/.openclaw -type d -exec chmod 777 {} \; 2>/dev/null || true
-  find /home/node/.openclaw -type f -exec chmod a+rw {} \; 2>/dev/null || true
-  chmod 666 /home/node/.openclaw/openclaw.json /home/node/.openclaw/auth-profiles.json /home/node/.openclaw/agents/main/agent/auth-profiles.json 2>/dev/null || true
-  chmod 777 /home/node/.openclaw/devices /home/node/.openclaw/cron /home/node/.openclaw/cron/runs 2>/dev/null || true
-  chmod 666 /home/node/.openclaw/devices/*.json /home/node/.openclaw/cron/*.json 2>/dev/null || true
-  chmod 755 /home/node/.openclaw/identity 2>/dev/null || true
-  chmod 644 /home/node/.openclaw/identity/*.json 2>/dev/null || true
-  mkdir -p /var/lib/openclaw/plugin-runtime-deps 2>/dev/null || true
-  chown -R 1000:1000 /var/lib/openclaw 2>/dev/null || true
-  chmod -R 777 /var/lib/openclaw/plugin-runtime-deps 2>/dev/null || true
-}
-
-repair_openclaw_permissions
-(for i in $(seq 1 90); do sleep 4; repair_openclaw_permissions; done) &
+# Fix permissions: ensure node user can read config files
+# NOTE: Do NOT chmod 700 or chmod 600 — the bridge runs as a different UID on the host
+# and needs to traverse dirs (755) and read config files (664)
+chown -R 1000:1000 /home/node/.openclaw 2>/dev/null || true
+chown -R 1000:1000 /home/node/.npm 2>/dev/null || true
+find /home/node/.openclaw -type d -exec chmod 755 {} \; 2>/dev/null || true
+find /home/node/.openclaw -name '*.json' -exec chmod 664 {} \; 2>/dev/null || true
 
 # Fix jiti cache permissions — files in /tmp/jiti get created as root during startup
 # because the gateway bootstraps plugins before su fully takes effect.
@@ -1168,6 +1153,10 @@ mkdir -p /tmp/jiti && chmod 1777 /tmp/jiti
 # Also set JITI_CACHE_DIR to a node-owned location as fallback
 export JITI_CACHE_DIR="/home/node/.cache/jiti"
 mkdir -p "$JITI_CACHE_DIR" && chown 1000:1000 "$JITI_CACHE_DIR" && chmod 755 "$JITI_CACHE_DIR"
+
+# Fix devices dir permissions so bridge (host process) can write paired.json
+chmod 777 /home/node/.openclaw/devices 2>/dev/null || true
+chmod 666 /home/node/.openclaw/devices/*.json 2>/dev/null || true
 
 # Drop back to node user for the gateway process
 exec su -s /bin/bash node -c "DISPLAY=:99 JITI_CACHE_DIR=/home/node/.cache/jiti node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
@@ -1251,9 +1240,6 @@ if [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "__UNSET_GEMINI_API_
 fi
 if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "__UNSET_OPENROUTER_API_KEY__" ]; then
  add_auth_profile "openrouter:default" "openrouter" "${OPENROUTER_API_KEY}"
-fi
-if [ -n "${LOCAL_MODEL_PORT:-}" ]; then
- add_auth_profile "local-llamacpp:default" "local-llamacpp" "local-llamacpp-not-required"
 fi
 
 # Fallback: if no keys, create empty profiles
@@ -1552,19 +1538,14 @@ sed -i 's|/usr/bin/google-chrome-stable|/opt/chrome-wrapper.sh|g' /opt/openclaw-
 
 
 # Fix permissions: container runs as uid 1000, bridge runs as host node user
-# Config/state dirs must be writable because restore and the gateway create
-# temp files, lock files, backups, and plugin metadata after startup.
+# Config dir MUST be traversable (755) so both UIDs can access files inside
 chown -R 1000:1000 /opt/openclaw-data
-mkdir -p /var/lib/openclaw/plugin-runtime-deps
-chown -R 1000:1000 /var/lib/openclaw
-chmod -R 777 /var/lib/openclaw/plugin-runtime-deps
-chmod 777 /opt/openclaw-data/config
-find /opt/openclaw-data/config -type d -exec chmod 777 {} \;
-find /opt/openclaw-data/config -type f -exec chmod a+rw {} \;
+chmod 755 /opt/openclaw-data/config
+find /opt/openclaw-data/config -type d -exec chmod 755 {} \;
 # Config files: readable by both container (uid 1000) and host node user
-chmod 666 /opt/openclaw-data/config/openclaw.json
-chmod 666 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json
-chmod 666 /opt/openclaw-data/config/auth-profiles.json
+chmod 664 /opt/openclaw-data/config/openclaw.json
+chmod 664 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json
+chmod 664 /opt/openclaw-data/config/auth-profiles.json
 
 # Devices dir and cron dir must be writable by BOTH container (uid 1000) and host bridge process.
 # Use 777 so any UID can read/write device approval and cron state.
@@ -1589,9 +1570,9 @@ if [ "$HOST_NODE_UID" != "1000" ]; then
   chown -R "$HOST_NODE_UID" /opt/openclaw-data/config/devices 2>/dev/null || true
   # Container still needs read access — both UIDs can read via group or mode
   chmod 666 /opt/openclaw/.env 2>/dev/null || true
-  chmod 666 /opt/openclaw-data/config/openclaw.json 2>/dev/null || true
-  chmod 666 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
-  chmod 666 /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
+  chmod 660 /opt/openclaw-data/config/openclaw.json 2>/dev/null || true
+  chmod 660 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
+  chmod 660 /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
 fi
 
 cd /opt/openclaw
@@ -2614,15 +2595,11 @@ console.log('Pre-approved 2 devices: bridge + gateway internal');
 
 # Fix ownership — Docker runs as uid 1000, files were created by root
 chown -R 1000:1000 /opt/openclaw-data
-mkdir -p /var/lib/openclaw/plugin-runtime-deps
-chown -R 1000:1000 /var/lib/openclaw
-chmod -R 777 /var/lib/openclaw/plugin-runtime-deps
-# ALL directories under config must be writable so both container (uid 1000)
-# and host bridge (uid varies) can create temp files during restore/cutover.
-find /opt/openclaw-data/config -type d -exec chmod 777 {} \;
-find /opt/openclaw-data/config -type f -exec chmod a+rw {} \;
+# ALL directories under config MUST be traversable (755) so both container (uid 1000)
+# and host bridge (uid varies) can access files. chown -R resets dir perms to 700.
+find /opt/openclaw-data/config -type d -exec chmod 755 {} \;
 # Config files need to be readable by both UIDs
-chmod 666 /opt/openclaw-data/config/openclaw.json /opt/openclaw-data/config/agents/main/agent/auth-profiles.json /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
+chmod 664 /opt/openclaw-data/config/openclaw.json /opt/openclaw-data/config/agents/main/agent/auth-profiles.json /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
 HOST_NODE_UID=$(id -u node 2>/dev/null || echo 1000)
 if [ "$HOST_NODE_UID" != "1000" ]; then
   # Host node user needs write access for bridge API key sync, model updates
@@ -2779,11 +2756,10 @@ fi
 # stay readable, and devices/cron state must remain writable for temp-file
 # replacement flows used by the gateway.
 chmod 600 /opt/openclaw/.env 2>/dev/null || true
-find /opt/openclaw-data/config -type d -exec chmod 777 {} \; 2>/dev/null || true
-find /opt/openclaw-data/config -type f -exec chmod a+rw {} \; 2>/dev/null || true
-chmod 666 /opt/openclaw-data/config/openclaw.json 2>/dev/null || true
-chmod 666 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
-chmod 666 /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
+find /opt/openclaw-data/config -type d -exec chmod 755 {} \; 2>/dev/null || true
+chmod 664 /opt/openclaw-data/config/openclaw.json 2>/dev/null || true
+chmod 664 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
+chmod 664 /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
 chmod 777 /opt/openclaw-data/config/devices 2>/dev/null || true
 chmod 666 /opt/openclaw-data/config/devices/*.json 2>/dev/null || true
 chmod 777 /opt/openclaw-data/config/cron 2>/dev/null || true

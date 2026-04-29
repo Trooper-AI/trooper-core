@@ -570,41 +570,9 @@ function readWorkspaceTextFile(fileName, maxChars = 50000) {
  }
 }
 
-function normalizeOpenClawRuntimePermissions({ docker = true } = {}) {
- const hostCmd = [
-  'mkdir -p /opt/openclaw-data/config/devices /opt/openclaw-data/config/identity /opt/openclaw-data/config/agents /opt/openclaw-data/workspace /var/lib/openclaw/plugin-runtime-deps',
-  'chown -R 1000:1000 /opt/openclaw-data/config /opt/openclaw-data/workspace /var/lib/openclaw 2>/dev/null || true',
-  'find /opt/openclaw-data/config /opt/openclaw-data/workspace -type d -exec chmod 777 {} + 2>/dev/null || true',
-  'find /opt/openclaw-data/config /opt/openclaw-data/workspace -type f -exec chmod a+rw {} + 2>/dev/null || true',
-  'chmod 666 /opt/openclaw-data/config/openclaw.json /opt/openclaw-data/config/auth-profiles.json /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true',
-  'chmod 777 /opt/openclaw-data/config/devices /opt/openclaw-data/config/cron /opt/openclaw-data/config/cron/runs 2>/dev/null || true',
-  'chmod 666 /opt/openclaw-data/config/devices/*.json /opt/openclaw-data/config/cron/*.json 2>/dev/null || true',
-  'chmod 755 /opt/openclaw-data/config/identity 2>/dev/null || true',
-  'chmod 644 /opt/openclaw-data/config/identity/*.json 2>/dev/null || true',
-  'chmod -R 777 /var/lib/openclaw/plugin-runtime-deps 2>/dev/null || true',
- ].join('; ');
- try { execSync(hostCmd, { timeout: 15000 }); } catch {}
- if (!docker) return;
- const containerCmd = [
-  'mkdir -p /home/node/.openclaw/devices /home/node/.openclaw/identity /home/node/.openclaw/agents /home/node/.openclaw/workspace /var/lib/openclaw/plugin-runtime-deps',
-  'chown -R 1000:1000 /home/node/.openclaw /var/lib/openclaw 2>/dev/null || true',
-  'find /home/node/.openclaw -type d -exec chmod 777 {} + 2>/dev/null || true',
-  'find /home/node/.openclaw -type f -exec chmod a+rw {} + 2>/dev/null || true',
-  'chmod 666 /home/node/.openclaw/openclaw.json /home/node/.openclaw/auth-profiles.json /home/node/.openclaw/agents/main/agent/auth-profiles.json 2>/dev/null || true',
-  'chmod 777 /home/node/.openclaw/devices /home/node/.openclaw/cron /home/node/.openclaw/cron/runs 2>/dev/null || true',
-  'chmod 666 /home/node/.openclaw/devices/*.json /home/node/.openclaw/cron/*.json 2>/dev/null || true',
-  'chmod 755 /home/node/.openclaw/identity 2>/dev/null || true',
-  'chmod 644 /home/node/.openclaw/identity/*.json 2>/dev/null || true',
-  'chmod -R 777 /var/lib/openclaw/plugin-runtime-deps 2>/dev/null || true',
- ].join('; ');
- try {
-  execSync(`docker exec openclaw-openclaw-gateway-1 bash -lc ${JSON.stringify(containerCmd)}`, { timeout: 20000 });
- } catch {}
-}
-
 function writeOpenClawConfig(config) {
  writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
- normalizeOpenClawRuntimePermissions();
+ try { execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 }); } catch {}
 }
 
 function readGatewayTokenFromConfig() {
@@ -714,29 +682,9 @@ class OpenClawGateway {
  this._authResolve = null;
  this._authReject = null;
  this._pingInterval = null;
-	 this._lastSelfApproveMs = 0; // cooldown: don't restart gateway more than once per 5 min
-	 this._lastAuthRepairMs = 0;
-	 this._sessionHistoryInflight = new Map();
-	 this._sessionSnapshotInflight = new Map();
-	 this._sessionSnapshotCache = new Map();
-	 this.connect();
-	 }
-
- _disposeSocket(ws, { preserveCloseHandler = false } = {}) {
- if (!ws) return;
- try {
- if (!preserveCloseHandler) ws.removeAllListeners('close');
- ws.removeAllListeners('error');
- ws.removeAllListeners('message');
- // Closing a CONNECTING socket can emit an error before `close`. Keep a
- // no-op handler attached so reconnect churn does not crash the bridge.
- ws.on('error', () => {});
- if (ws.readyState === WebSocket.CONNECTING) {
-   try { ws.terminate(); } catch {}
-   return;
- }
- try { ws.close(); } catch {}
- } catch {}
+ this._lastSelfApproveMs = 0; // cooldown: don't restart gateway more than once per 5 min
+ this._lastAuthRepairMs = 0;
+ this.connect();
  }
 
  // Attempt reconnect if not connected; returns true if ready
@@ -767,8 +715,11 @@ class OpenClawGateway {
  // Clear any pending reconnect timer to prevent close→reconnect→close loops
  if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
  if (this.ws) {
-   // Dispose the old socket without letting a half-open connection crash the bridge.
-   this._disposeSocket(this.ws);
+   // Remove listeners before closing to prevent on('close') from scheduling another reconnect
+   this.ws.removeAllListeners('close');
+   this.ws.removeAllListeners('error');
+   this.ws.removeAllListeners('message');
+   try { this.ws.close(); } catch {}
  }
 
  console.log('[OpenClaw] Connecting to ' + this.url + '...');
@@ -815,13 +766,13 @@ class OpenClawGateway {
  clientId: 'gateway-client', clientMode: 'backend',
  approvedAt: Date.now(), approved: true, ts: Date.now(),
  };
- fs.writeFileSync(PAIRED_JSON_PATH, JSON.stringify(existing, null, 2), { mode: 0o666 });
- normalizeOpenClawRuntimePermissions();
+ fs.writeFileSync(PAIRED_JSON_PATH, JSON.stringify(existing, null, 2), { mode: 0o600 });
+ await _run(`chown -R 1000:1000 ${DEVICES_DIR} 2>/dev/null || true`).catch(() => {});
  console.log('[OpenClaw] Bridge device written to paired.json for sessions_spawn');
  } else {
  if (normalized.changed) {
- fs.writeFileSync(PAIRED_JSON_PATH, JSON.stringify(existing, null, 2), { mode: 0o666 });
- normalizeOpenClawRuntimePermissions();
+ fs.writeFileSync(PAIRED_JSON_PATH, JSON.stringify(existing, null, 2), { mode: 0o600 });
+ await _run(`chown -R 1000:1000 ${DEVICES_DIR} 2>/dev/null || true`).catch(() => {});
  console.log('[OpenClaw] Normalized paired device display names');
  }
  console.log('[OpenClaw] Bridge device already in paired.json');
@@ -1080,9 +1031,9 @@ class OpenClawGateway {
  const normalized = normalizePairedDeviceMap(existing);
  existing = normalized.paired;
  existing[deviceIdentity.deviceId] = deviceEntry;
- fs.writeFileSync(PAIRED_JSON_PATH, JSON.stringify(existing, null, 2), { mode: 0o666 });
- // Fix ownership so gateway container (uid 1000) can read it and create pending tmp files.
- normalizeOpenClawRuntimePermissions();
+ fs.writeFileSync(PAIRED_JSON_PATH, JSON.stringify(existing, null, 2), { mode: 0o600 });
+ // Fix ownership so gateway container (uid 1000) can read it
+ await _run(`chown -R 1000:1000 ${DEVICES_DIR} 2>/dev/null || true`).catch(() => {});
  console.log('[OpenClaw] Written to paired.json — restarting gateway to apply...');
  } catch (writeErr) {
  console.warn('[OpenClaw] Could not write paired.json directly:', writeErr.message, '— falling back to docker exec approve');
@@ -1335,13 +1286,8 @@ class OpenClawGateway {
  // Fetch session history from gateway — returns tool calls and messages
  async fetchSessionHistory(sessionKey, limit = 50) {
   if (!this.connected) return null;
-  const cacheKey = `${sessionKey || ''}:${limit}`;
-  if (this._sessionHistoryInflight.has(cacheKey)) {
-   return await this._sessionHistoryInflight.get(cacheKey);
-  }
   const id = randomUUID();
-  const request = (async () => {
-   try {
+  try {
    const result = await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
      this._pendingRequests.delete(id);
@@ -1357,16 +1303,12 @@ class OpenClawGateway {
     }));
    });
    return result?.messages || [];
-   } catch (err) {
+  } catch (err) {
    console.error('[OpenClaw] fetchSessionHistory error:', err.message);
    return null;
-   } finally {
+  } finally {
    this._pendingRequests.delete(id);
-   this._sessionHistoryInflight.delete(cacheKey);
-   }
-  })();
-  this._sessionHistoryInflight.set(cacheKey, request);
-  return await request;
+  }
  }
 
  async abortSession(sessionKey) {
@@ -1403,18 +1345,12 @@ class OpenClawGateway {
    const ok = await this.connect();
    if (!ok) return null;
   }
-  const cached = this._sessionSnapshotCache.get(sessionKey);
-  if (cached && Date.now() - cached.cachedAt < 5000) return cached.session;
-  if (this._sessionSnapshotInflight.has(sessionKey)) {
-   return await this._sessionSnapshotInflight.get(sessionKey);
-  }
   const id = randomUUID();
   const toNumber = (value) => {
    const next = Number(value);
    return Number.isFinite(next) && next >= 0 ? next : null;
   };
-  const request = (async () => {
-   try {
+  try {
    const result = await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
      this._pendingRequests.delete(id);
@@ -1456,7 +1392,7 @@ class OpenClawGateway {
      ? Math.max(0, contextTokens - totalTokens)
      : null
    );
-   const session = {
+   return {
     key: row.key || sessionKey,
     sessionId: row.sessionId || null,
     displayName: row.displayName || row.label || null,
@@ -1472,18 +1408,12 @@ class OpenClawGateway {
     responseUsage: row.responseUsage || null,
     compactionCount: toNumber(row.compactionCount),
    };
-   this._sessionSnapshotCache.set(sessionKey, { cachedAt: Date.now(), session });
-   return session;
-   } catch (err) {
+  } catch (err) {
    console.error('[OpenClaw] fetchSessionSnapshot error:', err.message);
-   return cached?.session || null;
-   } finally {
+   return null;
+  } finally {
    this._pendingRequests.delete(id);
-   this._sessionSnapshotInflight.delete(sessionKey);
-   }
-  })();
-  this._sessionSnapshotInflight.set(sessionKey, request);
-  return await request;
+  }
  }
 
  async resolveExecApproval(approvalId, decision) {
@@ -1565,9 +1495,8 @@ class OpenClawGateway {
  let sawLiveStreamPayload = false;
  let historyPoller = null;
  let historyPollInFlight = false;
-	 let lastHistoryAssistantText = '';
-	 let lastHistoryThinkingText = '';
-	 let resetRunTimeout = null;
+ let lastHistoryAssistantText = '';
+ let lastHistoryThinkingText = '';
  const seenHistoryEventKeys = new Set();
  const buildHistoryReplayKey = (event) => {
  const data = event?.data || {};
@@ -1629,10 +1558,9 @@ class OpenClawGateway {
  if (_debugEvents.length > 100) _debugEvents.shift();
  };
 
-	 const eventHandler = (stream, data, runId) => {
-	 // Reset inactivity timeout — agent is actively working
-	 if (resetRunTimeout) resetRunTimeout();
-	 else if (this._activeTimeoutReset) this._activeTimeoutReset();
+ const eventHandler = (stream, data, runId) => {
+ // Reset inactivity timeout — agent is actively working
+ if (this._activeTimeoutReset) this._activeTimeoutReset();
  // Debug: log ALL raw gateway events to global buffer + console (including text)
  const rawStr = JSON.stringify(data || {}).substring(0, 300);
  const isSubAgent = !!(mainRunId && runId && runId !== mainRunId);
@@ -2122,8 +2050,7 @@ function extractPatchFilePaths(patchText = '') {
 
  try {
  const result = await new Promise((resolve, reject) => {
- // Inactivity timeout — resets every time this run's gateway listener sees an event.
- // Keep this per-run; a single global reset hook breaks when two chat requests overlap.
+ // Inactivity timeout — resets every time the gateway sends an event
  let timeout;
  const resetTimeout = () => {
   if (timeout) clearTimeout(timeout);
@@ -2133,11 +2060,12 @@ function extractPatchFilePaths(patchText = '') {
   }, timeoutMs);
  };
  resetTimeout();
- resetRunTimeout = resetTimeout;
+ // Expose resetTimeout so eventHandler can call it on each event
+ this._activeTimeoutReset = resetTimeout;
 
  this._pendingRequests.set(id, {
- resolve: (payload) => { clearTimeout(timeout); resetRunTimeout = null; resolve(payload); },
- reject: (err) => { clearTimeout(timeout); resetRunTimeout = null; reject(err); },
+ resolve: (payload) => { clearTimeout(timeout); this._activeTimeoutReset = null; resolve(payload); },
+ reject: (err) => { clearTimeout(timeout); this._activeTimeoutReset = null; reject(err); },
  expectFinal: true, runId: null, idempotencyKey,
  });
 
@@ -2213,9 +2141,9 @@ function extractPatchFilePaths(patchText = '') {
 
  setTimeout(() => {
  if (historyPoller || sawLiveStreamPayload) return;
-	 historyPoller = setInterval(pollSessionHistory, 10000);
-	 pollSessionHistory().catch(() => {});
-	 }, 2500);
+ historyPoller = setInterval(pollSessionHistory, 1500);
+ pollSessionHistory().catch(() => {});
+ }, 2500);
  });
 
  if (pendingSubAgentSpawn || activeSubAgents.size > 0) {
@@ -2273,7 +2201,7 @@ const formattedToolLog = toolLog.map(t => ({
  if (historyPoller) clearInterval(historyPoller);
  if (subagentDrainTimer) clearTimeout(subagentDrainTimer);
  // Clean up session listener and event listeners
-	 if (this._activeSessionListener === eventHandler) this._activeSessionListener = null;
+ this._activeSessionListener = null;
  const listener = this._eventListeners.get(idempotencyKey);
  this._eventListeners.delete(idempotencyKey);
  if (listener) {
@@ -2314,10 +2242,7 @@ const formattedToolLog = toolLog.map(t => ({
  }
 
  get isReady() { return this.connected && this.ws?.readyState === WebSocket.OPEN; }
- close() {
- if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
- if (this.ws) this._disposeSocket(this.ws, { preserveCloseHandler: true });
- }
+ close() { if (this._reconnectTimer) clearTimeout(this._reconnectTimer); if (this.ws) this.ws.close(); }
 }
 
 // Initialize the gateway client (connects on startup)
@@ -2723,7 +2648,7 @@ try {
  }
  if (changed) {
  writeFileSync(configPath, JSON.stringify(config, null, 2));
- normalizeOpenClawRuntimePermissions();
+ try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
  }
 } catch (e) { /* config not available yet */ }
 
@@ -2732,9 +2657,6 @@ try {
 // not type "api_key"/"key" with field "key". Fix any that were created incorrectly.
 const AUTH_PROFILES_PATH = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
 const AUTH_PROFILES_ROOT_PATH = '/opt/openclaw-data/config/auth-profiles.json';
-const LOCAL_LLAMA_PROVIDER = 'local-llamacpp';
-const LOCAL_LLAMA_AUTH_PROFILE_ID = `${LOCAL_LLAMA_PROVIDER}:default`;
-const LOCAL_LLAMA_DUMMY_API_KEY = 'local-llamacpp-not-required';
 
 function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
  const serialized = JSON.stringify(authDoc, null, 2);
@@ -2748,7 +2670,7 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
     } catch {}
    }
    writeFileSync(target, serialized);
-   normalizeOpenClawRuntimePermissions();
+   try { execSync(`chown 1000:1000 ${target} 2>/dev/null; chmod 664 ${target} 2>/dev/null`, { timeout: 3000 }); } catch {}
   } catch (err) {
    console.warn(`[bridge] Failed to mirror auth profiles to ${target}: ${err.message}`);
   }
@@ -2761,135 +2683,12 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
    try {
     mkdirSync(dirname(sub), { recursive: true });
     writeFileSync(sub, serialized);
-    try { execSync(`chown 1000:1000 ${sub} 2>/dev/null; chmod 666 ${sub} 2>/dev/null`, { timeout: 3000 }); } catch {}
+    try { execSync(`chown 1000:1000 ${sub} 2>/dev/null; chmod 664 ${sub} 2>/dev/null`, { timeout: 3000 }); } catch {}
    } catch (err) {
     console.warn(`[bridge] Failed to mirror auth profiles to ${sub}: ${err.message}`);
    }
   }
  } catch {}
-}
-
-function readAuthProfilesOrDefault() {
- try {
-  return JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
- } catch {
-  return { version: 1, profiles: {}, lastGood: {} };
- }
-}
-
-function normalizeLocalLlamaBaseUrl(baseUrl) {
- const raw = String(baseUrl || `http://127.0.0.1:${process.env.LOCAL_MODEL_PORT || 18790}/v1`)
- .trim()
- .replace(/\/+$/, '');
- return /\/v1$/i.test(raw) ? raw : `${raw}/v1`;
-}
-
-function normalizeLocalLlamaProvider(provider = {}) {
- const baseUrl = normalizeLocalLlamaBaseUrl(provider.baseUrl);
- const models = Array.isArray(provider.models) ? provider.models : [];
- return {
-  ...provider,
-  baseUrl,
-  api: provider.api || 'openai-completions',
-  models,
- };
-}
-
-function ensureLocalLlamaAuthProfile(reason = 'sync') {
- try {
-  const auth = readAuthProfilesOrDefault();
-  if (!auth.version) auth.version = 1;
-  if (!auth.profiles) auth.profiles = {};
-  if (!auth.lastGood) auth.lastGood = {};
-  auth.profiles[LOCAL_LLAMA_AUTH_PROFILE_ID] = {
-   type: 'api_key',
-   provider: LOCAL_LLAMA_PROVIDER,
-   key: LOCAL_LLAMA_DUMMY_API_KEY,
-  };
-  auth.lastGood[LOCAL_LLAMA_PROVIDER] = LOCAL_LLAMA_AUTH_PROFILE_ID;
-  writeMirroredAuthProfiles(auth);
-  console.log(`[bridge] Ensured local-llamacpp auth profile (${reason})`);
-  return true;
- } catch (err) {
-  console.warn(`[bridge] Failed to ensure local-llamacpp auth profile (${reason}): ${err.message}`);
-  return false;
- }
-}
-
-function removeLocalLlamaAuthProfile(reason = 'remove-local-provider') {
- try {
-  const auth = readAuthProfilesOrDefault();
-  let changed = false;
-  if (auth.profiles?.[LOCAL_LLAMA_AUTH_PROFILE_ID]) {
-   delete auth.profiles[LOCAL_LLAMA_AUTH_PROFILE_ID];
-   changed = true;
-  }
-  if (auth.lastGood?.[LOCAL_LLAMA_PROVIDER] === LOCAL_LLAMA_AUTH_PROFILE_ID) {
-   delete auth.lastGood[LOCAL_LLAMA_PROVIDER];
-   changed = true;
-  }
-  if (changed) {
-   writeMirroredAuthProfiles(auth);
-   console.log(`[bridge] Removed local-llamacpp auth profile (${reason})`);
-  }
- } catch (err) {
-  console.warn(`[bridge] Failed to remove local-llamacpp auth profile (${reason}): ${err.message}`);
- }
-}
-
-async function fetchProbeStatus(url, headers = {}) {
- const controller = new AbortController();
- const timeout = setTimeout(() => controller.abort(), 2500);
- try {
-  const response = await fetch(url, { headers, signal: controller.signal });
-  return { ok: response.ok, status: response.status };
- } catch (err) {
-  return { ok: false, error: err.name === 'AbortError' ? 'timeout' : err.message };
- } finally {
-  clearTimeout(timeout);
- }
-}
-
-async function probeLocalLlamaProvider(provider) {
- const baseUrl = normalizeLocalLlamaBaseUrl(provider?.baseUrl);
- const rootUrl = baseUrl.replace(/\/v1$/i, '');
- const modelIds = Array.isArray(provider?.models) ? provider.models.map(m => m?.id).filter(Boolean) : [];
- const authHeader = { authorization: `Bearer ${LOCAL_LLAMA_DUMMY_API_KEY}` };
- const [health, models] = await Promise.all([
-  fetchProbeStatus(`${rootUrl}/health`),
-  fetchProbeStatus(`${baseUrl}/models`, authHeader),
- ]);
- const modelsLabel = models.error ? `error=${models.error}` : `status=${models.status}`;
- const healthLabel = health.error ? `error=${health.error}` : `status=${health.status}`;
- console.log(
-  `[bridge] local-llamacpp probe baseUrl=${baseUrl} models=[${modelIds.join(', ') || 'none'}] ` +
-  `health(${healthLabel}) v1.models(${modelsLabel})`
- );
-}
-
-try {
- const configPath = '/opt/openclaw-data/config/openclaw.json';
- const config = JSON.parse(readFileSync(configPath, 'utf8'));
- const provider = config.models?.providers?.[LOCAL_LLAMA_PROVIDER];
- if (provider && typeof provider === 'object') {
-  const normalizedProvider = normalizeLocalLlamaProvider(provider);
-  config.models.providers[LOCAL_LLAMA_PROVIDER] = normalizedProvider;
-  writeFileSync(configPath, JSON.stringify(config, null, 2));
-  normalizeOpenClawRuntimePermissions();
-  const authReady = ensureLocalLlamaAuthProfile('startup-migration');
-  const modelIds = Array.isArray(normalizedProvider.models)
-   ? normalizedProvider.models.map(m => m?.id).filter(Boolean)
-   : [];
-  console.log(
-   `[bridge] Startup verified local-llamacpp provider: baseUrl=${normalizedProvider.baseUrl} ` +
-   `api=${normalizedProvider.api || '(default)'} models=[${modelIds.join(', ') || 'none'}] authProfile=${authReady ? 'ready' : 'failed'}`
-  );
-  probeLocalLlamaProvider(normalizedProvider).catch(err => {
-   console.warn(`[bridge] local-llamacpp startup probe failed: ${err.message}`);
-  });
- }
-} catch (err) {
- if (err?.code !== 'ENOENT') console.warn(`[bridge] Startup local-llamacpp migration skipped: ${err.message}`);
 }
 
 function ensureWorkspaceBootstrapFiles(workspacePath = '/opt/openclaw-data/workspace') {
@@ -2943,7 +2742,7 @@ ensureAllAgentWorkspaceBootstrapFiles();
 try {
  const { changed } = ensureOpenAiCodexProviderTransport();
  if (changed) {
-  normalizeOpenClawRuntimePermissions();
+  try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
   console.log('[bridge] Repaired models.providers.openai-codex transport (openai-codex-responses)');
  }
 } catch (e) { /* config not available yet */ }
@@ -4837,7 +4636,6 @@ app.post('/admin/restore', async (req, res) => {
 
    // Extract backup (overwrites existing files)
    execSync(`tar -xzf ${backupFile} -C / 2>/dev/null`, { timeout: 120000 });
-   normalizeOpenClawRuntimePermissions();
 
    console.log(`[admin] Restore complete from: ${backupFile}`);
    res.json({ ok: true, restored: backupFile });
@@ -4918,8 +4716,8 @@ app.get('/admin/devices', (req, res) => {
    paired = normalized.paired;
    if (normalized.changed) {
      mkdirSync(DEVICES_DIR_ADMIN, { recursive: true });
-     writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(paired, null, 2), { mode: 0o666 });
-     normalizeOpenClawRuntimePermissions();
+     writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(paired, null, 2), { mode: 0o600 });
+     try { execSync(`chown -R 1000:1000 ${DEVICES_DIR_ADMIN} 2>/dev/null || true`, { timeout: 5000 }); } catch {}
    }
 
    const devices = Object.values(paired).map(d => ({
@@ -5061,8 +4859,8 @@ app.patch('/admin/devices/:deviceId', express.json(), (req, res) => {
      updatedAt: Date.now(),
    };
    mkdirSync(DEVICES_DIR_ADMIN, { recursive: true });
-   writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(paired, null, 2), { mode: 0o666 });
-   normalizeOpenClawRuntimePermissions();
+   writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(paired, null, 2), { mode: 0o600 });
+   try { execSync(`chown -R 1000:1000 ${DEVICES_DIR_ADMIN} 2>/dev/null || true`, { timeout: 5000 }); } catch {}
 
    console.log(`[admin] Device renamed: ${deviceId} → ${displayName}`);
    res.json({ ok: true, device: { deviceId, displayName } });
@@ -5087,8 +4885,7 @@ app.delete('/admin/devices/:deviceId', (req, res) => {
    delete paired[deviceId];
 
    mkdirSync(DEVICES_DIR_ADMIN, { recursive: true });
-   writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(paired, null, 2), { mode: 0o666 });
-   normalizeOpenClawRuntimePermissions();
+   writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(paired, null, 2), { mode: 0o600 });
 
    // Also remove device-specific config files if they exist
    try {
@@ -5121,8 +4918,7 @@ app.delete('/admin/devices', (req, res) => {
 
    const removedCount = Object.keys(paired).length - Object.keys(kept).length;
    mkdirSync(DEVICES_DIR_ADMIN, { recursive: true });
-   writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(kept, null, 2), { mode: 0o666 });
-   normalizeOpenClawRuntimePermissions();
+   writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(kept, null, 2), { mode: 0o600 });
 
    console.log(`[admin] Removed ${removedCount} devices (kept bridge device)`);
    res.json({ ok: true, removed: removedCount, kept: Object.keys(kept).length });
@@ -7467,11 +7263,11 @@ app.post('/gateway/patch-auth', (req, res) => {
  const pubKey = getDevicePublicKeyBase64Url(deviceIdentity);
  paired[deviceIdentity.deviceId] = { deviceId: deviceIdentity.deviceId, publicKey: pubKey, displayName: 'CrabsHQ Bridge', platform: 'linux', role: 'operator', roles: ['operator'], scopes: OPERATOR_SCOPES, clientId: 'gateway-client', clientMode: 'backend', approvedAt: Date.now(), approved: true, ts: Date.now() };
  writeFileSync(PAIRED_PATH, JSON.stringify(paired, null, 2));
- normalizeOpenClawRuntimePermissions();
+ execSync('chown -R 1000:1000 ' + DEVICES_DIR + ' 2>/dev/null || true', { timeout: 5000 });
  console.log('[bridge] Added device to paired.json');
  } else if (normalized.changed) {
  writeFileSync(PAIRED_PATH, JSON.stringify(paired, null, 2));
- normalizeOpenClawRuntimePermissions();
+ execSync('chown -R 1000:1000 ' + DEVICES_DIR + ' 2>/dev/null || true', { timeout: 5000 });
  console.log('[bridge] Normalized paired device display names');
  }
  // Restart gateway to apply paired.json changes
@@ -8111,7 +7907,7 @@ app.post('/config/api-keys', async (req, res) => {
  config.tools.allow.push('web_search');
  }
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
- normalizeOpenClawRuntimePermissions();
+ await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
  } catch (e) { console.error('Failed to update openclaw.json:', e.message); }
  }
 
@@ -8228,48 +8024,33 @@ const hasStoredCodexOAuthProfile = () => {
    console.log(`[bridge] Updating pdf model to: ${config.agents.defaults.pdfModel || '(none)'}`);
  }
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
- normalizeOpenClawRuntimePermissions();
+ await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
  } catch (e) { console.error('Failed to update native models in openclaw.json:', e.message); _syncWarnings.push(`Native model update failed: ${e.message}`); }
  }
 
- // Update local providers in openclaw.json models.providers. Local llama.cpp is
- // OpenAI-compatible, but the agent runner still expects an auth profile, so we
- // mirror a harmless dummy key that the local server does not require.
+ // Update local providers in openclaw.json models.providers. OpenClaw supports
+ // baseUrl-only local provider config, so do not write dummy keys/adapters here.
  if (localProvider || removeLocalProvider || ollamaProvider || removeOllamaProvider) {
  try {
  const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
  if (!config.models) config.models = {};
  if (!config.models.providers) config.models.providers = {};
  if (localProvider && typeof localProvider === 'object') {
-   const normalizedLocalProvider = normalizeLocalLlamaProvider(localProvider);
-   config.models.providers[LOCAL_LLAMA_PROVIDER] = normalizedLocalProvider;
-   if (normalizedLocalProvider.baseUrl) writeConfigKey('localModelUrl', normalizedLocalProvider.baseUrl);
-   const authReady = ensureLocalLlamaAuthProfile('local-provider-sync');
-   const localModelIds = Array.isArray(normalizedLocalProvider.models)
-    ? normalizedLocalProvider.models.map(m => m?.id).filter(Boolean)
-    : [];
-   console.log(
-    `[bridge] Added local-llamacpp provider to openclaw.json: baseUrl=${normalizedLocalProvider.baseUrl} ` +
-    `api=${normalizedLocalProvider.api || '(default)'} models=[${localModelIds.join(', ') || 'none'}] authProfile=${authReady ? 'ready' : 'failed'}`
-   );
-   probeLocalLlamaProvider(normalizedLocalProvider).catch(err => {
-    console.warn(`[bridge] local-llamacpp probe failed: ${err.message}`);
-   });
+   config.models.providers['local-llamacpp'] = localProvider;
+   console.log(`[bridge] Added local-llamacpp provider to openclaw.json: ${localProvider.baseUrl || '(no baseUrl)'}`);
  } else if (removeLocalProvider) {
-   delete config.models.providers[LOCAL_LLAMA_PROVIDER];
-   removeLocalLlamaAuthProfile();
+   delete config.models.providers['local-llamacpp'];
    console.log('[bridge] Removed local-llamacpp provider from openclaw.json');
  }
  if (ollamaProvider && typeof ollamaProvider === 'object') {
    config.models.providers.ollama = ollamaProvider;
-   if (ollamaProvider.baseUrl) writeConfigKey('ollamaBaseUrl', String(ollamaProvider.baseUrl).trim().replace(/\/+$/, ''));
    console.log(`[bridge] Added Ollama provider to openclaw.json: ${ollamaProvider.baseUrl || '(no baseUrl)'}`);
  } else if (removeOllamaProvider) {
    delete config.models.providers.ollama;
    console.log('[bridge] Removed Ollama provider from openclaw.json');
  }
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
- normalizeOpenClawRuntimePermissions();
+ await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
  } catch (e) { console.error('Failed to update local providers in openclaw.json:', e.message); _syncWarnings.push(`Local provider update failed: ${e.message}`); }
  }
 
@@ -8401,7 +8182,7 @@ const hasStoredCodexOAuthProfile = () => {
  }
  if (changed) {
  writeFileSync(configPath, JSON.stringify(config, null, 2));
- normalizeOpenClawRuntimePermissions();
+ await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
  }
  } catch (e) { console.error('Failed to update openclaw.json providers:', e.message); }
  }
@@ -8584,7 +8365,6 @@ app.get('/config/provider-settings', (req, res) => {
   const defaultModel = modelRouting.chat || readConfigKey('defaultModel') || null;
   const chatThinkingLevel = readConfigKey('chatThinkingLevel') || 'auto';
   const ollamaBaseUrl = readConfigKey('ollamaBaseUrl') || readProviderEnvValue(envContent, 'ollama') || null;
-  const localModelUrl = readConfigKey('localModelUrl') || null;
 
   res.json({
    providers,
@@ -8596,7 +8376,6 @@ app.get('/config/provider-settings', (req, res) => {
    defaultModel,
    chatThinkingLevel,
    ollamaBaseUrl,
-   localModelUrl,
   });
  } catch (err) {
   res.status(500).json({ error: err.message });
@@ -8624,10 +8403,8 @@ app.get('/config/provider-keys-internal', (req, res) => {
 
   const modelRouting = readConfigKey('modelRouting') || {};
   const defaultModel = modelRouting.chat || readConfigKey('defaultModel') || null;
-  const localModelUrl = readConfigKey('localModelUrl') || null;
-  const ollamaBaseUrl = readConfigKey('ollamaBaseUrl') || readProviderEnvValue(envContent, 'ollama') || null;
 
-  res.json({ keys, openaiCodex, defaultModel, modelRouting, localModelUrl, ollamaBaseUrl });
+  res.json({ keys, openaiCodex, defaultModel, modelRouting });
  } catch (err) {
   res.status(500).json({ error: err.message });
  }
@@ -8635,7 +8412,7 @@ app.get('/config/provider-keys-internal', (req, res) => {
 
 app.put('/config/provider-settings', (req, res) => {
  try {
-  const { modelRouting, providerModels, modelRoutingFallbacks, pendingBridgeApply, defaultModel, chatThinkingLevel, ollamaBaseUrl, localModelUrl } = req.body;
+  const { modelRouting, providerModels, modelRoutingFallbacks, pendingBridgeApply, defaultModel, chatThinkingLevel, ollamaBaseUrl } = req.body;
   if (modelRouting !== undefined) writeConfigKey('modelRouting', modelRouting);
   if (providerModels !== undefined) writeConfigKey('providerModels', providerModels);
   if (modelRoutingFallbacks !== undefined) writeConfigKey('modelRoutingFallbacks', modelRoutingFallbacks);
@@ -8643,7 +8420,6 @@ app.put('/config/provider-settings', (req, res) => {
   if (defaultModel !== undefined) writeConfigKey('defaultModel', defaultModel);
   if (chatThinkingLevel !== undefined) writeConfigKey('chatThinkingLevel', chatThinkingLevel || 'auto');
   if (ollamaBaseUrl !== undefined) writeConfigKey('ollamaBaseUrl', String(ollamaBaseUrl || '').trim().replace(/\/+$/, ''));
-  if (localModelUrl !== undefined) writeConfigKey('localModelUrl', String(localModelUrl || '').trim().replace(/\/+$/, ''));
   res.json({ ok: true });
  } catch (err) {
   res.status(500).json({ error: err.message });
