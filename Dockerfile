@@ -15,6 +15,12 @@ RUN apt-get update && \
       websockify && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# OpenClaw installs bundled plugin runtime deps here at boot. The gateway runs
+# as node, so this must be writable before plugins validate or startup degrades.
+RUN mkdir -p /var/lib/openclaw/plugin-runtime-deps && \
+    chown -R 1000:1000 /var/lib/openclaw && \
+    chmod -R u+rwX,go+rX /var/lib/openclaw
+
 # Chrome wrapper script (starts Xvnc + Chrome)
 COPY chrome-wrapper.sh /opt/chrome-wrapper.sh
 RUN chmod +x /opt/chrome-wrapper.sh

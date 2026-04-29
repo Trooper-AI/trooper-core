@@ -1124,12 +1124,18 @@ cat > /opt/openclaw-data/startup.sh << 'STARTUP'
 GATEWAY_PORT="${1:-18789}"
 
 # Start Xvnc on :99 for live browser view
-if command -v Xvnc &>/dev/null && ! pgrep -f "Xvnc :99" >/dev/null 2>&1; then
-  echo "[startup] Starting Xvnc on :99 (port 5999)..."
-  Xvnc :99 -geometry 1920x1080 -depth 24 -rfbport 5999 -localhost \
-    -SecurityTypes None -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents &
-  sleep 0.5
-  echo "[startup] Xvnc started on :99"
+if command -v Xvnc &>/dev/null; then
+  if ! pgrep -f "Xvnc :99" >/dev/null 2>&1 && [ -f /tmp/.X99-lock ]; then
+    echo "[startup] Removing stale /tmp/.X99-lock"
+    rm -f /tmp/.X99-lock || true
+  fi
+  if ! pgrep -f "Xvnc :99" >/dev/null 2>&1; then
+    echo "[startup] Starting Xvnc on :99 (port 5999)..."
+    Xvnc :99 -geometry 1920x1080 -depth 24 -rfbport 5999 -localhost \
+      -SecurityTypes None -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents &
+    sleep 0.5
+    echo "[startup] Xvnc started on :99"
+  fi
 fi
 
 # Fix permissions: ensure node user can read config files
@@ -1139,6 +1145,9 @@ chown -R 1000:1000 /home/node/.openclaw 2>/dev/null || true
 chown -R 1000:1000 /home/node/.npm 2>/dev/null || true
 find /home/node/.openclaw -type d -exec chmod 755 {} \; 2>/dev/null || true
 find /home/node/.openclaw -name '*.json' -exec chmod 664 {} \; 2>/dev/null || true
+mkdir -p /var/lib/openclaw/plugin-runtime-deps 2>/dev/null || true
+chown -R 1000:1000 /var/lib/openclaw 2>/dev/null || true
+chmod -R u+rwX,go+rX /var/lib/openclaw 2>/dev/null || true
 
 # Fix jiti cache permissions — files in /tmp/jiti get created as root during startup
 # because the gateway bootstraps plugins before su fully takes effect.
@@ -1536,6 +1545,9 @@ sed -i 's|/usr/bin/google-chrome-stable|/opt/chrome-wrapper.sh|g' /opt/openclaw-
 # Fix permissions: container runs as uid 1000, bridge runs as host node user
 # Config dir MUST be traversable (755) so both UIDs can access files inside
 chown -R 1000:1000 /opt/openclaw-data
+mkdir -p /var/lib/openclaw/plugin-runtime-deps
+chown -R 1000:1000 /var/lib/openclaw
+chmod -R u+rwX,go+rX /var/lib/openclaw
 chmod 755 /opt/openclaw-data/config
 find /opt/openclaw-data/config -type d -exec chmod 755 {} \;
 # Config files: readable by both container (uid 1000) and host node user
@@ -2591,6 +2603,9 @@ console.log('Pre-approved 2 devices: bridge + gateway internal');
 
 # Fix ownership — Docker runs as uid 1000, files were created by root
 chown -R 1000:1000 /opt/openclaw-data
+mkdir -p /var/lib/openclaw/plugin-runtime-deps
+chown -R 1000:1000 /var/lib/openclaw
+chmod -R u+rwX,go+rX /var/lib/openclaw
 # ALL directories under config MUST be traversable (755) so both container (uid 1000)
 # and host bridge (uid varies) can access files. chown -R resets dir perms to 700.
 find /opt/openclaw-data/config -type d -exec chmod 755 {} \;

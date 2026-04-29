@@ -6,6 +6,13 @@
 chown -R 1000:1000 /home/node/.openclaw 2>/dev/null || true
 chown -R 1000:1000 /home/node/.npm 2>/dev/null || true
 
+# OpenClaw's bundled plugins install/mirror runtime deps below /var/lib/openclaw
+# during validation. If this path is root-owned after a reinstall, the gateway
+# comes up with 0 plugins and bridge verification correctly reports degraded.
+mkdir -p /var/lib/openclaw/plugin-runtime-deps 2>/dev/null || true
+chown -R 1000:1000 /var/lib/openclaw 2>/dev/null || true
+chmod -R u+rwX,go+rX /var/lib/openclaw 2>/dev/null || true
+
 # CRITICAL: chown -R sets directories to 700 (only uid 1000 can enter).
 # The bridge runs as the HOST's node user (uid may differ, e.g. 996).
 # All config dirs MUST be 755 so both UIDs can access files.

@@ -33,6 +33,9 @@ chmod 777 /home/node/.openclaw/devices 2>/dev/null || true
 chmod 666 /home/node/.openclaw/devices/*.json 2>/dev/null || true
 chmod 755 /home/node/.openclaw/identity 2>/dev/null || true
 chmod 644 /home/node/.openclaw/identity/*.json 2>/dev/null || true
+mkdir -p /var/lib/openclaw/plugin-runtime-deps 2>/dev/null || true
+chown -R 1000:1000 /var/lib/openclaw 2>/dev/null || true
+chmod -R u+rwX,go+rX /var/lib/openclaw 2>/dev/null || true
 
 # Startup optimizations (recommended by openclaw doctor)
 export NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache
