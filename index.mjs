@@ -714,10 +714,13 @@ class OpenClawGateway {
  this._authResolve = null;
  this._authReject = null;
  this._pingInterval = null;
- this._lastSelfApproveMs = 0; // cooldown: don't restart gateway more than once per 5 min
- this._lastAuthRepairMs = 0;
- this.connect();
- }
+	 this._lastSelfApproveMs = 0; // cooldown: don't restart gateway more than once per 5 min
+	 this._lastAuthRepairMs = 0;
+	 this._sessionHistoryInflight = new Map();
+	 this._sessionSnapshotInflight = new Map();
+	 this._sessionSnapshotCache = new Map();
+	 this.connect();
+	 }
 
  _disposeSocket(ws, { preserveCloseHandler = false } = {}) {
  if (!ws) return;
@@ -1332,8 +1335,13 @@ class OpenClawGateway {
  // Fetch session history from gateway — returns tool calls and messages
  async fetchSessionHistory(sessionKey, limit = 50) {
   if (!this.connected) return null;
+  const cacheKey = `${sessionKey || ''}:${limit}`;
+  if (this._sessionHistoryInflight.has(cacheKey)) {
+   return await this._sessionHistoryInflight.get(cacheKey);
+  }
   const id = randomUUID();
-  try {
+  const request = (async () => {
+   try {
    const result = await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
      this._pendingRequests.delete(id);
@@ -1349,12 +1357,16 @@ class OpenClawGateway {
     }));
    });
    return result?.messages || [];
-  } catch (err) {
+   } catch (err) {
    console.error('[OpenClaw] fetchSessionHistory error:', err.message);
    return null;
-  } finally {
+   } finally {
    this._pendingRequests.delete(id);
-  }
+   this._sessionHistoryInflight.delete(cacheKey);
+   }
+  })();
+  this._sessionHistoryInflight.set(cacheKey, request);
+  return await request;
  }
 
  async abortSession(sessionKey) {
@@ -1391,12 +1403,18 @@ class OpenClawGateway {
    const ok = await this.connect();
    if (!ok) return null;
   }
+  const cached = this._sessionSnapshotCache.get(sessionKey);
+  if (cached && Date.now() - cached.cachedAt < 5000) return cached.session;
+  if (this._sessionSnapshotInflight.has(sessionKey)) {
+   return await this._sessionSnapshotInflight.get(sessionKey);
+  }
   const id = randomUUID();
   const toNumber = (value) => {
    const next = Number(value);
    return Number.isFinite(next) && next >= 0 ? next : null;
   };
-  try {
+  const request = (async () => {
+   try {
    const result = await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
      this._pendingRequests.delete(id);
@@ -1438,7 +1456,7 @@ class OpenClawGateway {
      ? Math.max(0, contextTokens - totalTokens)
      : null
    );
-   return {
+   const session = {
     key: row.key || sessionKey,
     sessionId: row.sessionId || null,
     displayName: row.displayName || row.label || null,
@@ -1454,12 +1472,18 @@ class OpenClawGateway {
     responseUsage: row.responseUsage || null,
     compactionCount: toNumber(row.compactionCount),
    };
-  } catch (err) {
+   this._sessionSnapshotCache.set(sessionKey, { cachedAt: Date.now(), session });
+   return session;
+   } catch (err) {
    console.error('[OpenClaw] fetchSessionSnapshot error:', err.message);
-   return null;
-  } finally {
+   return cached?.session || null;
+   } finally {
    this._pendingRequests.delete(id);
-  }
+   this._sessionSnapshotInflight.delete(sessionKey);
+   }
+  })();
+  this._sessionSnapshotInflight.set(sessionKey, request);
+  return await request;
  }
 
  async resolveExecApproval(approvalId, decision) {
@@ -1541,8 +1565,9 @@ class OpenClawGateway {
  let sawLiveStreamPayload = false;
  let historyPoller = null;
  let historyPollInFlight = false;
- let lastHistoryAssistantText = '';
- let lastHistoryThinkingText = '';
+	 let lastHistoryAssistantText = '';
+	 let lastHistoryThinkingText = '';
+	 let resetRunTimeout = null;
  const seenHistoryEventKeys = new Set();
  const buildHistoryReplayKey = (event) => {
  const data = event?.data || {};
@@ -1604,9 +1629,10 @@ class OpenClawGateway {
  if (_debugEvents.length > 100) _debugEvents.shift();
  };
 
- const eventHandler = (stream, data, runId) => {
- // Reset inactivity timeout — agent is actively working
- if (this._activeTimeoutReset) this._activeTimeoutReset();
+	 const eventHandler = (stream, data, runId) => {
+	 // Reset inactivity timeout — agent is actively working
+	 if (resetRunTimeout) resetRunTimeout();
+	 else if (this._activeTimeoutReset) this._activeTimeoutReset();
  // Debug: log ALL raw gateway events to global buffer + console (including text)
  const rawStr = JSON.stringify(data || {}).substring(0, 300);
  const isSubAgent = !!(mainRunId && runId && runId !== mainRunId);
@@ -2096,7 +2122,8 @@ function extractPatchFilePaths(patchText = '') {
 
  try {
  const result = await new Promise((resolve, reject) => {
- // Inactivity timeout — resets every time the gateway sends an event
+ // Inactivity timeout — resets every time this run's gateway listener sees an event.
+ // Keep this per-run; a single global reset hook breaks when two chat requests overlap.
  let timeout;
  const resetTimeout = () => {
   if (timeout) clearTimeout(timeout);
@@ -2106,12 +2133,11 @@ function extractPatchFilePaths(patchText = '') {
   }, timeoutMs);
  };
  resetTimeout();
- // Expose resetTimeout so eventHandler can call it on each event
- this._activeTimeoutReset = resetTimeout;
+ resetRunTimeout = resetTimeout;
 
  this._pendingRequests.set(id, {
- resolve: (payload) => { clearTimeout(timeout); this._activeTimeoutReset = null; resolve(payload); },
- reject: (err) => { clearTimeout(timeout); this._activeTimeoutReset = null; reject(err); },
+ resolve: (payload) => { clearTimeout(timeout); resetRunTimeout = null; resolve(payload); },
+ reject: (err) => { clearTimeout(timeout); resetRunTimeout = null; reject(err); },
  expectFinal: true, runId: null, idempotencyKey,
  });
 
@@ -2187,9 +2213,9 @@ function extractPatchFilePaths(patchText = '') {
 
  setTimeout(() => {
  if (historyPoller || sawLiveStreamPayload) return;
- historyPoller = setInterval(pollSessionHistory, 1500);
- pollSessionHistory().catch(() => {});
- }, 2500);
+	 historyPoller = setInterval(pollSessionHistory, 10000);
+	 pollSessionHistory().catch(() => {});
+	 }, 2500);
  });
 
  if (pendingSubAgentSpawn || activeSubAgents.size > 0) {
@@ -2247,7 +2273,7 @@ const formattedToolLog = toolLog.map(t => ({
  if (historyPoller) clearInterval(historyPoller);
  if (subagentDrainTimer) clearTimeout(subagentDrainTimer);
  // Clean up session listener and event listeners
- this._activeSessionListener = null;
+	 if (this._activeSessionListener === eventHandler) this._activeSessionListener = null;
  const listener = this._eventListeners.get(idempotencyKey);
  this._eventListeners.delete(idempotencyKey);
  if (listener) {
