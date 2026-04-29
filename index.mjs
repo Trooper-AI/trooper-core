@@ -8364,6 +8364,7 @@ app.get('/config/provider-settings', (req, res) => {
   const pendingBridgeApply = readConfigKey('pendingBridgeApply') || false;
   const defaultModel = modelRouting.chat || readConfigKey('defaultModel') || null;
   const chatThinkingLevel = readConfigKey('chatThinkingLevel') || 'auto';
+  const localModelUrl = readConfigKey('localModelUrl') || null;
   const ollamaBaseUrl = readConfigKey('ollamaBaseUrl') || readProviderEnvValue(envContent, 'ollama') || null;
 
   res.json({
@@ -8375,6 +8376,7 @@ app.get('/config/provider-settings', (req, res) => {
    pendingBridgeApply,
    defaultModel,
    chatThinkingLevel,
+   localModelUrl,
    ollamaBaseUrl,
   });
  } catch (err) {
@@ -8412,13 +8414,14 @@ app.get('/config/provider-keys-internal', (req, res) => {
 
 app.put('/config/provider-settings', (req, res) => {
  try {
-  const { modelRouting, providerModels, modelRoutingFallbacks, pendingBridgeApply, defaultModel, chatThinkingLevel, ollamaBaseUrl } = req.body;
+  const { modelRouting, providerModels, modelRoutingFallbacks, pendingBridgeApply, defaultModel, chatThinkingLevel, localModelUrl, ollamaBaseUrl } = req.body;
   if (modelRouting !== undefined) writeConfigKey('modelRouting', modelRouting);
   if (providerModels !== undefined) writeConfigKey('providerModels', providerModels);
   if (modelRoutingFallbacks !== undefined) writeConfigKey('modelRoutingFallbacks', modelRoutingFallbacks);
   if (pendingBridgeApply !== undefined) writeConfigKey('pendingBridgeApply', pendingBridgeApply);
   if (defaultModel !== undefined) writeConfigKey('defaultModel', defaultModel);
   if (chatThinkingLevel !== undefined) writeConfigKey('chatThinkingLevel', chatThinkingLevel || 'auto');
+  if (localModelUrl !== undefined) writeConfigKey('localModelUrl', String(localModelUrl || '').trim().replace(/\/+$/, ''));
   if (ollamaBaseUrl !== undefined) writeConfigKey('ollamaBaseUrl', String(ollamaBaseUrl || '').trim().replace(/\/+$/, ''));
   res.json({ ok: true });
  } catch (err) {
