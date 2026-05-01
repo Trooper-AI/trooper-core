@@ -967,6 +967,7 @@ ${MODELS_PROVIDERS}
  "allow": [
  "exec", "read", "write", "edit", "process",
  "web_search", "web_fetch", "browser",
+ "memory_recall", "memory_search", "memory_get",
  "sessions_list", "sessions_history", "sessions_send", "sessions_spawn", "session_status",
  "agents_list", "image", "message", "cron", "gateway", "nodes",
  "llm-task", "lobster"
@@ -994,7 +995,6 @@ ${MODELS_PROVIDERS}
  "enabled": true,
  "agents": ["main"],
  "allowedChatTypes": ["direct", "channel"],
- "modelFallbackPolicy": "resolved-only",
  "queryMode": "recent",
  "promptStyle": "balanced",
  "timeoutMs": 10000,
