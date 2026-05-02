@@ -2356,8 +2356,13 @@ mkdir -p /opt/crabhq-org-runtime /var/lib/crabhq-org-runtime
 
 dlog "Installing CrabsHQ org runtime..."
 if { [ -z "${CRABHQ_RUNTIME_TARBALL_URL:-}" ] || [ "${CRABHQ_RUNTIME_TARBALL_URL}" = "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; } && [ -s /tmp/crabhq-runtime-url ]; then
-  CRABHQ_RUNTIME_TARBALL_URL="$(tr -d '\r\n' < /tmp/crabhq-runtime-url)"
-  echo "[setup] Runtime bundle URL recovered from /tmp/crabhq-runtime-url"
+  _recovered_runtime_url="$(tr -d '\r\n' < /tmp/crabhq-runtime-url)"
+  if [ -n "$_recovered_runtime_url" ] && [ "$_recovered_runtime_url" != "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; then
+    CRABHQ_RUNTIME_TARBALL_URL="$_recovered_runtime_url"
+    echo "[setup] Runtime bundle URL recovered from /tmp/crabhq-runtime-url"
+  else
+    echo "[setup] Runtime bundle marker was present but unusable"
+  fi
 fi
 
 if [ -n "${CRABHQ_RUNTIME_TARBALL_URL:-}" ] && [ "${CRABHQ_RUNTIME_TARBALL_URL}" != "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; then
