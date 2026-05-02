@@ -1,0 +1,19 @@
+# systemd timer paired with openclaw-updater.service.
+# Phase 6 / Workstream 6 of CRABBOX_FLEET_AUTOMATION_PLAN.
+#
+# Hourly check + jitter (the script also adds 0–60 s random sleep). The
+# RandomizedDelaySec = 600 spreads the herd across a 10-min window; combined
+# with the script-level jitter the effective wake distribution is uniform
+# over 11 minutes, which is plenty for any plausible fleet size.
+
+[Unit]
+Description=OpenClaw bridge pull-update timer
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+RandomizedDelaySec=10min
+Unit=openclaw-updater.service
+
+[Install]
+WantedBy=timers.target

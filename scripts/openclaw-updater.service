@@ -1,0 +1,24 @@
+# systemd unit for the pull-based update backstop.
+# Phase 6 / Workstream 6 of CRABBOX_FLEET_AUTOMATION_PLAN.
+#
+# Installed by setup-openclaw-full.sh (or boot.sh on snapshot boots) into
+#   /etc/systemd/system/openclaw-updater.service
+# Paired with openclaw-updater.timer.
+
+[Unit]
+Description=OpenClaw bridge pull-based update check
+After=network-online.target openclaw-bridge.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/check-update.sh
+User=root
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

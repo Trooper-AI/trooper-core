@@ -1,0 +1,79 @@
+name: Trigger Snapshot Rebuild
+
+# Cross-repo trigger: when openclawbridge merges to main or its gateway
+# Docker image rebuilds, fire a `repository_dispatch` event at crabs-hq so
+# the snapshot pipeline picks up the new bridge SHA.
+#
+# Phase 3 / Workstream 1 of CRABBOX_FLEET_AUTOMATION_PLAN.
+#
+# Required secret in this repo:
+#   CRABSHQ_DISPATCH_TOKEN — fine-grained PAT with actions:write on
+#   absurdfounder/Crabs-HQ. Pattern mirrors the existing
+#   OPENCLAWBRIDGE_DISPATCH_TOKEN flow on the crabs-hq side.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'index.mjs'
+      - 'lib/**'
+      - 'setup-openclaw-full.sh'
+      - 'Dockerfile'
+      - 'package.json'
+      - 'package-lock.json'
+  workflow_run:
+    workflows: ['Build Gateway Image']
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Why a manual snapshot trigger?'
+        required: false
+        default: 'manual'
+
+concurrency:
+  group: trigger-snapshot
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # For workflow_run triggers, only fire when the upstream gateway build succeeded.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: Resolve commit SHA
+        id: sha
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            SHA="${{ github.event.workflow_run.head_sha }}"
+          else
+            SHA="${{ github.sha }}"
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Dispatching with bridge SHA $SHA"
+
+      - name: Fire repository_dispatch on crabs-hq
+        env:
+          GH_TOKEN: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+          BRIDGE_SHA: ${{ steps.sha.outputs.sha }}
+          TRIGGER_EVENT: ${{ github.event_name }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::CRABSHQ_DISPATCH_TOKEN not set — skipping dispatch"
+            exit 0
+          fi
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/absurdfounder/Crabs-HQ/dispatches \
+            -d "$(jq -nc --arg sha "$BRIDGE_SHA" --arg trigger "$TRIGGER_EVENT" '{
+              event_type: "snapshot-rebuild",
+              client_payload: {
+                openclaw_bridge_sha: $sha,
+                triggered_by: $trigger,
+                source_repo: "openclawbridge"
+              }
+            }')"
+          echo "Dispatched snapshot-rebuild for bridge SHA $BRIDGE_SHA"
