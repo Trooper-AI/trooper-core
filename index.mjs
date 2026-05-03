@@ -4561,9 +4561,11 @@ app.get('/health', async (req, res) => {
  // During initial provisioning, return 'installing' so provision.js keeps polling
  // and streaming raw logs. The marker file is created at the end of setup-openclaw-full.sh.
  // Fallback: if bridge has been running >5 min, assume setup is complete (handles existing VPS + reboots).
+ const isSnapshotBuilder = process.env.CRABHQ_SNAPSHOT_BUILD === '1' || process.env.ORG_ID === 'snapshot-builder';
+ const allowUptimeFallback = !isSnapshotBuilder && process.env.OPENCLAW_HEALTH_UPTIME_FALLBACK !== '0';
  const setupDone = existsSync('/tmp/openclaw-setup-complete')
    || existsSync('/opt/openclaw-bridge/.setup-complete')
-   || process.uptime() > 300;
+   || (allowUptimeFallback && process.uptime() > 300);
 
  const xvnc = ensureXvnc(':99');
  const vncRunning = xvnc.ok;

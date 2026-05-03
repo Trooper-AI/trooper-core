@@ -2524,6 +2524,7 @@ Environment=OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
 Environment=OPENCLAW_HOOK_TOKEN=oc-hook-${HOOK_TOKEN}
 Environment=MISSION_CONTROL_URL=https://crabs-hq-production.up.railway.app
 Environment=ORG_ID=${ORG_ID}
+Environment=CRABHQ_SNAPSHOT_BUILD=${CRABHQ_SNAPSHOT_BUILD:-0}
 Environment=NODE_ENV=production
 Environment=BROWSERBASE_API_KEY=${BROWSERBASE_API_KEY}
 Environment=BROWSERBASE_PROJECT_ID=${BROWSERBASE_PROJECT_ID}
@@ -2962,11 +2963,6 @@ if [ -n "${RAW_LOG_PUSHER_PID:-}" ]; then
   echo "Raw log pusher stopped (PID $RAW_LOG_PUSHER_PID)"
 fi
 
-# Signal to bridge that setup is complete (bridge /health transitions from 'installing' → 'ok')
-# /tmp marker is ephemeral; /opt marker persists across reboots
-touch /tmp/openclaw-setup-complete
-touch /opt/openclaw-bridge/.setup-complete
-
 # ── Security: scrub sensitive data from cloud-init and environment ──
 # Cloud-init user data may contain CF_API_TOKEN and other secrets.
 # Remove it so VPS operators can't read it after setup.
@@ -3045,7 +3041,14 @@ SNAPGUARDSVC
   fi
   : > /etc/machine-id 2>/dev/null || true
   rm -f /var/lib/dbus/machine-id 2>/dev/null || true
+  sync 2>/dev/null || true
   echo "[setup] Snapshot image prepared for cloud-init rerun on cloned servers"
 fi
+
+# Signal to bridge that setup is complete (bridge /health transitions from 'installing' → 'ok')
+# /tmp marker is ephemeral; /opt marker persists across reboots. For snapshot
+# builds this happens only after cloud-init and first-boot cleanup are complete.
+touch /tmp/openclaw-setup-complete
+touch /opt/openclaw-bridge/.setup-complete
 
 echo done
