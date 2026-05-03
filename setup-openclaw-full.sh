@@ -123,12 +123,17 @@ try:
  f.seek(0); json.dump(logs,f); f.truncate()
 except: pass
 " 2>/dev/null || true
- # Also POST directly to Render API for instant visibility in the frontend
- if [ -n "{{API_URL}}" ] && [ -n "{{ORG_ID}}" ] && [ -n "{{GATEWAY_TOKEN}}" ]; then
- curl -sf -X POST "{{API_URL}}/api/deploy-log/{{ORG_ID}}" \
+ # Also POST directly to Render API for instant visibility in the frontend.
+ # Use resolved env/template values here so env-only installs still stream logs.
+ if [ -n "${API_URL:-}" ] && [ -n "${ORG_ID:-}" ] && [ -n "${GATEWAY_TOKEN:-}" ]; then
+ local _payload=''
+ _payload=$(LOG_MSG="$msg" LOG_STEP="$step" GATEWAY_TOKEN="$GATEWAY_TOKEN" python3 -c 'import json, os; print(json.dumps({"msg": os.environ.get("LOG_MSG", ""), "step": os.environ.get("LOG_STEP", "installing"), "token": os.environ.get("GATEWAY_TOKEN", "")}))' 2>/dev/null) || _payload=''
+ if [ -n "$_payload" ]; then
+ curl -sf -X POST "${API_URL}/api/deploy-log/${ORG_ID}" \
  -H "Content-Type: application/json" \
- -d "{\"msg\":\"$msg\",\"step\":\"$step\",\"token\":\"{{GATEWAY_TOKEN}}\"}" \
+ -d "$_payload" \
  --max-time 3 >/dev/null 2>&1 &
+ fi
  fi
 }
 
@@ -137,14 +142,14 @@ exec 1> >(tee -a "$DEPLOY_RAW_LOG") 2>&1
 
 # Background raw log pusher — POSTs tail of raw log to API every 5s
 # This bypasses the need for inbound VPS connectivity on port 3002
-if [ -n "{{API_URL}}" ] && [ -n "{{ORG_ID}}" ] && [ -n "{{GATEWAY_TOKEN}}" ]; then
+if [ -n "${API_URL:-}" ] && [ -n "${ORG_ID:-}" ] && [ -n "${GATEWAY_TOKEN:-}" ]; then
   (while true; do
     sleep 5
     [ -s "$DEPLOY_RAW_LOG" ] || continue
-    _raw_json=$(tail -c 50000 "$DEPLOY_RAW_LOG" 2>/dev/null | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' 2>/dev/null) || continue
-    curl -sf -X POST "{{API_URL}}/api/deploy-log/{{ORG_ID}}" \
+    _raw_payload=$(RAW_LOG_TAIL="$(tail -c 50000 "$DEPLOY_RAW_LOG" 2>/dev/null)" GATEWAY_TOKEN="$GATEWAY_TOKEN" python3 -c 'import json, os; print(json.dumps({"msg": "_rawlog_sync", "step": "installing", "token": os.environ.get("GATEWAY_TOKEN", ""), "rawLog": os.environ.get("RAW_LOG_TAIL", "")}))' 2>/dev/null) || continue
+    curl -sf -X POST "${API_URL}/api/deploy-log/${ORG_ID}" \
       -H "Content-Type: application/json" \
-      -d "{\"msg\":\"_rawlog_sync\",\"step\":\"installing\",\"token\":\"{{GATEWAY_TOKEN}}\",\"rawLog\":${_raw_json}}" \
+      -d "$_raw_payload" \
       --max-time 10 >/dev/null 2>&1 || true
   done) &
   RAW_LOG_PUSHER_PID=$!
