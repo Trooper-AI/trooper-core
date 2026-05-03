@@ -1058,7 +1058,9 @@ ${MODELS_PROVIDERS}
  "channels": {
  "telegram": {
  "enabled": true,
- "streaming": "partial",
+ "streaming": {
+ "mode": "partial"
+ },
  "groupPolicy": "allowlist"
  }
  },
