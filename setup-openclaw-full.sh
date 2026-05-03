@@ -150,10 +150,18 @@ if [ -n "{{API_URL}}" ] && [ -n "{{ORG_ID}}" ] && [ -n "{{GATEWAY_TOKEN}}" ]; th
   RAW_LOG_PUSHER_PID=$!
 fi
 
-# Start a tiny HTTP server to serve deploy logs on BRIDGE_PORT
-# The real bridge will replace this later
+# Snapshot images may boot previously-enabled services before cloud-init runs.
+# Stop them before re-rendering per-org config so old ports/processes do not
+# race the temporary progress server or final service startup.
+if [ "$FROM_SNAPSHOT" = "1" ]; then
+  systemctl stop openclaw-bridge crabhq-org-runtime crabhq-server openclaw-poller openclaw-vnc crabhq-desktop crabhq-desktop-api crabhq-playwright 2>/dev/null || true
+fi
+
+# Start a tiny HTTP server to serve deploy logs on BRIDGE_PORT.
+# The real bridge will replace this later. If a baked service still owns the
+# port, skip the temporary server rather than failing the whole setup.
 python3 -c "
-import http.server, json, os
+import http.server, json, os, sys
 class H(http.server.BaseHTTPRequestHandler):
   def do_GET(self):
     if self.path=='/health':
@@ -172,7 +180,11 @@ class H(http.server.BaseHTTPRequestHandler):
     else:
       self.send_response(404); self.end_headers()
   def log_message(self,*a): pass
-s=http.server.HTTPServer(('0.0.0.0',${BRIDGE_PORT}),H)
+try:
+  s=http.server.HTTPServer(('0.0.0.0',${BRIDGE_PORT}),H)
+except OSError as e:
+  print(f'Temporary log server skipped on :${BRIDGE_PORT}: {e}', flush=True)
+  sys.exit(0)
 s.serve_forever()
 " &
 LOG_SERVER_PID=$!
@@ -2747,10 +2759,11 @@ fi
 # ── [9/9] Start all services (single clean startup) ──────────────────
 dlog "Starting services..."
 # Kill the temporary log server so the real bridge can use the port
-kill $LOG_SERVER_PID 2>/dev/null; sleep 1
+kill "$LOG_SERVER_PID" 2>/dev/null || true
+sleep 1
 
 # Start bridge immediately — binds in ~5s, minimizes log gap (provision.js polls port 3002)
-run_cmd systemctl start openclaw-bridge
+run_cmd systemctl restart openclaw-bridge
 sleep 2
 if systemctl is-active --quiet openclaw-bridge; then
  echo "Bridge Service: RUNNING"
