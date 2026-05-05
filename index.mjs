@@ -69,6 +69,9 @@ import {
 } from './lib/provider-runtime.mjs';
 import { startFleetHeartbeat } from './lib/fleet-heartbeat.mjs';
 import { readBridgeVersion } from './lib/version-info.mjs';
+import { applyTelegramTokenToOpenClawConfig, buildTelegramEnvUpdates } from './lib/channel-config.mjs';
+import { hardenActiveMemoryConfigForBridge } from './lib/active-memory-config.mjs';
+import { writeJsonFileIfChanged, writeTextFileIfChanged } from './lib/file-write-guards.mjs';
 
 const OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write', 'operator.pairing', 'operator.approvals', 'operator.talk.secrets'];
 
@@ -573,8 +576,11 @@ function readWorkspaceTextFile(fileName, maxChars = 50000) {
 }
 
 function writeOpenClawConfig(config) {
- writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
- try { execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 }); } catch {}
+ const result = writeJsonFileIfChanged(OPENCLAW_CONFIG_PATH, config);
+ if (result.written) {
+  try { execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 }); } catch {}
+ }
+ return result.written;
 }
 
 function readGatewayTokenFromConfig() {
@@ -2504,7 +2510,7 @@ const AGENT_REGISTRY_PATH = '/opt/openclaw-bridge/agent-registry.json';
 function saveAgentRegistry() {
  try {
  const data = Object.fromEntries(agentRegistry);
- writeFileSync(AGENT_REGISTRY_PATH, JSON.stringify(data, null, 2));
+ writeJsonFileIfChanged(AGENT_REGISTRY_PATH, data);
  } catch (e) { console.warn('[AgentRegistry] Failed to save:', e.message); }
 }
 
@@ -2669,7 +2675,7 @@ bridgeWS.onMessage(async (msg, user, ws) => {
 // ── Startup config migrations ──────────────────────────────────────────────
 try {
  const configPath = '/opt/openclaw-data/config/openclaw.json';
- const config = JSON.parse(readFileSync(configPath, 'utf8'));
+ let config = JSON.parse(readFileSync(configPath, 'utf8'));
  let changed = false;
  const sandbox = config?.agents?.defaults?.sandbox;
  // Startup migration: disable Docker sandbox — Docker socket permissions
@@ -2738,6 +2744,12 @@ try {
  config.agents.defaults.heartbeat.directPolicy = 'allow';
  changed = true;
  console.log('[bridge] Migrated: added heartbeat.directPolicy=allow');
+ }
+ const hardenedActiveMemory = hardenActiveMemoryConfigForBridge(config);
+ if (hardenedActiveMemory.changed) {
+ config = hardenedActiveMemory.config;
+ changed = true;
+ console.log('[bridge] Migrated: hardened active-memory hook for CrabsHQ runtime');
  }
  // Startup migration: remove diffs plugin — @pierre/diffs module not available
  if (config.plugins?.entries?.diffs) {
@@ -2809,11 +2821,10 @@ try {
  changed = true;
  console.log('[bridge] Migrated: enabled bootstrap-extra-files hook');
  }
- }
- if (changed) {
- writeFileSync(configPath, JSON.stringify(config, null, 2));
- try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
- }
+	 }
+	 if (changed) {
+	 writeOpenClawConfig(config);
+	 }
 } catch (e) { /* config not available yet */ }
 
 // ── Startup migration: fix mistyped auth profiles ────────────────────────
@@ -2823,7 +2834,6 @@ const AUTH_PROFILES_PATH = '/opt/openclaw-data/config/agents/main/agent/auth-pro
 const AUTH_PROFILES_ROOT_PATH = '/opt/openclaw-data/config/auth-profiles.json';
 
 function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
- const serialized = JSON.stringify(authDoc, null, 2);
  for (const target of [AUTH_PROFILES_PATH, AUTH_PROFILES_ROOT_PATH]) {
   try {
    mkdirSync(dirname(target), { recursive: true });
@@ -2833,8 +2843,10 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
      writeFileSync(target + '.bak', existing);
     } catch {}
    }
-   writeFileSync(target, serialized);
-   try { execSync(`chown 1000:1000 ${target} 2>/dev/null; chmod 664 ${target} 2>/dev/null`, { timeout: 3000 }); } catch {}
+   const result = writeJsonFileIfChanged(target, authDoc);
+   if (result.written) {
+    try { execSync(`chown 1000:1000 ${target} 2>/dev/null; chmod 664 ${target} 2>/dev/null`, { timeout: 3000 }); } catch {}
+   }
   } catch (err) {
    console.warn(`[bridge] Failed to mirror auth profiles to ${target}: ${err.message}`);
   }
@@ -2842,15 +2854,17 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
  try {
   const agentsDir = '/opt/openclaw-data/config/agents';
   const dirs = readdirSync(agentsDir, { withFileTypes: true }).filter(d => d.isDirectory() && d.name !== 'main');
-  for (const d of dirs) {
-   const sub = `${agentsDir}/${d.name}/agent/auth-profiles.json`;
-   try {
-    mkdirSync(dirname(sub), { recursive: true });
-    writeFileSync(sub, serialized);
-    try { execSync(`chown 1000:1000 ${sub} 2>/dev/null; chmod 664 ${sub} 2>/dev/null`, { timeout: 3000 }); } catch {}
-   } catch (err) {
-    console.warn(`[bridge] Failed to mirror auth profiles to ${sub}: ${err.message}`);
-   }
+	  for (const d of dirs) {
+	   const sub = `${agentsDir}/${d.name}/agent/auth-profiles.json`;
+	   try {
+	    mkdirSync(dirname(sub), { recursive: true });
+	    const result = writeJsonFileIfChanged(sub, authDoc);
+	    if (result.written) {
+	     try { execSync(`chown 1000:1000 ${sub} 2>/dev/null; chmod 664 ${sub} 2>/dev/null`, { timeout: 3000 }); } catch {}
+	    }
+	   } catch (err) {
+	    console.warn(`[bridge] Failed to mirror auth profiles to ${sub}: ${err.message}`);
+	   }
   }
  } catch {}
 }
@@ -3145,11 +3159,10 @@ try {
       }
      }
     }
-    if (configChanged) {
-     writeFileSync(configPath, JSON.stringify(config, null, 2));
-     try { execSync(`chown 1000:1000 ${configPath} && chmod 600 ${configPath}`, { timeout: 3000 }); } catch {}
-     console.log(`[bridge] Rewrote openai-codex model references to ${fallbackModel} (no Codex OAuth profile available)`);
-    }
+	    if (configChanged) {
+	     writeOpenClawConfig(config);
+	     console.log(`[bridge] Rewrote openai-codex model references to ${fallbackModel} (no Codex OAuth profile available)`);
+	    }
    } catch (e) { console.warn('[bridge] Failed to rewrite openai-codex model references:', e.message); }
   }
  }
@@ -3293,13 +3306,12 @@ function readCompanyNameFromDocs(companyDocs = cachedCompanyDocs) {
 }
 
 function writeWorkspaceTextFile(workspacePath, fileName, content, { preserveIfExists = false } = {}) {
-  const targetPath = `${workspacePath}/${fileName}`;
-  if (preserveIfExists && existsSync(targetPath)) {
-    return false;
-  }
-  writeFileSync(targetPath, content);
-  return true;
-}
+	  const targetPath = `${workspacePath}/${fileName}`;
+	  if (preserveIfExists && existsSync(targetPath)) {
+	    return false;
+	  }
+	  return writeTextFileIfChanged(targetPath, content).written;
+	}
 
 function syncRuntimeIdentityFiles({ workspacePath, agentProfile, preserveSharedFiles = true }) {
   ensureWorkspaceBootstrapFiles(workspacePath);
@@ -3425,9 +3437,11 @@ function updateOpenClawConfig(callback) {
  const configPath = '/opt/openclaw-data/config/openclaw.json';
  const config = JSON.parse(readFileSync(configPath, 'utf8'));
  callback(config);
- writeFileSync(configPath, JSON.stringify(config, null, 2));
+ const changed = writeOpenClawConfig(config);
  // Hot reload — OpenClaw watches config changes in hybrid mode
+ if (changed) {
  try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', { timeout: 5000 }); } catch {}
+ }
 }
 
 // ── Shared: build task message from request body ─────────────────────
@@ -3642,7 +3656,7 @@ function ensureSkillCredentials(skillCredentials) {
  }
 
  if (changed) {
- writeFileSync('/opt/openclaw/.env', envContent);
+	   writeTextFileIfChanged('/opt/openclaw/.env', envContent);
  console.log(`[skills] Updated ${entries.length} skill credential(s) in .env`);
  // Signal gateway to reload config
  try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1', { timeout: 5000 }); } catch {}
@@ -6191,12 +6205,12 @@ app.put('/agents/:name', (req, res) => {
  Object.assign(agent, nextProfile);
 
  // Write any additional workspace files passed directly
- if (workspaceFiles && typeof workspaceFiles === 'object') {
- for (const [fname, content] of Object.entries(workspaceFiles)) {
- if (typeof content !== 'string' || fname.startsWith('_') || fname.includes('/') || fname.includes('..')) continue;
- writeFileSync(`${workspacePath}/${fname}`, content);
- }
- }
+	 if (workspaceFiles && typeof workspaceFiles === 'object') {
+	 for (const [fname, content] of Object.entries(workspaceFiles)) {
+	 if (typeof content !== 'string' || fname.startsWith('_') || fname.includes('/') || fname.includes('..')) continue;
+	 writeWorkspaceTextFile(workspacePath, fname, content);
+	 }
+	 }
 
  saveAgentRegistry();
 
@@ -6344,25 +6358,31 @@ app.put('/agents/:name/workspace', (req, res) => {
  ensureWorkspaceBootstrapFiles(workspacePath);
  const { files, overwrite = false } = req.body;
  if (!files || typeof files !== 'object') return res.status(400).json({ error: 'files object required' });
- const PROTECTED_FILES = new Set(['AGENTS.md', 'SOUL.md', 'BOOTSTRAP.md', 'IDENTITY.md', 'USER.md', 'TOOLS.md']);
- let written = 0;
- let skipped = 0;
- for (const [fname, content] of Object.entries(files)) {
- if (typeof content !== 'string') continue;
- if (fname.startsWith('_') || fname.includes('/') || fname.includes('..')) continue;
- const fullPath = workspacePath + '/' + fname;
- const exists = existsSync(fullPath);
+	 const PROTECTED_FILES = new Set(['AGENTS.md', 'SOUL.md', 'BOOTSTRAP.md', 'IDENTITY.md', 'USER.md', 'TOOLS.md']);
+	 let written = 0;
+	 let skipped = 0;
+	 let unchanged = 0;
+	 for (const [fname, content] of Object.entries(files)) {
+	 if (typeof content !== 'string') continue;
+	 if (fname.startsWith('_') || fname.includes('/') || fname.includes('..')) continue;
+	 const fullPath = workspacePath + '/' + fname;
+	 const exists = existsSync(fullPath);
  if (!overwrite && exists && PROTECTED_FILES.has(fname)) {
- skipped++;
- continue;
- }
- writeFileSync(fullPath, content);
- written++;
- }
- execSync('chown -R 1000:1000 ' + workspacePath, { timeout: 5000 });
- console.log('✅ Wrote ' + written + ' workspace files for ' + name + (skipped ? ' (skipped ' + skipped + ' protected)' : ''));
- res.json({ success: true, written, skipped });
- } catch (err) {
+	 skipped++;
+	 continue;
+	 }
+	 const result = writeTextFileIfChanged(fullPath, content);
+	 if (result.written) written++;
+	 else unchanged++;
+	 }
+	 if (written > 0) execSync('chown -R 1000:1000 ' + workspacePath, { timeout: 5000 });
+	 if (written > 0) {
+	  console.log('✅ Wrote ' + written + ' workspace files for ' + name + (unchanged ? ' (' + unchanged + ' unchanged)' : '') + (skipped ? ' (skipped ' + skipped + ' protected)' : ''));
+	 } else {
+	  console.log('↔ Workspace files unchanged for ' + name + (skipped ? ' (skipped ' + skipped + ' protected)' : ''));
+	 }
+	 res.json({ success: true, written, skipped, unchanged });
+	 } catch (err) {
  res.status(500).json({ error: err.message });
  }
 });
@@ -6376,23 +6396,27 @@ app.post('/agents/company-context', (req, res) => {
  const content = `# ${companyName || 'Company'} Context\n\n${companyDocs}`;
  // Cache in memory so chat-handler can access it immediately
  cachedCompanyDocs = content;
- // Write to LEAD workspace
- const workspacePath = '/opt/openclaw-data/workspace';
- ensureWorkspaceBootstrapFiles(workspacePath);
- writeFileSync(`${workspacePath}/COMPANY.md`, content);
- execSync(`chown 1000:1000 ${workspacePath}/COMPANY.md`, { timeout: 5000 });
- // Write to all SPC workspaces
- const agentsDir = '/opt/openclaw-data/config/agents';
- try {
- const agents = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
- for (const agent of agents) {
- const spcWs = `${agentsDir}/${agent}/workspace`;
- ensureWorkspaceBootstrapFiles(spcWs);
- writeFileSync(`${spcWs}/COMPANY.md`, content);
- execSync(`chown -R 1000:1000 ${agentsDir}/${agent}`, { timeout: 5000 });
- }
- console.log(`✅ Updated company context (${companyDocs.length} chars) for main + ${agents.length} SPCs`);
- } catch (e) { console.log(`✅ Updated company context (${companyDocs.length} chars) for main`); }
+	 // Write to LEAD workspace
+	 const workspacePath = '/opt/openclaw-data/workspace';
+	 ensureWorkspaceBootstrapFiles(workspacePath);
+	 const leadChanged = writeWorkspaceTextFile(workspacePath, 'COMPANY.md', content);
+	 if (leadChanged) execSync(`chown 1000:1000 ${workspacePath}/COMPANY.md`, { timeout: 5000 });
+	 // Write to all SPC workspaces
+	 const agentsDir = '/opt/openclaw-data/config/agents';
+	 try {
+	 const agents = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
+	 let changedCount = leadChanged ? 1 : 0;
+	 for (const agent of agents) {
+	 const spcWs = `${agentsDir}/${agent}/workspace`;
+	 ensureWorkspaceBootstrapFiles(spcWs);
+	 const changed = writeWorkspaceTextFile(spcWs, 'COMPANY.md', content);
+	 if (changed) {
+	  execSync(`chown -R 1000:1000 ${agentsDir}/${agent}`, { timeout: 5000 });
+	  changedCount++;
+	 }
+	 }
+	 console.log(`✅ Updated company context (${companyDocs.length} chars) for ${changedCount}/${agents.length + 1} workspaces`);
+	 } catch (e) { console.log(`✅ Updated company context (${companyDocs.length} chars) for main${leadChanged ? '' : ' (unchanged)'}`); }
  res.json({ success: true });
  } catch (err) {
  res.status(500).json({ error: err.message });
@@ -6424,25 +6448,25 @@ app.post('/agents/sync-memories', (req, res) => {
    .replace(/^# Team Memory/m, '# Long-Term Memory')
    .replace('_Auto-synced structured knowledge. Agents: reference this for context._', '_Auto-synced from MEMORIES.md. Do not edit manually; this file is generated from structured memory._');
 
- // Write to LEAD workspace
- ensureWorkspaceBootstrapFiles('/opt/openclaw-data/workspace');
- writeFileSync('/opt/openclaw-data/workspace/MEMORIES.md', memoriesContent);
- writeFileSync('/opt/openclaw-data/workspace/MEMORY.md', memoryContent);
- execSync('chown 1000:1000 /opt/openclaw-data/workspace/MEMORIES.md /opt/openclaw-data/workspace/MEMORY.md', { timeout: 5000 });
+	 // Write to LEAD workspace
+	 ensureWorkspaceBootstrapFiles('/opt/openclaw-data/workspace');
+	 const leadMemoriesChanged = writeTextFileIfChanged('/opt/openclaw-data/workspace/MEMORIES.md', memoriesContent).written;
+	 const leadMemoryChanged = writeTextFileIfChanged('/opt/openclaw-data/workspace/MEMORY.md', memoryContent).written;
+	 if (leadMemoriesChanged || leadMemoryChanged) execSync('chown 1000:1000 /opt/openclaw-data/workspace/MEMORIES.md /opt/openclaw-data/workspace/MEMORY.md', { timeout: 5000 });
 
  // Write to all SPC workspaces
  const agentsDir = '/opt/openclaw-data/config/agents';
  let spcCount = 0;
  try {
  const agents = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
- for (const agent of agents) {
- const spcWs = `${agentsDir}/${agent}/workspace`;
- ensureWorkspaceBootstrapFiles(spcWs);
- writeFileSync(`${spcWs}/MEMORIES.md`, memoriesContent);
- writeFileSync(`${spcWs}/MEMORY.md`, memoryContent);
- execSync(`chown -R 1000:1000 ${agentsDir}/${agent}`, { timeout: 5000 });
- spcCount++;
- }
+	 for (const agent of agents) {
+	 const spcWs = `${agentsDir}/${agent}/workspace`;
+	 ensureWorkspaceBootstrapFiles(spcWs);
+	 const memoriesChanged = writeTextFileIfChanged(`${spcWs}/MEMORIES.md`, memoriesContent).written;
+	 const memoryChanged = writeTextFileIfChanged(`${spcWs}/MEMORY.md`, memoryContent).written;
+	 if (memoriesChanged || memoryChanged) execSync(`chown -R 1000:1000 ${agentsDir}/${agent}`, { timeout: 5000 });
+	 spcCount++;
+	 }
  } catch {}
  console.log(`🧠 Synced ${memories.length} memories to main + ${spcCount} SPCs (MEMORIES.md -> MEMORY.md)`);
  res.json({ success: true, synced: spcCount + 1 });
@@ -6486,23 +6510,23 @@ app.post('/agents/sync-knowledge', (req, res) => {
  content += '\n';
  }
 
- // Write to LEAD workspace
- ensureWorkspaceBootstrapFiles('/opt/openclaw-data/workspace');
- writeFileSync('/opt/openclaw-data/workspace/KNOWLEDGE.md', content);
- execSync('chown 1000:1000 /opt/openclaw-data/workspace/KNOWLEDGE.md', { timeout: 5000 });
+	 // Write to LEAD workspace
+	 ensureWorkspaceBootstrapFiles('/opt/openclaw-data/workspace');
+	 const leadKnowledgeChanged = writeTextFileIfChanged('/opt/openclaw-data/workspace/KNOWLEDGE.md', content).written;
+	 if (leadKnowledgeChanged) execSync('chown 1000:1000 /opt/openclaw-data/workspace/KNOWLEDGE.md', { timeout: 5000 });
 
  // Write to all SPC workspaces
  const agentsDir = '/opt/openclaw-data/config/agents';
  let spcCount = 0;
  try {
  const agents = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
- for (const agent of agents) {
- const spcWs = `${agentsDir}/${agent}/workspace`;
- ensureWorkspaceBootstrapFiles(spcWs);
- writeFileSync(`${spcWs}/KNOWLEDGE.md`, content);
- execSync(`chown -R 1000:1000 ${agentsDir}/${agent}`, { timeout: 5000 });
- spcCount++;
- }
+	 for (const agent of agents) {
+	 const spcWs = `${agentsDir}/${agent}/workspace`;
+	 ensureWorkspaceBootstrapFiles(spcWs);
+	 const changed = writeTextFileIfChanged(`${spcWs}/KNOWLEDGE.md`, content).written;
+	 if (changed) execSync(`chown -R 1000:1000 ${agentsDir}/${agent}`, { timeout: 5000 });
+	 spcCount++;
+	 }
  } catch {}
  console.log(`📋 Synced ${knowledge.length} knowledge entries to main + ${spcCount} SPCs`);
  res.json({ success: true, synced: spcCount + 1, entries: knowledge.length });
@@ -8260,9 +8284,10 @@ const PROVIDER_ENV_NAME_MAP = Object.freeze({
  tavily: ['TAVILY_API_KEY'],
  serpapi: ['SERPAPI_API_KEY'],
  searchapi: ['SEARCHAPI_API_KEY'],
- browserbase: ['BROWSERBASE_API_KEY'],
- browserbaseProjectId: ['BROWSERBASE_PROJECT_ID'],
-});
+	 browserbase: ['BROWSERBASE_API_KEY'],
+	 browserbaseProjectId: ['BROWSERBASE_PROJECT_ID'],
+	 telegram: ['TELEGRAM_BOT_TOKEN'],
+	});
 
 const PROVIDER_ENV_WRITE_NAME_MAP = Object.freeze(
  Object.fromEntries(
@@ -8337,9 +8362,10 @@ app.post('/config/api-keys', async (req, res) => {
   browserbaseProjectId, minimaxKey, zaiKey, moonshotKey, kimiKey, groqKey, cerebrasKey, togetherKey,
   nvidiaKey, qianfanKey, stepfunKey, veniceKey, huggingfaceKey, aiGatewayKey, kilocodeKey,
   cloudflareAiGatewayKey, syntheticKey, volcanoEngineKey, byteplusKey, defaultModel, defaultFallbacks,
-  imageModel, pdfModel, openaiCodexAuthProfile, localProvider, removeLocalProvider,
-  ollamaProvider, removeOllamaProvider, ollamaBaseUrl,
- } = body;
+	  imageModel, pdfModel, openaiCodexAuthProfile, localProvider, removeLocalProvider,
+	  ollamaProvider, removeOllamaProvider, ollamaBaseUrl,
+	  telegramToken, telegramBotToken,
+	 } = body;
  const providerKeyPayloads = {
   anthropic: anthropicKey,
   openai: openaiKey,
@@ -8377,11 +8403,13 @@ app.post('/config/api-keys', async (req, res) => {
   searchapi: searchapiKey,
   browserbase: browserbaseKey,
   browserbaseProjectId,
- };
- const hasAnyKey = [
-  ...Object.values(providerKeyPayloads),
-  defaultModel,
-  defaultFallbacks,
+	 };
+	 const channelEnvUpdates = buildTelegramEnvUpdates({ telegramToken, telegramBotToken });
+	 const hasAnyKey = [
+	  ...Object.values(providerKeyPayloads),
+	  ...Object.values(channelEnvUpdates),
+	  defaultModel,
+	  defaultFallbacks,
   imageModel,
   pdfModel,
   openaiCodexAuthProfile,
@@ -8398,7 +8426,8 @@ app.post('/config/api-keys', async (req, res) => {
  const { promisify } = await import('util');
  const run = promisify(exec);
 
- let envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+	 let envContent = '';
+	 try { envContent = readFileSync('/opt/openclaw/.env', 'utf8'); } catch {}
 
  // Helper: update or append env var
  const setEnvVar = (name, value) => {
@@ -8410,14 +8439,17 @@ app.post('/config/api-keys', async (req, res) => {
  }
  };
 
- for (const [provider, keyValue] of Object.entries(providerKeyPayloads)) {
-  const envName = PROVIDER_ENV_WRITE_NAME_MAP[provider];
-  if (!envName) continue;
-  const normalizedValue = provider === 'composio' ? normalizeComposioApiKey(keyValue) : keyValue;
-  setEnvVar(envName, normalizedValue);
- }
+	 for (const [provider, keyValue] of Object.entries(providerKeyPayloads)) {
+	  const envName = PROVIDER_ENV_WRITE_NAME_MAP[provider];
+	  if (!envName) continue;
+	  const normalizedValue = provider === 'composio' ? normalizeComposioApiKey(keyValue) : keyValue;
+	  setEnvVar(envName, normalizedValue);
+	 }
+	 for (const [envName, envValue] of Object.entries(channelEnvUpdates)) {
+	  setEnvVar(envName, envValue);
+	 }
 
- writeFileSync('/opt/openclaw/.env', envContent);
+	 writeTextFileIfChanged('/opt/openclaw/.env', envContent);
 
  // Track backup keys — store each new non-empty key in the backup list
  const BACKUP_KEY_PROVIDERS = {
@@ -8452,9 +8484,9 @@ app.post('/config/api-keys', async (req, res) => {
   writeConfigKey('providerModels', pm);
  }
 
- if (braveKey !== undefined) {
- try {
- const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
+	 if (braveKey !== undefined) {
+	 try {
+	 const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
  // Ensure tools.web.search section exists (create if missing)
  if (!config.tools) config.tools = {};
  if (!config.tools.web) config.tools.web = {};
@@ -8464,10 +8496,25 @@ app.post('/config/api-keys', async (req, res) => {
  if (Array.isArray(config.tools.allow) && !config.tools.allow.includes('web_search')) {
  config.tools.allow.push('web_search');
  }
- writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
- await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
- } catch (e) { console.error('Failed to update openclaw.json:', e.message); }
- }
+	 writeOpenClawConfig(config);
+	 } catch (e) { console.error('Failed to update openclaw.json:', e.message); }
+	 }
+
+	 if (channelEnvUpdates.TELEGRAM_BOT_TOKEN !== undefined) {
+	 try {
+	 const token = channelEnvUpdates.TELEGRAM_BOT_TOKEN;
+	 const { config, changed, configured } = applyTelegramTokenToOpenClawConfig(readOpenClawConfig(), token);
+	 if (changed) writeOpenClawConfig(config);
+	 writeConfigKey('channel:telegram', {
+	  configured,
+	  mode: config?.channels?.telegram?.mode || 'polling',
+	  updatedAt: Date.now(),
+	 });
+	 console.log(`[bridge] Telegram channel ${configured ? 'configured' : 'cleared'} for OpenClaw`);
+	 } catch (e) {
+	  console.error('Failed to update Telegram channel config:', e.message);
+	 }
+	 }
 
 // Normalize a model ID: ensure provider/ prefix, validate known models
 // OpenRouter sends IDs like "anthropic/claude-4-6-sonnet-20260217" but OpenClaw gateway
@@ -8624,8 +8671,7 @@ const _syncWarnings = [];
    delete config.models.providers.ollama;
    console.log('[bridge] Removed Ollama provider from openclaw.json');
  }
- writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
- await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
+	 writeOpenClawConfig(config);
  } catch (e) { console.error('Failed to update local providers in openclaw.json:', e.message); _syncWarnings.push(`Local provider update failed: ${e.message}`); }
  try {
  ensureSyntheticLocalAuthProfiles({ localProvider, removeLocalProvider, ollamaProvider, removeOllamaProvider });
@@ -8685,8 +8731,7 @@ const _syncWarnings = [];
    config.agents.defaults.pdfModel = pdfModel ? normalizeModelId(pdfModel) : undefined;
    console.log(`[bridge] Updating pdf model to: ${config.agents.defaults.pdfModel || '(none)'}`);
  }
- writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
- await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
+	 writeOpenClawConfig(config);
  } catch (e) { console.error('Failed to update native models in openclaw.json:', e.message); _syncWarnings.push(`Native model update failed: ${e.message}`); }
  }
 
@@ -8817,8 +8862,7 @@ const _syncWarnings = [];
  }
  }
  if (changed) {
- writeFileSync(configPath, JSON.stringify(config, null, 2));
- await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
+	 writeOpenClawConfig(config);
  }
  } catch (e) { console.error('Failed to update openclaw.json providers:', e.message); }
  }
@@ -9080,10 +9124,24 @@ app.delete('/config/api-keys/:provider', async (req, res) => {
    for (const envName of envNames) {
     envContent = envContent.replace(new RegExp(`^${envName}=.*\\n?`, 'm'), '');
    }
-   writeFileSync('/opt/openclaw/.env', envContent);
-  } catch {}
+	  writeTextFileIfChanged('/opt/openclaw/.env', envContent);
+	  } catch {}
 
-  // Remove from auth-profiles.json
+	  if (provider === 'telegram') {
+	   try {
+	    const { config, changed } = applyTelegramTokenToOpenClawConfig(readOpenClawConfig(), '');
+	    if (changed) writeOpenClawConfig(config);
+	    writeConfigKey('channel:telegram', {
+	     configured: false,
+	     mode: config?.channels?.telegram?.mode || 'polling',
+	     updatedAt: Date.now(),
+	    });
+	   } catch (e) {
+	    console.error('Failed to clear Telegram channel config:', e.message);
+	   }
+	  }
+
+	  // Remove from auth-profiles.json
   try {
    const authDoc = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
    const authProviders = [];
@@ -9202,7 +9260,7 @@ app.post('/config/provider-keys/:provider/switch', (req, res) => {
   } else {
    envContent += `\n${envName}=${newKey}\n`;
   }
-  writeFileSync('/opt/openclaw/.env', envContent);
+	   writeTextFileIfChanged('/opt/openclaw/.env', envContent);
 
   writeConfigKey('pendingBridgeApply', true);
   res.json({ ok: true, pendingBridgeApply: true });
@@ -9246,7 +9304,7 @@ app.delete('/config/provider-keys/:provider/:index', (req, res) => {
    if (envContent.match(new RegExp(`^${envName}=`, 'm'))) {
     envContent = envContent.replace(new RegExp(`^${envName}=.*$`, 'm'), `${envName}=${newActive}`);
    }
-   writeFileSync('/opt/openclaw/.env', envContent);
+	   writeTextFileIfChanged('/opt/openclaw/.env', envContent);
    writeConfigKey('pendingBridgeApply', true);
   }
 
@@ -9305,9 +9363,9 @@ When using browser tools that request geolocation, use the coordinates above.
 `;
 
  const fs = await import('fs');
- fs.writeFileSync(`${WORKSPACE}/USER.md`, userMd);
- fs.writeFileSync(`${WORKSPACE}/TOOLS.md`, toolsMd);
- console.log(`[config] Updated USER.md + TOOLS.md: name=${name}, location=${location}`);
+	 writeTextFileIfChanged(`${WORKSPACE}/USER.md`, userMd);
+	 writeTextFileIfChanged(`${WORKSPACE}/TOOLS.md`, toolsMd);
+	 console.log(`[config] Updated USER.md + TOOLS.md: name=${name}, location=${location}`);
  res.json({ ok: true, updated: ['USER.md', 'TOOLS.md'] });
  } catch (err) {
  console.error('[config] user-context error:', err.message);
@@ -10092,7 +10150,7 @@ exec node dist/index.js gateway --allow-unconfigured --bind lan --port "$GATEWAY
  const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
  if (config.gateway && !config.gateway.trustedProxies) {
  config.gateway.trustedProxies = ['127.0.0.1', '172.16.0.0/12'];
- fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+	 writeOpenClawConfig(config);
  await run('cd /opt/openclaw && docker compose down && docker compose up -d');
  console.log('Gateway config patched with trustedProxies and restarted');
  }
@@ -10136,9 +10194,11 @@ app.put('/config/openclaw', (req, res) => {
  const existing = readFileSync(OPENCLAW_CONFIG_PATH, 'utf8');
  writeFileSync(OPENCLAW_CONFIG_PATH + '.bak', existing);
  } catch {}
- writeOpenClawConfig(normalizeOpenClawConfigForWrite(data));
- // Restart OpenClaw gateway to pick up changes
- try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', { timeout: 5000 }); } catch {}
+	 const changed = writeOpenClawConfig(normalizeOpenClawConfigForWrite(data));
+	 // Restart OpenClaw gateway to pick up changes
+	 if (changed) {
+	 try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', { timeout: 5000 }); } catch {}
+	 }
  res.json({ success: true });
  } catch (err) {
  res.status(500).json({ error: err.message });
