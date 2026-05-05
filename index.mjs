@@ -5111,6 +5111,40 @@ function normalizeNodeInventoryPayload(rawNodeList = {}, rawDevicePairs = {}) {
  };
 }
 
+async function gatewayRequestResult(method, params = {}, options = {}) {
+ try {
+  const value = await gateway.request(method, params, options);
+  return { ok: true, value: value || null };
+ } catch (err) {
+  return { ok: false, error: err.message || String(err) };
+ }
+}
+
+function readLocalDevicePairInventory() {
+ let paired = {};
+ try { paired = JSON.parse(readFileSync(PAIRED_JSON_PATH_ADMIN, 'utf8')); } catch {}
+ const normalized = normalizePairedDeviceMap(paired);
+ return {
+  paired: Object.values(normalized.paired || {}),
+  pending: [],
+ };
+}
+
+function mergeNodeInventoryRows(...groups) {
+ const merged = [];
+ const seen = new Set();
+ for (const group of groups) {
+  for (const item of Array.isArray(group) ? group : []) {
+   const normalized = normalizeNodeRecord(item);
+   const key = normalized.nodeId || normalized.id || normalized.deviceId || normalized.requestId || JSON.stringify(item);
+   if (seen.has(key)) continue;
+   seen.add(key);
+   merged.push(item);
+  }
+ }
+ return merged;
+}
+
 // GET /admin/devices — list all paired devices
 app.get('/admin/devices', (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
@@ -5146,21 +5180,46 @@ app.get('/admin/devices', (req, res) => {
 app.get('/admin/nodes', async (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
  try {
-   const rawNodeList = await gateway.request('node.list', {}, { timeoutMs: 10000 });
-   let rawDevicePairs = {};
-   try {
-     rawDevicePairs = await gateway.request('device.pair.list', {}, { timeoutMs: 10000 });
-   } catch (pairErr) {
-     rawDevicePairs = { error: pairErr.message };
-   }
+   const [nodeListResult, nodeStatusResult, devicePairsResult] = await Promise.all([
+    gatewayRequestResult('node.list', {}, { timeoutMs: 10000 }),
+    gatewayRequestResult('node.status', {}, { timeoutMs: 10000 }),
+    gatewayRequestResult('device.pair.list', {}, { timeoutMs: 10000 }),
+   ]);
+   const errors = {};
+   if (!nodeListResult.ok) errors.nodeList = nodeListResult.error;
+   if (!nodeStatusResult.ok) errors.nodeStatus = nodeStatusResult.error;
+   if (!devicePairsResult.ok) errors.devicePairs = devicePairsResult.error;
+   const statusNodes = nodeStatusResult.ok
+    ? arrayFromPayload(nodeStatusResult.value, ['nodes', 'liveNodes', 'items', 'data'])
+    : [];
+   const listNodes = nodeListResult.ok
+    ? arrayFromPayload(nodeListResult.value, ['nodes', 'liveNodes', 'items', 'data'])
+    : [];
+   const rawNodeList = {
+    ...(nodeListResult.ok && nodeListResult.value && typeof nodeListResult.value === 'object' ? nodeListResult.value : {}),
+    nodes: mergeNodeInventoryRows(listNodes, statusNodes),
+   };
+   const rawDevicePairs = devicePairsResult.ok ? (devicePairsResult.value || {}) : readLocalDevicePairInventory();
    const normalized = normalizeNodeInventoryPayload(rawNodeList, rawDevicePairs);
-   res.json({
-     ok: true,
+   const hasInventory = Boolean(
+    normalized.nodes.length
+    || normalized.pending.length
+    || normalized.paired.length
+    || normalized.devicePairs.pending.length
+    || normalized.devicePairs.paired.length
+   );
+   const hasGatewayResponse = nodeListResult.ok || nodeStatusResult.ok || devicePairsResult.ok;
+   const ok = hasGatewayResponse || hasInventory;
+   res.status(ok ? 200 : 502).json({
+     ok,
+     partial: Object.keys(errors).length > 0,
      source: 'openclaw-gateway',
-     method: 'node.list',
+     method: 'node.list+node.status+device.pair.list',
      ...normalized,
+     errors,
      raw: {
-       nodeList: rawNodeList || null,
+       nodeList: nodeListResult.ok ? nodeListResult.value : null,
+       nodeStatus: nodeStatusResult.ok ? nodeStatusResult.value : null,
        devicePairs: rawDevicePairs || null,
      },
    });
