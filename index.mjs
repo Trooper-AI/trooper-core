@@ -512,6 +512,7 @@ const MISSION_CONTROL_URL = process.env.MISSION_CONTROL_URL || process.env.CRABH
 // OpenClaw gateway connection config
 const OPENCLAW_URL = process.env.OPENCLAW_URL || 'http://127.0.0.1:18789';
 const OPENCLAW_CONFIG_PATH = '/opt/openclaw-data/config/openclaw.json';
+const USE_GATEWAY_DEVICE_AUTH = process.env.OPENCLAW_BRIDGE_DEVICE_AUTH === '1';
 
 function cloneJson(value) {
  return value && typeof value === 'object' ? JSON.parse(JSON.stringify(value)) : {};
@@ -966,10 +967,9 @@ class OpenClawGateway {
 
  authPromise.finally(() => clearTimeout(authTimeout));
 
- // Start with a plain connect. Newer gateway builds may not emit an eager
- // connect.challenge event until the client has attempted connect once. If the
- // gateway does require a nonce, _handleFrame will receive connect.challenge and
- // call _sendConnect() again with the signed nonce.
+ // The bridge is a local backend gateway client. Upstream OpenClaw allows this
+ // loopback + shared-token path to connect without device pairing, which avoids
+ // pairing deadlocks during fresh snapshot boots.
  this._sendConnect();
  return authPromise;
  }
@@ -989,28 +989,30 @@ class OpenClawGateway {
 
  const role = 'operator';
  const scopes = OPERATOR_SCOPES;
- const signedAtMs = Date.now();
  const nonce = this._connectNonce || undefined;
+ const params = {
+ minProtocol: 1, maxProtocol: 4,
+ client: { id: 'gateway-client', displayName: 'CrabsHQ Bridge', version: '2.1.0', platform: 'linux', mode: 'backend' },
+ auth: { token: this.token },
+ role, scopes,
+ };
 
+ if (USE_GATEWAY_DEVICE_AUTH && nonce) {
+ const signedAtMs = Date.now();
  const payload = buildDeviceAuthPayload({
  deviceId: deviceIdentity.deviceId, clientId: 'gateway-client', clientMode: 'backend',
  role, scopes, signedAtMs, token: this.token, nonce,
  });
  const signature = signDevicePayload(deviceIdentity.privateKeyPem, payload);
  const publicKey = getDevicePublicKeyBase64Url(deviceIdentity);
+ params.device = {
+ id: deviceIdentity.deviceId, publicKey, signature, signedAt: signedAtMs, nonce,
+ };
+ }
 
  this.ws.send(JSON.stringify({
  type: 'req', id, method: 'connect',
- params: {
- minProtocol: 1, maxProtocol: 3,
- client: { id: 'gateway-client', displayName: 'CrabsHQ Bridge', version: '2.1.0', platform: 'linux', mode: 'backend' },
- auth: { token: this.token },
- role, scopes,
- device: {
- id: deviceIdentity.deviceId, publicKey, signature, signedAt: signedAtMs,
- ...(nonce ? { nonce } : {}),
- },
- },
+ params,
  }));
  }
 
@@ -1018,7 +1020,7 @@ class OpenClawGateway {
  // Handle connect.challenge — gateway sends nonce, we re-auth with it signed
  if (frame.type === 'event' && frame.event === 'connect.challenge') {
  const nonce = frame.payload?.nonce;
- if (nonce) {
+ if (USE_GATEWAY_DEVICE_AUTH && nonce) {
  console.log('[OpenClaw] Received connect challenge, re-authenticating with nonce...');
  this._connectNonce = nonce;
  this._sendConnect();
@@ -1032,10 +1034,11 @@ class OpenClawGateway {
 
  if (!frame.ok) {
  const errMsg = frame.error?.message || 'Request failed';
- if (frame.id === this._authRequestId) {
- this.lastAuthError = errMsg;
- this.lastAuthAt = Date.now();
- }
+	 if (frame.id === this._authRequestId) {
+	 const details = frame.error?.details ? ` details=${JSON.stringify(redactDiagnosticValue(frame.error.details))}` : '';
+	 this.lastAuthError = `${errMsg}${details}`;
+	 this.lastAuthAt = Date.now();
+	 }
  // If auth drifted after a reinstall/config restore, repair openclaw.json to the bridge's
  // live token and restart the gateway so the next reconnect uses a consistent token.
  if (frame.id === this._authRequestId && /token mismatch|token missing|unauthorized/i.test(errMsg)) {
@@ -4694,11 +4697,15 @@ app.get('/health', async (req, res) => {
  status: healthStatus,
  service: 'openclaw-bridge',
  reason: healthStatus === 'degraded' ? 'gateway_unpaired' : null,
- gateway: {
-   status: gatewayHealthy ? 'ok' : 'degraded',
-   connected: gatewayHealthy,
-   paired: gatewayHealthy,
- },
+	 gateway: {
+	   status: gatewayHealthy ? 'ok' : 'degraded',
+	   connected: gatewayHealthy,
+	   paired: gatewayHealthy,
+	   wsReadyState: gateway.ws?.readyState ?? null,
+	   authError: gateway.lastAuthError,
+	   authAt: gateway.lastAuthAt,
+	   reconnectDelayMs: gateway._reconnectDelay,
+	 },
  browser: {
    available: browserAvailable,
    responsive: browserResponsive,
