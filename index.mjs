@@ -5656,10 +5656,10 @@ app.post('/admin/upgrade', async (req, res) => {
      steps[steps.length - 1] = { step: 'gateway_restart', status: 'failed', error: e.message };
    }
 
-   // 3. Pull latest bridge code
+   // 3. Sync latest bridge code
    steps.push({ step: 'bridge_pull', status: 'running' });
    try {
-     const gitOut = execSync('cd /opt/openclaw-bridge && git pull 2>&1', { timeout: 30000 }).toString();
+     const gitOut = execSync('cd /opt/openclaw-bridge && git fetch origin main && git reset --hard origin/main 2>&1', { timeout: 30000 }).toString();
      steps[steps.length - 1] = { step: 'bridge_pull', status: 'ok', output: gitOut.trim() };
    } catch (e) {
      steps[steps.length - 1] = { step: 'bridge_pull', status: 'failed', error: e.message };
@@ -7910,14 +7910,14 @@ app.post('/upgrade', async (req, res) => {
 
    // 2. Update bridge code from GitHub
    if (scope === 'all' || scope === 'bridge') {
-     step('Pulling latest bridge code...');
+     step('Syncing latest bridge code...');
      try {
        const gitOutput = execSync(
-         'cd /opt/openclaw-bridge && git pull origin main 2>&1',
+        'cd /opt/openclaw-bridge && git fetch origin main && git reset --hard origin/main 2>&1',
          { timeout: 30000 }
        ).toString();
-       const noChanges = gitOutput.includes('Already up to date');
-       step(noChanges ? 'Bridge code already up to date' : 'Bridge code updated');
+      const noChanges = /HEAD is now at/i.test(gitOutput) && !/From github\.com/i.test(gitOutput);
+      step(noChanges ? 'Bridge code already up to date' : 'Bridge code synced');
 
        if (!noChanges) {
          // Install any new dependencies
@@ -10057,10 +10057,10 @@ app.post('/update', async (req, res) => {
  try {
  // Self-update bridge from git
  try {
- await run('cd /opt/openclaw-bridge && git pull origin main 2>&1');
+ await run('cd /opt/openclaw-bridge && git fetch origin main && git reset --hard origin/main 2>&1');
  console.log('[Update] Bridge code updated from git');
- } catch (e) { console.warn('[Update] Bridge git pull failed (non-fatal):', e.message); }
- await run('cd /opt/openclaw && git pull origin main');
+ } catch (e) { console.warn('[Update] Bridge git sync failed (non-fatal):', e.message); }
+ await run('cd /opt/openclaw && git fetch origin main && git reset --hard origin/main');
  const dockerImage = process.env.OPENCLAW_DOCKER_IMAGE || '';
  if (dockerImage) {
  const os = await import('os');

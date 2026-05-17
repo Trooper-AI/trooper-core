@@ -810,7 +810,7 @@ if [ ! -d /opt/openclaw ]; then
  sleep $((${_git_attempt} * 3))
  done
 else
- cd /opt/openclaw && git pull --depth 1 origin main || true
+ cd /opt/openclaw && git fetch --depth 1 origin main && git reset --hard FETCH_HEAD || true
 fi
 
 mkdir -p /opt/openclaw-data/config /opt/openclaw-data/workspace
