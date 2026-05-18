@@ -3264,13 +3264,13 @@ function normalizeGatewayModelId(model) {
  if (!model) return model;
  let m = String(model).trim();
  const EXACT_MODEL_MAP = {
-  'gpt': 'openai-codex/gpt-5.4',
-  'gpt-5.4': 'openai-codex/gpt-5.4',
-  'openai/gpt-5.4': 'openai-codex/gpt-5.4',
-  'openai-codex/gpt-5.4': 'openai-codex/gpt-5.4',
-  'gpt-5-4': 'openai-codex/gpt-5.4',
-  'openai/gpt-5-4': 'openai-codex/gpt-5.4',
-  'openai-codex/gpt-5-4': 'openai-codex/gpt-5.4',
+  'gpt': 'openai/gpt-5.4',
+  'gpt-5.4': 'openai/gpt-5.4',
+  'openai/gpt-5.4': 'openai/gpt-5.4',
+  'openai-codex/gpt-5.4': 'openai/gpt-5.4',
+  'gpt-5-4': 'openai/gpt-5.4',
+  'openai/gpt-5-4': 'openai/gpt-5.4',
+  'openai-codex/gpt-5-4': 'openai/gpt-5.4',
   'gpt-5.2': 'openai/gpt-5.2',
   'openai/gpt-5.2': 'openai/gpt-5.2',
   'gpt-5-2': 'openai/gpt-5.2',
@@ -8621,13 +8621,13 @@ function normalizeModelId(model) {
  let m = String(model).trim();
  // Only normalize explicit known aliases. Never blanket-convert dots↔dashes across providers.
  const EXACT_MODEL_MAP = {
-   'gpt': 'openai-codex/gpt-5.4',
-   'gpt-5.4': 'openai-codex/gpt-5.4',
-   'openai/gpt-5.4': 'openai-codex/gpt-5.4',
-   'openai-codex/gpt-5.4': 'openai-codex/gpt-5.4',
-   'gpt-5-4': 'openai-codex/gpt-5.4',
-   'openai/gpt-5-4': 'openai-codex/gpt-5.4',
-   'openai-codex/gpt-5-4': 'openai-codex/gpt-5.4',
+   'gpt': 'openai/gpt-5.4',
+   'gpt-5.4': 'openai/gpt-5.4',
+   'openai/gpt-5.4': 'openai/gpt-5.4',
+   'openai-codex/gpt-5.4': 'openai/gpt-5.4',
+   'gpt-5-4': 'openai/gpt-5.4',
+   'openai/gpt-5-4': 'openai/gpt-5.4',
+   'openai-codex/gpt-5-4': 'openai/gpt-5.4',
    'gpt-5.2': 'openai/gpt-5.2',
    'openai/gpt-5.2': 'openai/gpt-5.2',
    'gpt-5-2': 'openai/gpt-5.2',
@@ -8684,13 +8684,29 @@ const hasConfiguredProviderCredential = (provider) => {
 };
 
 const pickCredentialBackedDefaultModel = () => {
- if (hasConfiguredProviderCredential('openai-codex')) return 'openai-codex/gpt-5.4';
+ if (hasConfiguredProviderCredential('openai-codex')) return 'openai/gpt-5.4';
  if (hasConfiguredProviderCredential('anthropic')) return 'anthropic/claude-sonnet-4-5';
  if (hasConfiguredProviderCredential('openai')) return 'openai/gpt-5.2';
  if (hasConfiguredProviderCredential('gemini')) return 'google/gemini-2.5-pro';
  if (hasConfiguredProviderCredential('openrouter')) return 'openrouter/openai/gpt-5-mini';
  return null;
 };
+
+function ensureCodexRuntimeModelMapping(config) {
+ const primary = normalizeModelId(config?.agents?.defaults?.model?.primary || '');
+ if (primary !== 'openai/gpt-5.4' || !hasConfiguredProviderCredential('openai-codex')) return false;
+ if (!config.agents) config.agents = {};
+ if (!config.agents.defaults) config.agents.defaults = {};
+ if (!config.agents.defaults.models || typeof config.agents.defaults.models !== 'object') {
+  config.agents.defaults.models = {};
+ }
+ const current = config.agents.defaults.models[primary] || {};
+ const nextRuntime = { ...(current.agentRuntime || {}), id: 'codex' };
+ const next = { ...current, agentRuntime: nextRuntime };
+ if (JSON.stringify(current) === JSON.stringify(next)) return false;
+ config.agents.defaults.models[primary] = next;
+ return true;
+}
 
 const pickSafeNativeDefaultModel = (config, requestedFallbacks = []) => {
  const candidates = [
@@ -8804,6 +8820,9 @@ const _syncWarnings = [];
      : [];
    config.agents.defaults.model.fallbacks = normalizedFallbacks;
    console.log(`[bridge] Updating default fallbacks to: ${normalizedFallbacks.join(', ') || '(none)'}`);
+ }
+ if (ensureCodexRuntimeModelMapping(config)) {
+   console.log('[bridge] Ensured openai/gpt-5.4 uses the Codex agent runtime');
  }
  if (imageModel !== undefined) {
    config.agents.defaults.imageModel = imageModel ? normalizeModelId(imageModel) : undefined;
