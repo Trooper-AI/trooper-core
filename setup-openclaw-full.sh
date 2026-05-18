@@ -739,6 +739,18 @@ has_codex_auth_profile() {
  [ -n "${OPENAI_CODEX_AUTH_PROFILE_B64:-}" ] && [ "${OPENAI_CODEX_AUTH_PROFILE_B64}" != "__UNSET_OPENAI_CODEX_AUTH_PROFILE_B64__" ]
 }
 
+ensure_auth_profile_secret_key_source() {
+ local secret_dir="/opt/openclaw-data/auth-profile-secrets"
+ local secret_file="${secret_dir}/auth-profile-secret-key"
+ mkdir -p "$secret_dir"
+ if [ ! -s "$secret_file" ]; then
+  (umask 077; od -An -N 32 -tx1 /dev/urandom | tr -d ' \n' > "$secret_file")
+ fi
+ chown -R node:node "$secret_dir" 2>/dev/null || chown -R 1000:1000 "$secret_dir" 2>/dev/null || true
+ chmod 700 "$secret_dir" 2>/dev/null || true
+ chmod 600 "$secret_file" 2>/dev/null || true
+}
+
 restore_codex_oauth_sidecars() {
  if ! has_codex_auth_profile; then
   return 0
@@ -898,6 +910,7 @@ mkdir -p /opt/openclaw-data/config/media/browser
 mkdir -p /opt/openclaw-data/config/agents/main/agent
 mkdir -p /opt/openclaw-data/config/hooks
 mkdir -p /opt/openclaw-data/config/credentials
+ensure_auth_profile_secret_key_source
 
 # Create node user on host — bridge service uses /home/node/.openclaw for CLI sub-connections (browser, cron tools)
 if ! id -u node >/dev/null 2>&1; then
@@ -919,6 +932,7 @@ OPENCLAW_GATEWAY_PORT=0.0.0.0:${GATEWAY_PORT}
 OPENCLAW_BRIDGE_PORT=127.0.0.1:18790
 OPENCLAW_CONFIG_DIR=/opt/openclaw-data/config
 OPENCLAW_WORKSPACE_DIR=/opt/openclaw-data/workspace
+OPENCLAW_AUTH_PROFILE_SECRET_DIR=/opt/openclaw-data/auth-profile-secrets
 OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
 BRAVE_API_KEY=${BRAVE_API_KEY}
 COMPOSIO_API_KEY=${COMPOSIO_API_KEY}

@@ -2835,6 +2835,38 @@ try {
 const AUTH_PROFILES_PATH = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
 const AUTH_PROFILES_ROOT_PATH = '/opt/openclaw-data/config/auth-profiles.json';
 const CODEX_OAUTH_SIDECAR_DIR = '/opt/openclaw-data/config/credentials/auth-profiles';
+const AUTH_PROFILE_SECRET_DIR = '/opt/openclaw-data/auth-profile-secrets';
+const AUTH_PROFILE_SECRET_FILE = path.join(AUTH_PROFILE_SECRET_DIR, 'auth-profile-secret-key');
+
+function ensureAuthProfileSecretKeySource() {
+ try {
+  mkdirSync(AUTH_PROFILE_SECRET_DIR, { recursive: true });
+  if (!existsSync(AUTH_PROFILE_SECRET_FILE) || statSync(AUTH_PROFILE_SECRET_FILE).size === 0) {
+   const key = randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '');
+   writeFileSync(AUTH_PROFILE_SECRET_FILE, `${key.slice(0, 64)}\n`, { mode: 0o600 });
+  }
+  try { execSync(`chown -R 1000:1000 ${AUTH_PROFILE_SECRET_DIR} 2>/dev/null; chmod 700 ${AUTH_PROFILE_SECRET_DIR} 2>/dev/null; chmod 600 ${AUTH_PROFILE_SECRET_FILE} 2>/dev/null`, { timeout: 3000 }); } catch {}
+  try {
+   const envPath = '/opt/openclaw/.env';
+   const line = `OPENCLAW_AUTH_PROFILE_SECRET_DIR=${AUTH_PROFILE_SECRET_DIR}`;
+   let env = '';
+   try { env = readFileSync(envPath, 'utf8'); } catch {}
+   if (!env.includes('OPENCLAW_AUTH_PROFILE_SECRET_DIR=')) {
+    writeFileSync(envPath, `${env.replace(/\s*$/, '\n')}${line}\n`);
+    try {
+     execSync('cd /opt/openclaw && docker compose up -d --force-recreate openclaw-gateway 2>/dev/null || docker compose up -d --force-recreate 2>/dev/null', { timeout: 120000 });
+     console.log('[bridge] Recreated OpenClaw gateway with OAuth secret key mount');
+    } catch (err) {
+     console.warn(`[bridge] Failed to recreate gateway after adding OAuth secret mount: ${err.message}`);
+    }
+   }
+  } catch {}
+ } catch (err) {
+  console.warn(`[bridge] Failed to ensure OpenClaw OAuth secret key source: ${err.message}`);
+ }
+}
+
+ensureAuthProfileSecretKeySource();
 
 function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
  for (const target of [AUTH_PROFILES_PATH, AUTH_PROFILES_ROOT_PATH]) {
