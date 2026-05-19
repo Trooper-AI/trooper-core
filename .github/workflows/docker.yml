@@ -25,4 +25,4 @@ jobs:
         with:
           pull: true
           push: true
-          tags: ghcr.io/absurdfounder/crabhq-gateway:latest
+          tags: ghcr.io/absurdfounder/trooper-gateway:latest

@@ -1,13 +1,13 @@
 # Fix: Gap 4 -- user-scope REST `GET /api/tasks`
 
 Part of the Firebase -> VPS task-persistence fix set. Companion patches
-live in `absurdfounder/crabs-hq:patches/fix-task-persistence/`.
+live in `absurdfounder/trooper:patches/fix-task-persistence/`.
 
 ## What this patch does
 
 The REST `GET /api/tasks` handler in `index.mjs` previously called
 `listTasks(...)` without threading `req.firebaseUser?.uid` through.
-After the crabs-hq Render server started reading tasks via this
+After the trooper Render server started reading tasks via this
 endpoint (Gap 1 fix), that created a cross-tenant leakage risk.
 
 This patch adds `const userId = req.firebaseUser?.uid || null;` and
@@ -57,6 +57,6 @@ curl -H "Authorization: Bearer <B_firebase_token>" \
   https://<bridge-host>/api/tasks | jq '.tasks | length'
 
 # Database-level spot check
-docker exec openclaw-bridge sqlite3 /opt/openclaw-data/crabhq.db \
+docker exec openclaw-bridge sqlite3 /opt/openclaw-data/trooper.db \
   "select id, title, creator_id, assignee_id from tasks order by created_at desc limit 10"
 ```

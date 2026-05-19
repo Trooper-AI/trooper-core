@@ -1,15 +1,15 @@
 name: Trigger Snapshot Rebuild
 
 # Cross-repo trigger: when openclawbridge merges to main or its gateway
-# Docker image rebuilds, fire a `repository_dispatch` event at crabs-hq so
+# Docker image rebuilds, fire a `repository_dispatch` event at trooper so
 # the snapshot pipeline picks up the new bridge SHA.
 #
 # Phase 3 / Workstream 1 of CRABBOX_FLEET_AUTOMATION_PLAN.
 #
 # Required secret in this repo:
-#   CRABSHQ_DISPATCH_TOKEN — fine-grained PAT with actions:write on
-#   absurdfounder/Crabs-HQ. Pattern mirrors the existing
-#   OPENCLAWBRIDGE_DISPATCH_TOKEN flow on the crabs-hq side.
+#   Trooper_DISPATCH_TOKEN — fine-grained PAT with actions:write on
+#   absurdfounder/Trooper. Pattern mirrors the existing
+#   OPENCLAWBRIDGE_DISPATCH_TOKEN flow on the trooper side.
 
 on:
   push:
@@ -53,22 +53,22 @@ jobs:
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "Dispatching with bridge SHA $SHA"
 
-      - name: Fire repository_dispatch on crabs-hq
+      - name: Fire repository_dispatch on trooper
         env:
-          RAW_GH_TOKEN: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+          RAW_GH_TOKEN: ${{ secrets.Trooper_DISPATCH_TOKEN }}
           BRIDGE_SHA: ${{ steps.sha.outputs.sha }}
           TRIGGER_EVENT: ${{ github.event_name }}
         run: |
           GH_TOKEN="$(printf '%s' "${RAW_GH_TOKEN:-}" | tr -d '\r\n[:space:]')"
           if [ -z "$GH_TOKEN" ]; then
-            echo "::warning::CRABSHQ_DISPATCH_TOKEN not set — skipping dispatch"
+            echo "::warning::Trooper_DISPATCH_TOKEN not set — skipping dispatch"
             exit 0
           fi
           curl -fsSL -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/repos/absurdfounder/Crabs-HQ/dispatches \
+            https://api.github.com/repos/absurdfounder/Trooper/dispatches \
             -d "$(jq -nc --arg sha "$BRIDGE_SHA" --arg trigger "$TRIGGER_EVENT" '{
               event_type: "snapshot-rebuild",
               client_payload: {

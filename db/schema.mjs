@@ -294,7 +294,7 @@ export const policies = sqliteTable("policies", {
 
 // ── cf_tasks ──────────────────────────────────────────────────────────
 // Mirror of the CF Durable Object's view of each task. `payload` holds the
-// original /webhook/crabhq request body so /webhook/crabhq/resume can replay
+// original /webhook/trooper request body so /webhook/trooper/resume can replay
 // after a Bridge restart. Still local-only — no payload replication to CF.
 export const cfTasks = sqliteTable("cf_tasks", {
   task_id: text("task_id").primaryKey(),

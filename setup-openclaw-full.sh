@@ -1,7 +1,7 @@
 #!/bin/bash
 # Setup OpenClaw + Bridge + Poller on a fresh Ubuntu 24.04 VPS
 # Works in two modes:
-#   1. Cloud-init (CrabsHQ Cloud): Template vars replaced by provision.js via sed
+#   1. Cloud-init (Trooper Cloud): Template vars replaced by provision.js via sed
 #   2. Self-hosted: User exports env vars before running the script
 # Template variables are only used if the env var is NOT already set.
 
@@ -44,14 +44,14 @@ PRIMARY_MODEL="$(_resolve_input "${PRIMARY_MODEL:-}" "{{PRIMARY_MODEL}}")"
 BROWSERBASE_API_KEY="$(_resolve_input "${BROWSERBASE_API_KEY:-}" "{{BROWSERBASE_API_KEY}}")"
 BROWSERBASE_PROJECT_ID="$(_resolve_input "${BROWSERBASE_PROJECT_ID:-}" "{{BROWSERBASE_PROJECT_ID}}")"
 RUNTIME_AUTH_SECRET="$(_resolve_input "${RUNTIME_AUTH_SECRET:-}" "{{RUNTIME_AUTH_SECRET}}")"
-CRABHQ_RUNTIME_TARBALL_URL="$(_resolve_input "${CRABHQ_RUNTIME_TARBALL_URL:-}" "{{CRABHQ_RUNTIME_TARBALL_URL}}")"
-CRABHQ_RUNTIME_PORT=3101
-CRABHQ_RUNTIME_DATA_DIR=/var/lib/crabhq-org-runtime
+TROOPER_RUNTIME_TARBALL_URL="$(_resolve_input "${TROOPER_RUNTIME_TARBALL_URL:-}" "{{TROOPER_RUNTIME_TARBALL_URL}}")"
+TROOPER_RUNTIME_PORT=3101
+TROOPER_RUNTIME_DATA_DIR=/var/lib/trooper-org-runtime
 
 # Defaults must be applied before validation. Snapshot-builder bootstrap may
 # omit optional values, but BRIDGE_PORT is required by the early log server.
 if [ -z "$OPENCLAW_DOCKER_IMAGE" ] || echo "$OPENCLAW_DOCKER_IMAGE" | grep -q '{{.*}}'; then
-  OPENCLAW_DOCKER_IMAGE="ghcr.io/absurdfounder/crabhq-gateway:latest"
+  OPENCLAW_DOCKER_IMAGE="ghcr.io/absurdfounder/trooper-gateway:latest"
 fi
 if [ -z "$BRIDGE_PORT" ] || echo "$BRIDGE_PORT" | grep -q '{{.*}}'; then
   BRIDGE_PORT="3002"
@@ -91,12 +91,12 @@ _validate_var COMPOSIO_API_KEY "$COMPOSIO_API_KEY" optional
 _validate_var PRIMARY_PROVIDER "$PRIMARY_PROVIDER" optional
 _validate_var PRIMARY_MODEL "$PRIMARY_MODEL" optional
 _validate_var RUNTIME_AUTH_SECRET "$RUNTIME_AUTH_SECRET" optional
-_validate_var CRABHQ_RUNTIME_TARBALL_URL "$CRABHQ_RUNTIME_TARBALL_URL" optional
+_validate_var TROOPER_RUNTIME_TARBALL_URL "$TROOPER_RUNTIME_TARBALL_URL" optional
 
-PLATFORM_API_URL="${API_URL:-https://crabs-hq-production.up.railway.app}"
+PLATFORM_API_URL="${API_URL:-https://trooper-production.up.railway.app}"
 
 # Detect if booting from a pre-built snapshot (skip heavy installs)
-FROM_SNAPSHOT="${CRABHQ_FROM_SNAPSHOT:-0}"
+FROM_SNAPSHOT="${TROOPER_FROM_SNAPSHOT:-0}"
 
 # Dry-run mode: print commands instead of executing them
 DRY_RUN="${DRY_RUN:-0}"
@@ -185,7 +185,7 @@ _free_progress_port() {
 }
 
 if [ "$FROM_SNAPSHOT" = "1" ]; then
-  systemctl stop openclaw-bridge crabhq-org-runtime crabhq-server openclaw-poller openclaw-vnc crabhq-desktop crabhq-desktop-api crabhq-playwright 2>/dev/null || true
+  systemctl stop openclaw-bridge trooper-org-runtime trooper-server openclaw-poller openclaw-vnc trooper-desktop trooper-desktop-api trooper-playwright 2>/dev/null || true
   _free_progress_port "${BRIDGE_PORT}"
 fi
 
@@ -326,12 +326,12 @@ DOCKER_PLATFORM="linux/amd64"
 if [ "$HOST_ARCH" = "aarch64" ] || [ "$HOST_ARCH" = "arm64" ]; then
  DOCKER_PLATFORM="linux/arm64"
 fi
-OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/absurdfounder/crabhq-gateway:latest}"
+OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/absurdfounder/trooper-gateway:latest}"
 
 if [ "$FROM_SNAPSHOT" = "1" ]; then
   # Image already cached on snapshot — just re-tag it
   dlog "Snapshot boot: tagging cached Docker image as openclaw:local"
-  docker tag "${OPENCLAW_DOCKER_IMAGE}" openclaw:local 2>/dev/null || docker tag ghcr.io/absurdfounder/crabhq-gateway:latest openclaw:local
+  docker tag "${OPENCLAW_DOCKER_IMAGE}" openclaw:local 2>/dev/null || docker tag ghcr.io/absurdfounder/trooper-gateway:latest openclaw:local
   echo "IMAGE_READY=true" > /tmp/docker-pull-status
   DOCKER_PULL_PID=""
 else
@@ -382,9 +382,9 @@ if [ -z "$SERVER_PUBLIC_IP" ]; then
 fi
 
 # Derive hostname from ORG_ID (lowercase, first 12 chars)
-# DNS is created by provision.js (Render-side) — VPS always uses crabhq.com domain
+# DNS is created by provision.js (Render-side) — VPS always uses trooper.so domain
 ORG_SHORT=$(echo "${ORG_ID}" | tr '[:upper:]' '[:lower:]' | head -c 12)
-HTTPS_DOMAIN="org-${ORG_SHORT}.crabhq.com"
+HTTPS_DOMAIN="org-${ORG_SHORT}.trooper.so"
 echo "HTTPS domain: ${HTTPS_DOMAIN} (DNS created by provision.js)"
 
 if [ -n "$SERVER_PUBLIC_IP" ]; then
@@ -395,11 +395,11 @@ if [ -n "$SERVER_PUBLIC_IP" ]; then
  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
    -keyout /etc/caddy/certs/cf-origin.key \
    -out /etc/caddy/certs/cf-origin.crt \
-   -subj "/CN=*.crabhq.com" 2>/dev/null
+   -subj "/CN=*.trooper.so" 2>/dev/null
  chown caddy:caddy /etc/caddy/certs/cf-origin.key /etc/caddy/certs/cf-origin.crt
  chmod 600 /etc/caddy/certs/cf-origin.key
 
- # Caddyfile: CF-proxied crabhq.com domain (primary) + sslip.io fallback
+ # Caddyfile: CF-proxied trooper.so domain (primary) + sslip.io fallback
  cat > /etc/caddy/Caddyfile << CADDYFILE
 # Primary: CF-proxied domain (self-signed cert — CF terminates external SSL)
 ${HTTPS_DOMAIN} {
@@ -476,7 +476,7 @@ ${HTTPS_DOMAIN} {
  }
  handle /runtime-api/* {
  uri strip_prefix /runtime-api
- reverse_proxy 127.0.0.1:${CRABHQ_RUNTIME_PORT}
+ reverse_proxy 127.0.0.1:${TROOPER_RUNTIME_PORT}
  }
  handle {
  reverse_proxy 127.0.0.1:${GATEWAY_PORT}
@@ -557,7 +557,7 @@ ${SSLIP_DOMAIN} {
  }
  handle /runtime-api/* {
  uri strip_prefix /runtime-api
- reverse_proxy 127.0.0.1:${CRABHQ_RUNTIME_PORT}
+ reverse_proxy 127.0.0.1:${TROOPER_RUNTIME_PORT}
  }
  handle {
  reverse_proxy 127.0.0.1:${GATEWAY_PORT}
@@ -1180,7 +1180,7 @@ ${MODELS_PROVIDERS}
  "token": "HOOK_TOKEN_PLACEHOLDER",
  "path": "/hooks",
  "allowRequestSessionKey": true,
- "allowedSessionKeyPrefixes": ["hook:", "hook:crabhq:"],
+ "allowedSessionKeyPrefixes": ["hook:", "hook:trooper:"],
  "allowedAgentIds": ["*"]
  },
  "logging": {
@@ -1437,13 +1437,13 @@ MEMORYMD
 cat > /opt/openclaw-data/workspace/MEMORIES.md << 'MEMORIESMD'
 # Structured Memories
 
-_No structured memories have been synced yet. This file is generated from CrabsHQ memory._
+_No structured memories have been synced yet. This file is generated from Trooper memory._
 MEMORIESMD
 
 cat > /opt/openclaw-data/workspace/KNOWLEDGE.md << 'KNOWLEDGEMD'
 # Team Knowledge
 
-_No durable knowledge entries have been synced yet. This file is generated from CrabsHQ knowledge._
+_No durable knowledge entries have been synced yet. This file is generated from Trooper knowledge._
 KNOWLEDGEMD
 
 cat > /opt/openclaw-data/workspace/skills/README.md << 'SKILLSREADME'
@@ -1475,7 +1475,7 @@ You are the Team Lead. You coordinate the team, delegate tasks to SPCs, and ensu
 4. **Never guess config changes.** Read docs first. Backup before editing. If unsure, research — don't experiment on production.
 
 ## How You Work
-- You receive tasks from CrabsHQ (mission control) via hooks
+- You receive tasks from Trooper (mission control) via hooks
 - Delegate specialized work to SPC agents using the `message` or `sessions_spawn` tools
 - Monitor SPC progress and aggregate results
 - Report back to mission control with deliverables
@@ -1503,14 +1503,14 @@ When the user asks you to open a website, browse, or interact with a GUI, **alwa
 
 ### Two modes:
 1. **Headless** — Use the `browser` tool normally. Faster, no GUI. You report results as text/screenshots.
-2. **Live desktop** — Launch Chrome on `DISPLAY=:99` so it appears in the **Browser Live View** panel in CrabsHQ. The user can see everything in real-time.
+2. **Live desktop** — Launch Chrome on `DISPLAY=:99` so it appears in the **Browser Live View** panel in Trooper. The user can see everything in real-time.
 
 ### How live desktop works:
-- The VPS has a virtual display on `:99` (Xvnc, port 5999) — this is the **Browser Live View** in CrabsHQ
-- There's also a full LXQt desktop on `:1` (port 5901) — this is the **Desktop** panel in CrabsHQ
+- The VPS has a virtual display on `:99` (Xvnc, port 5999) — this is the **Browser Live View** in Trooper
+- There's also a full LXQt desktop on `:1` (port 5901) — this is the **Desktop** panel in Trooper
 - To launch Chrome visibly: `DISPLAY=:99 google-chrome-stable --no-sandbox <url> &`
 - The user sees it live in their dashboard — no VNC client needed
-- **Never say you can't share the GUI** — the user CAN see it via CrabsHQ panels
+- **Never say you can't share the GUI** — the user CAN see it via Trooper panels
 
 ### When to use which:
 - Quick lookups, scraping, screenshots → headless
@@ -1904,7 +1904,7 @@ cat > /usr/share/novnc/vnc_embed.html << 'VNCEMBED'
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <title>CrabsHQ Desktop</title>
+    <title>Trooper Desktop</title>
     <meta charset="utf-8">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -2010,7 +2010,7 @@ cat > /usr/share/novnc/vnc_embed.html << 'VNCEMBED'
 </html>
 VNCEMBED
 
-# ── Desktop (LXQt) setup — manual use via CrabsHQ Desktop panel ──────────────
+# ── Desktop (LXQt) setup — manual use via Trooper Desktop panel ──────────────
 dlog "Installing desktop packages (LXQt, x11vnc, apps)..."
 run_cmd apt-get install -y -qq --no-install-recommends \
  xvfb xorg openbox x11vnc xterm xdotool \
@@ -2026,7 +2026,7 @@ echo "[setup] LXQt desktop packages installed"
 fi # end FROM_SNAPSHOT != 1 (noVNC + desktop packages)
 
 # ── Pre-seed ALL desktop configs BEFORE anything starts ──
-# These must exist before crabhq-desktop-start runs, otherwise
+# These must exist before trooper-desktop-start runs, otherwise
 # pcmanfm/openbox launch with defaults (black bg, no icons, broken menu).
 
 # LXQt session config (openbox as WM)
@@ -2115,7 +2115,7 @@ chmod +x /root/Desktop/*.desktop
 echo "[setup] Desktop configs pre-seeded (icons, menu, pcmanfm, lxqt)"
 
 # Desktop start script — called by control API
-cat > /usr/local/bin/crabhq-desktop-start << 'DSTART'
+cat > /usr/local/bin/trooper-desktop-start << 'DSTART'
 #!/bin/bash
 set +e
 # Stable desktop on :1 — deterministic boot, no fragile desktop-icon dependency.
@@ -2155,7 +2155,7 @@ export DBUS_SESSION_BUS_ADDRESS DBUS_SESSION_BUS_PID
 python3 - << 'PYBG'
 from pathlib import Path
 w,h=1280,800
-with open('/tmp/crabhq-bg.ppm','wb') as f:
+with open('/tmp/trooper-bg.ppm','wb') as f:
     f.write(f'P6\n{w} {h}\n255\n'.encode())
     for y in range(h):
         t=y/(h-1)
@@ -2164,7 +2164,7 @@ with open('/tmp/crabhq-bg.ppm','wb') as f:
         b=int(238*(1-t)+247*t)
         f.write(bytes([r,g,b])*w)
 PYBG
-DISPLAY=:1 feh --bg-fill /tmp/crabhq-bg.ppm >/var/log/feh-desktop.log 2>&1 || DISPLAY=:1 xsetroot -solid '#dbe4ee'
+DISPLAY=:1 feh --bg-fill /tmp/trooper-bg.ppm >/var/log/feh-desktop.log 2>&1 || DISPLAY=:1 xsetroot -solid '#dbe4ee'
 
 nohup openbox > /var/log/openbox.log 2>&1 &
 sleep 1
@@ -2200,7 +2200,7 @@ DESK3
 chmod +x /root/Desktop/*.desktop
 
 # Always launch one visible terminal so the desktop never looks dead.
-nohup xterm -hold -geometry 100x28+80+60 -fa Monospace -fs 11 -bg '#111827' -fg '#e5e7eb' -e /bin/bash -lc "echo CrabsHQ Desktop Ready; echo; echo '- Use the desktop shortcuts for Browser / Workspace / Terminal.'; echo '- If panel/icons are missing, the session is still alive.'; echo; exec bash" > /var/log/xterm-desktop.log 2>&1 &
+nohup xterm -hold -geometry 100x28+80+60 -fa Monospace -fs 11 -bg '#111827' -fg '#e5e7eb' -e /bin/bash -lc "echo Trooper Desktop Ready; echo; echo '- Use the desktop shortcuts for Browser / Workspace / Terminal.'; echo '- If panel/icons are missing, the session is still alive.'; echo; exec bash" > /var/log/xterm-desktop.log 2>&1 &
 sleep 1
 
 nohup x11vnc -display :1 -forever -nopw -shared -rfbport 5901 -noxdamage \
@@ -2208,17 +2208,17 @@ nohup x11vnc -display :1 -forever -nopw -shared -rfbport 5901 -noxdamage \
 sleep 1
 nohup websockify --web=/usr/share/novnc 6081 localhost:5901 > /var/log/websockify-desktop.log 2>&1 &
 
-systemctl start crabhq-agent-daemon 2>/dev/null || true
+systemctl start trooper-agent-daemon 2>/dev/null || true
 
 echo 'Desktop started on :1, noVNC on port 6081'
 exit 0
 DSTART
-chmod +x /usr/local/bin/crabhq-desktop-start
+chmod +x /usr/local/bin/trooper-desktop-start
 
 # Desktop stop script
-cat > /usr/local/bin/crabhq-desktop-stop << 'DSTOP'
+cat > /usr/local/bin/trooper-desktop-stop << 'DSTOP'
 #!/bin/bash
-systemctl stop crabhq-agent-daemon 2>/dev/null || true
+systemctl stop trooper-agent-daemon 2>/dev/null || true
 pkill -f "websockify.*6081" 2>/dev/null || true
 pkill -f "x11vnc.*5901" 2>/dev/null || true
 pkill -f "pcmanfm-qt" 2>/dev/null || true
@@ -2232,13 +2232,13 @@ DBUS_PID="$(grep DBUS_SESSION_BUS_PID /tmp/dbus-desktop-env 2>/dev/null | cut -d
 rm -f /tmp/dbus-desktop-env
 echo "Desktop stopped"
 DSTOP
-chmod +x /usr/local/bin/crabhq-desktop-stop
+chmod +x /usr/local/bin/trooper-desktop-stop
 
 # ── Self-hosted management scripts ──
-cat > /usr/local/bin/crabhq-update << 'CUPDATE'
+cat > /usr/local/bin/trooper-update << 'CUPDATE'
 #!/bin/bash
 set -e
-echo "Updating CrabsHQ services..."
+echo "Updating Trooper services..."
 cd /opt/openclaw
 echo "Pulling latest Docker images..."
 docker compose pull
@@ -2259,15 +2259,15 @@ for i in $(seq 1 30); do
 done
 echo "Update complete."
 CUPDATE
-chmod +x /usr/local/bin/crabhq-update
+chmod +x /usr/local/bin/trooper-update
 
-cat > /usr/local/bin/crabhq-restart << 'CRESTART'
+cat > /usr/local/bin/trooper-restart << 'CRESTART'
 #!/bin/bash
 set -e
-echo "Restarting CrabsHQ services..."
+echo "Restarting Trooper services..."
 systemctl restart openclaw-docker 2>/dev/null || (cd /opt/openclaw && docker compose down && docker compose up -d)
 systemctl restart openclaw-bridge 2>/dev/null || true
-systemctl restart crabhq-org-runtime 2>/dev/null || true
+systemctl restart trooper-org-runtime 2>/dev/null || true
 systemctl restart caddy 2>/dev/null || true
 echo "Restart complete. Checking health..."
 sleep 3
@@ -2277,13 +2277,13 @@ else
   echo "Bridge: NOT READY (may need a few more seconds)"
 fi
 CRESTART
-chmod +x /usr/local/bin/crabhq-restart
+chmod +x /usr/local/bin/trooper-restart
 
-cat > /usr/local/bin/crabhq-status << 'CSTATUS'
+cat > /usr/local/bin/trooper-status << 'CSTATUS'
 #!/bin/bash
-echo "=== CrabsHQ Service Status ==="
+echo "=== Trooper Service Status ==="
 echo ""
-for svc in openclaw-docker openclaw-bridge crabhq-org-runtime caddy openclaw-vnc openclaw-poller; do
+for svc in openclaw-docker openclaw-bridge trooper-org-runtime caddy openclaw-vnc openclaw-poller; do
   STATUS=$(systemctl is-active "$svc" 2>/dev/null || echo "not-found")
   printf "  %-25s %s\n" "$svc" "$STATUS"
 done
@@ -2297,11 +2297,11 @@ echo ""
 echo "=== Disk Usage ==="
 df -h / | tail -1 | awk '{print "  Used: "$3" / "$2"  ("$5" full)  Available: "$4}'
 CSTATUS
-chmod +x /usr/local/bin/crabhq-status
+chmod +x /usr/local/bin/trooper-status
 
 # Desktop control API — Node.js HTTP server on port 4567
-mkdir -p /opt/crabhq-desktop-api
-cat > /opt/crabhq-desktop-api/server.mjs << 'JSEOF'
+mkdir -p /opt/trooper-desktop-api
+cat > /opt/trooper-desktop-api/server.mjs << 'JSEOF'
 import http from 'http';
 import net from 'net';
 import { exec } from 'child_process';
@@ -2358,7 +2358,7 @@ http.createServer(async (req, res) => {
  const url = new URL(req.url, `http://localhost`);
  try {
  if (req.method === 'POST' && url.pathname === '/desktop/start') {
- await run('/usr/local/bin/crabhq-desktop-start');
+ await run('/usr/local/bin/trooper-desktop-start');
  let readiness = await desktopReadiness();
  if (!readiness.active) {
  const deadline = Date.now() + 15000;
@@ -2369,7 +2369,7 @@ http.createServer(async (req, res) => {
  }
  res.end(JSON.stringify({ ok: true, ready: readiness.active, ...readiness }));
  } else if (req.method === 'POST' && url.pathname === '/desktop/stop') {
- await run('/usr/local/bin/crabhq-desktop-stop');
+ await run('/usr/local/bin/trooper-desktop-stop');
  res.end(JSON.stringify({ ok: true }));
  } else if (req.method === 'GET' && url.pathname === '/desktop/status') {
  const readiness = await desktopReadiness();
@@ -2396,17 +2396,17 @@ JSEOF
 echo "[setup] Desktop control API written"
 
 # Agent Daemon — Unix socket server for desktop exec (OpenClaw native integration)
-mkdir -p /opt/crabhq-agent-daemon
-curl -fsSL "https://raw.githubusercontent.com/absurdfounder/openclawbridge/main/agent-daemon.mjs" -o /opt/crabhq-agent-daemon/agent-daemon.mjs 2>/dev/null || true
-if [ -s /opt/crabhq-agent-daemon/agent-daemon.mjs ]; then
-  chmod +x /opt/crabhq-agent-daemon/agent-daemon.mjs
-  cat > /etc/systemd/system/crabhq-agent-daemon.service << 'AGENTDAEMON'
+mkdir -p /opt/trooper-agent-daemon
+curl -fsSL "https://raw.githubusercontent.com/absurdfounder/openclawbridge/main/agent-daemon.mjs" -o /opt/trooper-agent-daemon/agent-daemon.mjs 2>/dev/null || true
+if [ -s /opt/trooper-agent-daemon/agent-daemon.mjs ]; then
+  chmod +x /opt/trooper-agent-daemon/agent-daemon.mjs
+  cat > /etc/systemd/system/trooper-agent-daemon.service << 'AGENTDAEMON'
 [Unit]
-Description=CrabsHQ Agent Daemon (desktop exec)
+Description=Trooper Agent Daemon (desktop exec)
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/node /opt/crabhq-agent-daemon/agent-daemon.mjs
+ExecStart=/usr/bin/node /opt/trooper-agent-daemon/agent-daemon.mjs
 Environment=WORKSPACE_DIR=/opt/openclaw-data/workspace
 Environment=AGENT_DAEMON_SOCKET=/var/run/openclaw/agent-daemon.sock
 Environment=DISPLAY=:1
@@ -2416,20 +2416,20 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 AGENTDAEMON
-  systemctl enable crabhq-agent-daemon
+  systemctl enable trooper-agent-daemon
   echo "[setup] Agent Daemon installed"
 fi
 
 # Install Playwright for VPS browser server
 if [ "$FROM_SNAPSHOT" != "1" ]; then
-cd /opt/crabhq-desktop-api
+cd /opt/trooper-desktop-api
 npm init -y 2>/dev/null
 npm install playwright 2>/dev/null || true
 echo "[setup] Playwright installed"
 fi # end FROM_SNAPSHOT != 1 (Playwright)
 
 # Playwright browser server — launches Chromium on :1, exposes WS for Render backend
-cat > /opt/crabhq-desktop-api/playwright-server.mjs << 'PWEOF'
+cat > /opt/trooper-desktop-api/playwright-server.mjs << 'PWEOF'
 import { chromium } from 'playwright';
 import { writeFileSync } from 'fs';
 
@@ -2468,7 +2468,7 @@ echo "[setup] Playwright server script written"
 # Download wallpaper
 mkdir -p /usr/local/share
 wget -q 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=1280&h=800&fit=crop' \
- -O /usr/local/share/crabhq-wallpaper.jpg 2>/dev/null || true
+ -O /usr/local/share/trooper-wallpaper.jpg 2>/dev/null || true
 
 # (pcmanfm + lxqt + icon configs already pre-seeded above)
 
@@ -2491,19 +2491,19 @@ dlog "Waiting for sandbox build..."
 
 cd /opt/openclaw
 
-# ── [7b/9] CrabsHQ org runtime install ─────────────────────────────
-dlog "Preparing CrabsHQ org runtime..."
-mkdir -p /opt/crabhq-org-runtime /var/lib/crabhq-org-runtime
+# ── [7b/9] Trooper org runtime install ─────────────────────────────
+dlog "Preparing Trooper org runtime..."
+mkdir -p /opt/trooper-org-runtime /var/lib/trooper-org-runtime
 
-dlog "Installing CrabsHQ org runtime..."
-if [ "${CRABHQ_SNAPSHOT_BUILD:-0}" = "1" ]; then
-  echo "[setup] CRABHQ_SNAPSHOT_BUILD=1 - skipping per-org runtime install (boot.sh re-fetches at customer boot)"
-  mkdir -p /opt/crabhq-org-runtime/server/org-runtime
-  printf 'snapshot-build-placeholder\n' > /opt/crabhq-org-runtime/.snapshot-builder
-  cat > /opt/crabhq-org-runtime/server/package.json <<'PKG'
-{"name":"crabhq-org-runtime-snapshot-placeholder","version":"0.0.0","private":true}
+dlog "Installing Trooper org runtime..."
+if [ "${TROOPER_SNAPSHOT_BUILD:-0}" = "1" ]; then
+  echo "[setup] TROOPER_SNAPSHOT_BUILD=1 - skipping per-org runtime install (boot.sh re-fetches at customer boot)"
+  mkdir -p /opt/trooper-org-runtime/server/org-runtime
+  printf 'snapshot-build-placeholder\n' > /opt/trooper-org-runtime/.snapshot-builder
+  cat > /opt/trooper-org-runtime/server/package.json <<'PKG'
+{"name":"trooper-org-runtime-snapshot-placeholder","version":"0.0.0","private":true}
 PKG
-  cat > /opt/crabhq-org-runtime/server/org-runtime/index.js <<'RUNTIMEJS'
+  cat > /opt/trooper-org-runtime/server/org-runtime/index.js <<'RUNTIMEJS'
 const http = require('http');
 const port = Number(process.env.ORG_RUNTIME_PORT || process.env.PORT || 3101);
 http.createServer((req, res) => {
@@ -2516,7 +2516,7 @@ http.createServer((req, res) => {
   res.end(JSON.stringify({ error: 'snapshot-placeholder' }));
 }).listen(port, '127.0.0.1');
 RUNTIMEJS
-  cat > /opt/crabhq-org-runtime/server/index.js <<'SERVERJS'
+  cat > /opt/trooper-org-runtime/server/index.js <<'SERVERJS'
 const http = require('http');
 const port = Number(process.env.PORT || 3001);
 http.createServer((req, res) => {
@@ -2530,52 +2530,52 @@ http.createServer((req, res) => {
 }).listen(port, '127.0.0.1');
 SERVERJS
 else
-  if { [ -z "${CRABHQ_RUNTIME_TARBALL_URL:-}" ] || [ "${CRABHQ_RUNTIME_TARBALL_URL}" = "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; } && [ -s /tmp/crabhq-runtime-url ]; then
-    _recovered_runtime_url="$(tr -d '\r\n' < /tmp/crabhq-runtime-url)"
-    if [ -n "$_recovered_runtime_url" ] && [ "$_recovered_runtime_url" != "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; then
-      CRABHQ_RUNTIME_TARBALL_URL="$_recovered_runtime_url"
-      echo "[setup] Runtime bundle URL recovered from /tmp/crabhq-runtime-url"
+  if { [ -z "${TROOPER_RUNTIME_TARBALL_URL:-}" ] || [ "${TROOPER_RUNTIME_TARBALL_URL}" = "{{TROOPER_RUNTIME_TARBALL_URL}}" ]; } && [ -s /tmp/trooper-runtime-url ]; then
+    _recovered_runtime_url="$(tr -d '\r\n' < /tmp/trooper-runtime-url)"
+    if [ -n "$_recovered_runtime_url" ] && [ "$_recovered_runtime_url" != "{{TROOPER_RUNTIME_TARBALL_URL}}" ]; then
+      TROOPER_RUNTIME_TARBALL_URL="$_recovered_runtime_url"
+      echo "[setup] Runtime bundle URL recovered from /tmp/trooper-runtime-url"
     else
       echo "[setup] Runtime bundle marker was present but unusable"
     fi
   fi
 
-  if [ -n "${CRABHQ_RUNTIME_TARBALL_URL:-}" ] && [ "${CRABHQ_RUNTIME_TARBALL_URL}" != "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; then
-    dlog "Downloading CrabsHQ org runtime bundle..."
-    echo "[setup] Runtime bundle URL: ${CRABHQ_RUNTIME_TARBALL_URL}"
-    curl -fsSL "$CRABHQ_RUNTIME_TARBALL_URL" -o /tmp/crabhq-org-runtime.tar.gz || { echo "ERROR: failed to download runtime bundle from ${CRABHQ_RUNTIME_TARBALL_URL}" >&2; exit 1; }
-    tar -xzf /tmp/crabhq-org-runtime.tar.gz -C /opt/crabhq-org-runtime --strip-components=1 || { echo "ERROR: failed to extract runtime bundle" >&2; exit 1; }
-    dlog "CrabsHQ org runtime installed from bundle"
-  elif git clone --depth 1 https://github.com/absurdfounder/Crabs-HQ.git /tmp/crabhq-clone 2>/dev/null; then
-    cp -r /tmp/crabhq-clone/server /opt/crabhq-org-runtime/
-    rm -rf /tmp/crabhq-clone
-    dlog "CrabsHQ org runtime cloned from GitHub"
+  if [ -n "${TROOPER_RUNTIME_TARBALL_URL:-}" ] && [ "${TROOPER_RUNTIME_TARBALL_URL}" != "{{TROOPER_RUNTIME_TARBALL_URL}}" ]; then
+    dlog "Downloading Trooper org runtime bundle..."
+    echo "[setup] Runtime bundle URL: ${TROOPER_RUNTIME_TARBALL_URL}"
+    curl -fsSL "$TROOPER_RUNTIME_TARBALL_URL" -o /tmp/trooper-org-runtime.tar.gz || { echo "ERROR: failed to download runtime bundle from ${TROOPER_RUNTIME_TARBALL_URL}" >&2; exit 1; }
+    tar -xzf /tmp/trooper-org-runtime.tar.gz -C /opt/trooper-org-runtime --strip-components=1 || { echo "ERROR: failed to extract runtime bundle" >&2; exit 1; }
+    dlog "Trooper org runtime installed from bundle"
+  elif git clone --depth 1 https://github.com/absurdfounder/Trooper.git /tmp/trooper-clone 2>/dev/null; then
+    cp -r /tmp/trooper-clone/server /opt/trooper-org-runtime/
+    rm -rf /tmp/trooper-clone
+    dlog "Trooper org runtime cloned from GitHub"
   else
-    echo "ERROR: failed to install CrabsHQ org runtime from bundle or git" >&2
+    echo "ERROR: failed to install Trooper org runtime from bundle or git" >&2
     exit 1
   fi
 fi
 
-if [ ! -f /opt/crabhq-org-runtime/server/package.json ] || [ ! -f /opt/crabhq-org-runtime/server/org-runtime/index.js ]; then
+if [ ! -f /opt/trooper-org-runtime/server/package.json ] || [ ! -f /opt/trooper-org-runtime/server/org-runtime/index.js ]; then
   echo "ERROR: runtime files missing after install" >&2
   exit 1
 fi
 
-dlog "Installing CrabsHQ org runtime dependencies..."
-cd /opt/crabhq-org-runtime/server
-npm install --omit=dev >/tmp/crabhq-org-runtime-npm.log 2>&1 || (tail -n 50 /tmp/crabhq-org-runtime-npm.log; exit 1)
+dlog "Installing Trooper org runtime dependencies..."
+cd /opt/trooper-org-runtime/server
+npm install --omit=dev >/tmp/trooper-org-runtime-npm.log 2>&1 || (tail -n 50 /tmp/trooper-org-runtime-npm.log; exit 1)
 cd /opt/openclaw
 
-cat > /etc/default/crabhq-org-runtime << CRENV
-ORG_RUNTIME_PORT=${CRABHQ_RUNTIME_PORT}
+cat > /etc/default/trooper-org-runtime << CRENV
+ORG_RUNTIME_PORT=${TROOPER_RUNTIME_PORT}
 ORG_RUNTIME_ORG_ID=${ORG_ID}
 RUNTIME_AUTH_SECRET=${RUNTIME_AUTH_SECRET}
 BRIDGE_AUTH_TOKEN=${BRIDGE_AUTH_TOKEN}
-LOCAL_RUNTIME_DATA_DIR=${CRABHQ_RUNTIME_DATA_DIR}
+LOCAL_RUNTIME_DATA_DIR=${TROOPER_RUNTIME_DATA_DIR}
 PREFER_LOCAL_RUNTIME_MEMORY=1
 BRIDGE_URL=http://127.0.0.1:${BRIDGE_PORT}
 PLATFORM_API_URL=${PLATFORM_API_URL}
-FRONTEND_URL=https://crabhq.netlify.app
+FRONTEND_URL=https://app.trooper.so
 CRENV
 
 # ── [8/9] Systemd services ──────────────────────────────────────────
@@ -2621,9 +2621,9 @@ Environment=BRIDGE_AUTH_TOKEN=${BRIDGE_AUTH_TOKEN}
 Environment=OPENCLAW_URL=http://127.0.0.1:${GATEWAY_PORT}
 Environment=OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
 Environment=OPENCLAW_HOOK_TOKEN=oc-hook-${HOOK_TOKEN}
-Environment=MISSION_CONTROL_URL=https://crabs-hq-production.up.railway.app
+Environment=MISSION_CONTROL_URL=https://trooper-production.up.railway.app
 Environment=ORG_ID=${ORG_ID}
-Environment=CRABHQ_SNAPSHOT_BUILD=${CRABHQ_SNAPSHOT_BUILD:-0}
+Environment=TROOPER_SNAPSHOT_BUILD=${TROOPER_SNAPSHOT_BUILD:-0}
 Environment=NODE_ENV=production
 Environment=BROWSERBASE_API_KEY=${BROWSERBASE_API_KEY}
 Environment=BROWSERBASE_PROJECT_ID=${BROWSERBASE_PROJECT_ID}
@@ -2632,31 +2632,31 @@ Environment=BROWSERBASE_PROJECT_ID=${BROWSERBASE_PROJECT_ID}
 WantedBy=multi-user.target
 BSVC
 
-# CrabsHQ org runtime service
-cat > /etc/systemd/system/crabhq-org-runtime.service << CRUNTIME
+# Trooper org runtime service
+cat > /etc/systemd/system/trooper-org-runtime.service << CRUNTIME
 [Unit]
-Description=CrabsHQ Org Runtime
+Description=Trooper Org Runtime
 After=network-online.target openclaw-bridge.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/crabhq-org-runtime/server
-EnvironmentFile=/etc/default/crabhq-org-runtime
-ExecStart=/usr/bin/node /opt/crabhq-org-runtime/server/org-runtime/index.js
+WorkingDirectory=/opt/trooper-org-runtime/server
+EnvironmentFile=/etc/default/trooper-org-runtime
+ExecStart=/usr/bin/node /opt/trooper-org-runtime/server/org-runtime/index.js
 Restart=always
 RestartSec=5
 User=root
 Group=root
-StandardOutput=append:/var/log/crabhq-org-runtime.log
-StandardError=append:/var/log/crabhq-org-runtime.log
+StandardOutput=append:/var/log/trooper-org-runtime.log
+StandardError=append:/var/log/trooper-org-runtime.log
 
 [Install]
 WantedBy=multi-user.target
 CRUNTIME
 
-# CrabsHQ VPS server (local API for tasks, agents — proxies to Render for Firebase/auth)
-cat > /etc/default/crabhq-server << CSENV
+# Trooper VPS server (local API for tasks, agents — proxies to Render for Firebase/auth)
+cat > /etc/default/trooper-server << CSENV
 PORT=3001
 NODE_ENV=production
 ORG_ID=${ORG_ID}
@@ -2673,27 +2673,27 @@ OPENCLAW_GATEWAY_URL=http://127.0.0.1:${GATEWAY_PORT}
 OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
 OPENCLAW_HOOK_TOKEN=oc-hook-${HOOK_TOKEN}
 PLATFORM_API_URL=${PLATFORM_API_URL}
-FRONTEND_URL=https://crabhq.netlify.app
+FRONTEND_URL=https://app.trooper.so
 COMPOSIO_API_KEY=${COMPOSIO_API_KEY}
 CSENV
 
-cat > /etc/systemd/system/crabhq-server.service << CSSVC
+cat > /etc/systemd/system/trooper-server.service << CSSVC
 [Unit]
-Description=CrabsHQ Server (local API + task runner)
+Description=Trooper Server (local API + task runner)
 After=network-online.target openclaw-bridge.service openclaw-docker.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/crabhq-org-runtime/server
-EnvironmentFile=/etc/default/crabhq-server
-ExecStart=/usr/bin/node /opt/crabhq-org-runtime/server/index.js
+WorkingDirectory=/opt/trooper-org-runtime/server
+EnvironmentFile=/etc/default/trooper-server
+ExecStart=/usr/bin/node /opt/trooper-org-runtime/server/index.js
 Restart=always
 RestartSec=5
 User=root
 Group=root
-StandardOutput=append:/var/log/crabhq-server.log
-StandardError=append:/var/log/crabhq-server.log
+StandardOutput=append:/var/log/trooper-server.log
+StandardError=append:/var/log/trooper-server.log
 
 [Install]
 WantedBy=multi-user.target
@@ -2784,7 +2784,7 @@ console.log('Gateway identity: ' + gwDeviceId.substring(0, 12) + '...');
 const paired = {};
 paired[deviceId] = {
  deviceId, publicKey: pubB64,
- displayName: 'CrabsHQ Bridge', platform: 'linux',
+ displayName: 'Trooper Bridge', platform: 'linux',
  role: 'operator', roles: ['operator'], scopes: ['operator.admin'],
  clientId: 'gateway-client', clientMode: 'backend',
  approvedAt: Date.now(), approved: true, ts: Date.now()
@@ -2822,17 +2822,17 @@ chmod 600 /opt/openclaw-bridge/device-identity.json 2>/dev/null || true
 
 # Desktop Control API service (port 4567)
 # Desktop environment service (display :1 — LXQt + x11vnc + websockify:6081)
-cat > /etc/systemd/system/crabhq-desktop.service << 'DESKSVC'
+cat > /etc/systemd/system/trooper-desktop.service << 'DESKSVC'
 [Unit]
-Description=CrabsHQ Desktop Environment (display :1)
+Description=Trooper Desktop Environment (display :1)
 After=network.target
 
 [Service]
 Type=oneshot
 Environment=DISPLAY=:1
 Environment=XDG_RUNTIME_DIR=/tmp/runtime-root
-ExecStart=/usr/local/bin/crabhq-desktop-start
-ExecStop=/usr/local/bin/crabhq-desktop-stop
+ExecStart=/usr/local/bin/trooper-desktop-start
+ExecStop=/usr/local/bin/trooper-desktop-stop
 RemainAfterExit=yes
 
 [Install]
@@ -2840,13 +2840,13 @@ WantedBy=multi-user.target
 DESKSVC
 
 # Desktop Control API service (port 4567)
-cat > /etc/systemd/system/crabhq-desktop-api.service << DAPI
+cat > /etc/systemd/system/trooper-desktop-api.service << DAPI
 [Unit]
-Description=CrabsHQ Desktop Control API
+Description=Trooper Desktop Control API
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/node /opt/crabhq-desktop-api/server.mjs
+ExecStart=/usr/bin/node /opt/trooper-desktop-api/server.mjs
 Environment=GATEWAY_URL=https://${HTTPS_DOMAIN}
 Restart=always
 RestartSec=3
@@ -2858,15 +2858,15 @@ WantedBy=multi-user.target
 DAPI
 
 # Playwright browser server service (port 3333)
-cat > /etc/systemd/system/crabhq-playwright.service << 'PWSVC'
+cat > /etc/systemd/system/trooper-playwright.service << 'PWSVC'
 [Unit]
-Description=CrabHQ Playwright Browser Server
-After=network.target crabhq-desktop-api.service
+Description=Trooper Playwright Browser Server
+After=network.target trooper-desktop-api.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/node /opt/crabhq-desktop-api/playwright-server.mjs
-WorkingDirectory=/opt/crabhq-desktop-api
+ExecStart=/usr/bin/node /opt/trooper-desktop-api/playwright-server.mjs
+WorkingDirectory=/opt/trooper-desktop-api
 Environment=DISPLAY=:1
 Environment=XAUTHORITY=/root/.Xauthority
 Restart=always
@@ -2876,13 +2876,13 @@ RestartSec=5
 WantedBy=multi-user.target
 PWSVC
 
-if [ ! -f /opt/crabhq-org-runtime/server/org-runtime/index.js ]; then
-  echo "ERROR: refusing to install crabhq-org-runtime systemd service without runtime files" >&2
+if [ ! -f /opt/trooper-org-runtime/server/org-runtime/index.js ]; then
+  echo "ERROR: refusing to install trooper-org-runtime systemd service without runtime files" >&2
   exit 1
 fi
 
 run_cmd systemctl daemon-reload
-run_cmd systemctl enable openclaw-docker openclaw-bridge crabhq-org-runtime crabhq-server openclaw-poller openclaw-vnc crabhq-desktop crabhq-desktop-api crabhq-playwright
+run_cmd systemctl enable openclaw-docker openclaw-bridge trooper-org-runtime trooper-server openclaw-poller openclaw-vnc trooper-desktop trooper-desktop-api trooper-playwright
 if [ -f /etc/systemd/system/openclaw-updater.timer ]; then
  run_cmd systemctl enable openclaw-updater.timer
 fi
@@ -2925,13 +2925,13 @@ if [ "$_gw_alive" -eq 0 ]; then
 fi
 
 # Start org runtime, poller, VNC, desktop API, playwright (bridge already running)
-run_cmd systemctl start crabhq-org-runtime
-run_cmd systemctl start crabhq-server
+run_cmd systemctl start trooper-org-runtime
+run_cmd systemctl start trooper-server
 run_cmd systemctl start openclaw-poller
 run_cmd systemctl start openclaw-vnc
-run_cmd systemctl start crabhq-desktop
-run_cmd systemctl start crabhq-desktop-api
-run_cmd systemctl start crabhq-playwright
+run_cmd systemctl start trooper-desktop
+run_cmd systemctl start trooper-desktop-api
+run_cmd systemctl start trooper-playwright
 run_cmd systemctl restart caddy 2>/dev/null || true
 
 # ── Security hardening ──
@@ -3022,32 +3022,32 @@ else
  journalctl -u caddy --no-pager -n 10
 fi
 
-if systemctl is-active --quiet crabhq-org-runtime; then
+if systemctl is-active --quiet trooper-org-runtime; then
  echo "Org Runtime: RUNNING"
 else
  echo "Org Runtime: NOT RUNNING"
- journalctl -u crabhq-org-runtime --no-pager -n 20 || true
+ journalctl -u trooper-org-runtime --no-pager -n 20 || true
 fi
 
 _org_runtime_ready=0
 for i in $(seq 1 90); do
- if curl -sf http://127.0.0.1:${CRABHQ_RUNTIME_PORT}/health >/dev/null 2>&1; then
+ if curl -sf http://127.0.0.1:${TROOPER_RUNTIME_PORT}/health >/dev/null 2>&1; then
  echo "Org Runtime Local Health: OK (ready after $((i * 2))s)"
  _org_runtime_ready=1
  break
  fi
- if ! systemctl is-active --quiet crabhq-org-runtime; then
+ if ! systemctl is-active --quiet trooper-org-runtime; then
  echo "Org Runtime: NOT RUNNING DURING HEALTH WAIT"
- journalctl -u crabhq-org-runtime --no-pager -n 60 || true
- echo "FATAL: crabhq-org-runtime service exited before local health became ready"
+ journalctl -u trooper-org-runtime --no-pager -n 60 || true
+ echo "FATAL: trooper-org-runtime service exited before local health became ready"
  exit 1
  fi
  sleep 2
 done
 if [ "$_org_runtime_ready" -eq 0 ]; then
  echo "Org Runtime Local Health: FAILED"
- journalctl -u crabhq-org-runtime --no-pager -n 60 || true
- echo "FATAL: crabhq-org-runtime local health did not become ready after 180s"
+ journalctl -u trooper-org-runtime --no-pager -n 60 || true
+ echo "FATAL: trooper-org-runtime local health did not become ready after 180s"
  exit 1
 fi
 
@@ -3075,7 +3075,7 @@ unset CF_API_TOKEN 2>/dev/null || true
 echo "Sensitive data scrubbed"
 
 # ── Deploy-complete callback ──
-# Notify CrabsHQ central API that setup is finished so it can run post-install
+# Notify Trooper central API that setup is finished so it can run post-install
 # finalization (DNS, workspace push, API keys) without polling for 30 minutes.
 if [ -n "${API_URL:-}" ] && [ -n "${ORG_ID:-}" ] && [ -n "${GATEWAY_TOKEN:-}" ]; then
   _my_ip=$(curl -sf --max-time 5 ifconfig.me 2>/dev/null || echo "")
@@ -3097,40 +3097,40 @@ else
   echo "Skipping deploy-complete callback (API_URL, ORG_ID, or GATEWAY_TOKEN not set)"
 fi
 
-if [ "${CRABHQ_SNAPSHOT_BUILD:-0}" = "1" ]; then
+if [ "${TROOPER_SNAPSHOT_BUILD:-0}" = "1" ]; then
   echo "[setup] Preparing snapshot image for reusable first boot..."
-  cat > /usr/local/sbin/crabhq-snapshot-firstboot-guard.sh <<'SNAPGUARD'
+  cat > /usr/local/sbin/trooper-snapshot-firstboot-guard.sh <<'SNAPGUARD'
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ ! -f /opt/crabhq-org-runtime/.snapshot-builder ]; then
-  systemctl disable crabhq-snapshot-firstboot-guard.service >/dev/null 2>&1 || true
+if [ ! -f /opt/trooper-org-runtime/.snapshot-builder ]; then
+  systemctl disable trooper-snapshot-firstboot-guard.service >/dev/null 2>&1 || true
   exit 0
 fi
 
 echo "[snapshot-firstboot] Clearing baked setup markers before customer cloud-init"
 rm -f /tmp/openclaw-setup-complete /opt/openclaw-bridge/.setup-complete 2>/dev/null || true
-systemctl stop openclaw-bridge crabhq-org-runtime crabhq-server openclaw-poller openclaw-vnc crabhq-desktop crabhq-desktop-api crabhq-playwright 2>/dev/null || true
-systemctl disable crabhq-snapshot-firstboot-guard.service >/dev/null 2>&1 || true
+systemctl stop openclaw-bridge trooper-org-runtime trooper-server openclaw-poller openclaw-vnc trooper-desktop trooper-desktop-api trooper-playwright 2>/dev/null || true
+systemctl disable trooper-snapshot-firstboot-guard.service >/dev/null 2>&1 || true
 SNAPGUARD
-  chmod +x /usr/local/sbin/crabhq-snapshot-firstboot-guard.sh
-  cat > /etc/systemd/system/crabhq-snapshot-firstboot-guard.service <<'SNAPGUARDSVC'
+  chmod +x /usr/local/sbin/trooper-snapshot-firstboot-guard.sh
+  cat > /etc/systemd/system/trooper-snapshot-firstboot-guard.service <<'SNAPGUARDSVC'
 [Unit]
-Description=CrabsHQ snapshot first-boot guard
+Description=Trooper snapshot first-boot guard
 DefaultDependencies=no
 After=local-fs.target
-Before=network-pre.target cloud-init-local.service cloud-init.service openclaw-bridge.service crabhq-org-runtime.service crabhq-server.service openclaw-poller.service
-ConditionPathExists=/opt/crabhq-org-runtime/.snapshot-builder
+Before=network-pre.target cloud-init-local.service cloud-init.service openclaw-bridge.service trooper-org-runtime.service trooper-server.service openclaw-poller.service
+ConditionPathExists=/opt/trooper-org-runtime/.snapshot-builder
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/crabhq-snapshot-firstboot-guard.sh
+ExecStart=/usr/local/sbin/trooper-snapshot-firstboot-guard.sh
 
 [Install]
 WantedBy=multi-user.target
 SNAPGUARDSVC
-  systemctl enable crabhq-snapshot-firstboot-guard.service >/dev/null 2>&1 || true
-  rm -f /tmp/deploy.log /tmp/deploy-raw.log /tmp/crabhq-setup-failed 2>/dev/null || true
+  systemctl enable trooper-snapshot-firstboot-guard.service >/dev/null 2>&1 || true
+  rm -f /tmp/deploy.log /tmp/deploy-raw.log /tmp/trooper-setup-failed 2>/dev/null || true
   rm -f /var/log/cloud-init.log /var/log/cloud-init-output.log 2>/dev/null || true
   rm -f /var/lib/cloud/instance/user-data.txt 2>/dev/null || true
   rm -f /var/lib/cloud/instance/scripts/runcmd 2>/dev/null || true

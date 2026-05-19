@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * CrabsHQ Agent Daemon — runs inside LXQt/desktop container
+ * Trooper Agent Daemon — runs inside LXQt/desktop container
  * Listens on Unix socket for exec/read/write/xdotool from OpenClaw
  * Enables native exec, direct filesystem access, GUI automation
  */

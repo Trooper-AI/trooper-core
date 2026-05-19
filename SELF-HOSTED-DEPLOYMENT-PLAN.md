@@ -71,8 +71,8 @@ CORS is enabled broadly. When the frontend connects directly, we need explicit o
 
 ```js
 const ALLOWED_ORIGINS = [
-  /\.crabhq\.com$/,           // org-xxx.crabhq.com (same-origin, but just in case)
-  /\.netlify\.app$/,          // crabhq.netlify.app (frontend)
+  /\.trooper\.com$/,           // org-xxx.trooper.so (same-origin, but just in case)
+  /\.netlify\.app$/,          // app.trooper.so (frontend)
   /^https?:\/\/localhost/,    // dev
   /^https?:\/\/127\.0\.0\.1/, // dev
 ];
@@ -170,7 +170,7 @@ The existing `/health` endpoint already returns status. Enhance it:
 At the end of `setup-openclaw-full.sh`, after all services are confirmed running:
 
 ```bash
-# Notify CrabsHQ central API that setup is complete
+# Notify Trooper central API that setup is complete
 if [ -n "$API_URL" ] && [ -n "$ORG_ID" ]; then
   for i in 1 2 3 4 5; do
     STATUS=$(curl -sf -X POST "${API_URL}/api/deploy-complete/${ORG_ID}" \
@@ -197,7 +197,7 @@ Add `--self-hosted` flag or `SELF_HOSTED=1` env var:
 
 ```bash
 if [ "${SELF_HOSTED:-0}" = "1" ]; then
-  # Skip CrabsHQ-specific steps:
+  # Skip Trooper-specific steps:
   # - No CF DNS setup (user manages their own DNS)
   # - No VNC/noVNC setup (optional, saves resources)
   # - No automatic backup config (user manages)
@@ -248,7 +248,7 @@ WantedBy=multi-user.target
 
 ```bash
 #!/bin/bash
-# /usr/local/bin/crabhq-update
+# /usr/local/bin/trooper-update
 set -e
 cd /opt/openclaw
 echo "Pulling latest images..."
@@ -296,7 +296,7 @@ The WebSocket server (`lib/ws-server.mjs`) already:
 - Handles chat messages, agent responses, typing indicators
 - Streams agent execution in real-time
 
-The frontend just needs to point its WebSocket connection to `wss://org-xxx.crabhq.com/ws` instead of the Render WebSocket.
+The frontend just needs to point its WebSocket connection to `wss://org-xxx.trooper.so/ws` instead of the Render WebSocket.
 
 ---
 
@@ -309,7 +309,7 @@ The bridge runs from source (Node.js files copied into Docker image).
 Ship as a **private Docker image** on GitHub Container Registry:
 
 ```
-ghcr.io/absurdfounder/crabhq-gateway:latest    ← OpenClaw + Bridge combined
+ghcr.io/absurdfounder/trooper-gateway:latest    ← OpenClaw + Bridge combined
 ```
 
 This is already how it works. The image contains:
@@ -349,8 +349,8 @@ RUN bun build --compile --minify ./index.mjs --outfile /app/bridge
 - [ ] Test direct frontend → bridge for all data operations
 
 ### Phase 3: Self-hosted mode
-- [ ] Add self-hosted mode to setup script (skip CrabsHQ-specific steps)
+- [ ] Add self-hosted mode to setup script (skip Trooper-specific steps)
 - [ ] Switch from template placeholders to env vars (backward compatible)
-- [ ] Add `crabhq-update` script
-- [ ] Add `crabhq-uninstall` script
+- [ ] Add `trooper-update` script
+- [ ] Add `trooper-uninstall` script
 - [ ] Test full self-hosted flow: user runs script → frontend connects → everything works

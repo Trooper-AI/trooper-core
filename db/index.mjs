@@ -6,7 +6,7 @@ import { existsSync, mkdirSync } from 'fs';
 // DB path: prefer /opt/openclaw-data (Hetzner volume, auto-backed-up),
 // fall back to ./data for local dev.
 export const DB_PATH = process.env.BRIDGE_DB_PATH ||
-  (existsSync('/opt/openclaw-data') ? '/opt/openclaw-data/crabhq.db' : './data/crabhq.db');
+  (existsSync('/opt/openclaw-data') ? '/opt/openclaw-data/trooper.db' : './data/trooper.db');
 
 // Ensure parent directory exists
 const dbDir = DB_PATH.substring(0, DB_PATH.lastIndexOf('/'));

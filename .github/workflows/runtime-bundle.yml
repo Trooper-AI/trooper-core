@@ -3,7 +3,7 @@ name: Publish Org Runtime Bundle
 on:
   workflow_dispatch:
   repository_dispatch:
-    types: [crabhq-server-updated]
+    types: [trooper-server-updated]
   push:
     branches: [main]
     paths:
@@ -16,18 +16,18 @@ jobs:
     permissions:
       contents: write
     env:
-      CRABSHQ_REPO: absurdfounder/Crabs-HQ
-      CRABSHQ_REF: main
+      Trooper_REPO: absurdfounder/Trooper
+      Trooper_REF: main
       RELEASE_TAG: org-runtime-latest
-      ASSET_NAME: crabhq-org-runtime.tar.gz
+      ASSET_NAME: trooper-org-runtime.tar.gz
     steps:
       - name: Checkout openclawbridge
         uses: actions/checkout@v4
 
-      - name: Download Crabs-HQ server source
+      - name: Download Trooper server source
         env:
-          RAW_CRABSHQ_READ_TOKEN: ${{ secrets.CRABSHQ_READ_TOKEN }}
-          RAW_CRABSHQ_DISPATCH_TOKEN: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+          RAW_Trooper_READ_TOKEN: ${{ secrets.Trooper_READ_TOKEN }}
+          RAW_Trooper_DISPATCH_TOKEN: ${{ secrets.Trooper_DISPATCH_TOKEN }}
         run: |
           try_token() {
             local name="$1"
@@ -42,39 +42,39 @@ jobs:
               -H "Authorization: Bearer $token" \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/${CRABSHQ_REPO}" >/dev/null; then
+              "https://api.github.com/repos/${Trooper_REPO}" >/dev/null; then
               GH_TOKEN="$token"
               TOKEN_SOURCE="$name"
               return 0
             fi
-            echo "::warning::${name} cannot read ${CRABSHQ_REPO}; trying next token if available"
+            echo "::warning::${name} cannot read ${Trooper_REPO}; trying next token if available"
             return 1
           }
 
           GH_TOKEN=''
           TOKEN_SOURCE=''
-          if ! try_token "CRABSHQ_READ_TOKEN" "${RAW_CRABSHQ_READ_TOKEN:-}" && \
-             ! try_token "CRABSHQ_DISPATCH_TOKEN" "${RAW_CRABSHQ_DISPATCH_TOKEN:-}"; then
-            echo "::error::No configured Crabs-HQ token can read ${CRABSHQ_REPO}. Give CRABSHQ_DISPATCH_TOKEN or CRABSHQ_READ_TOKEN Contents: Read access to the private repo."
+          if ! try_token "Trooper_READ_TOKEN" "${RAW_Trooper_READ_TOKEN:-}" && \
+             ! try_token "Trooper_DISPATCH_TOKEN" "${RAW_Trooper_DISPATCH_TOKEN:-}"; then
+            echo "::error::No configured Trooper token can read ${Trooper_REPO}. Give Trooper_DISPATCH_TOKEN or Trooper_READ_TOKEN Contents: Read access to the private repo."
             exit 1
           fi
 
-          mkdir -p "${GITHUB_WORKSPACE}/Crabs-HQ"
+          mkdir -p "${GITHUB_WORKSPACE}/Trooper"
           curl -fsSL \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            -o "${RUNNER_TEMP}/crabhq.tar.gz" \
-            "https://api.github.com/repos/${CRABSHQ_REPO}/tarball/${CRABSHQ_REF}"
-          tar -xzf "${RUNNER_TEMP}/crabhq.tar.gz" -C "${GITHUB_WORKSPACE}/Crabs-HQ" --strip-components=1
-          test -f "${GITHUB_WORKSPACE}/Crabs-HQ/server/package.json"
-          echo "Downloaded ${CRABSHQ_REPO}@${CRABSHQ_REF} using ${TOKEN_SOURCE}"
+            -o "${RUNNER_TEMP}/trooper.tar.gz" \
+            "https://api.github.com/repos/${Trooper_REPO}/tarball/${Trooper_REF}"
+          tar -xzf "${RUNNER_TEMP}/trooper.tar.gz" -C "${GITHUB_WORKSPACE}/Trooper" --strip-components=1
+          test -f "${GITHUB_WORKSPACE}/Trooper/server/package.json"
+          echo "Downloaded ${Trooper_REPO}@${Trooper_REF} using ${TOKEN_SOURCE}"
 
       - name: Build runtime tarball
         run: |
           chmod +x scripts/publish-org-runtime.sh
           ./scripts/publish-org-runtime.sh build \
-            "${GITHUB_WORKSPACE}/Crabs-HQ/server" \
+            "${GITHUB_WORKSPACE}/Trooper/server" \
             "${RUNNER_TEMP}/${ASSET_NAME}"
 
       - name: Publish release asset
@@ -84,6 +84,6 @@ jobs:
           gh release view "${RELEASE_TAG}" >/dev/null 2>&1 || \
             gh release create "${RELEASE_TAG}" \
               --title "${RELEASE_TAG}" \
-              --notes "Public CrabsHQ org runtime bundle for fresh provisioning."
+              --notes "Public Trooper org runtime bundle for fresh provisioning."
 
           gh release upload "${RELEASE_TAG}" "${RUNNER_TEMP}/${ASSET_NAME}" --clobber

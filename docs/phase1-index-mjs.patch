@@ -32,7 +32,7 @@ diff --git a/index.mjs b/index.mjs
 +const BRIDGE_BOOTED_AT = new Date().toISOString();
  const bridgeWS = new BridgeWSServer({ server, path: '/ws', bridgeAuthToken: BRIDGE_AUTH_TOKEN });
  initFirebaseAuth();
- const MISSION_CONTROL_URL = process.env.MISSION_CONTROL_URL || process.env.CRABHQ_CALLBACK_URL || '';
+ const MISSION_CONTROL_URL = process.env.MISSION_CONTROL_URL || process.env.TROOPER_CALLBACK_URL || '';
 @@ -4612,6 +4615,9 @@
   mode: gatewayHealthy ? 'websocket' : 'poller-fallback',
   pending: pendingRequests.size, skills: skillRegistry.size,
@@ -47,7 +47,7 @@ diff --git a/index.mjs b/index.mjs
  server.listen(PORT, '0.0.0.0', () => {
   console.log(`OpenClaw Bridge v2.1 on :${PORT} (HTTP + WS) | DirectBridge: enabled | OpenClaw: ${OPENCLAW_GATEWAY_TOKEN ? 'native' : 'poller'} | Browser: built-in tool`);
   captureLog('info', `Bridge started on port ${PORT}`);
-+ // Phase 1 (W7): report version + presence to Crabs-HQ /api/fleet/heartbeat.
++ // Phase 1 (W7): report version + presence to Trooper /api/fleet/heartbeat.
 + // No-op when MISSION_CONTROL_URL or ORG_ID is unset (e.g. dev / pre-provision).
 + startFleetHeartbeat({
 +   missionControlUrl: MISSION_CONTROL_URL,

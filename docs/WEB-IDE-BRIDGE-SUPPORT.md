@@ -2,7 +2,7 @@
 
 ## Context
 
-CrabsHQ is adding a lightweight web IDE (Monaco Editor) in the artifact panel to display worktree files, enable editing, and show diffs. The bridge needs to support this with enhanced file and workspace APIs.
+Trooper is adding a lightweight web IDE (Monaco Editor) in the artifact panel to display worktree files, enable editing, and show diffs. The bridge needs to support this with enhanced file and workspace APIs.
 
 ## Current File Endpoints
 

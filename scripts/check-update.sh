@@ -59,7 +59,7 @@ if [ -n "$TARGET_BRIDGE" ] && [ -n "$LOCAL_BRIDGE" ]; then
   esac
 fi
 # Gateway image comparison is best-effort; the docker .Id is sha256:... and
-# target is a tag like 'ghcr.io/.../crabhq-gateway:latest'. Just check whether
+# target is a tag like 'ghcr.io/.../trooper-gateway:latest'. Just check whether
 # docker can pull a newer version; this is cheap (no-op when up-to-date).
 if [ -n "$TARGET_GATEWAY" ]; then
   PULL_OUT=$(docker pull "$TARGET_GATEWAY" 2>&1 || true)

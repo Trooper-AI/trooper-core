@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Update the CrabsHQ org runtime on a VPS to the latest release.
-# Downloads the latest bundle from the Crabs-HQ GitHub release,
+# Update the Trooper org runtime on a VPS to the latest release.
+# Downloads the latest bundle from the Trooper GitHub release,
 # extracts it, installs dependencies, and restarts services.
 #
 # Usage: sudo ./scripts/update-org-runtime.sh
 
-RELEASE_URL="${CRABHQ_RUNTIME_TARBALL_URL:-https://github.com/absurdfounder/Crabs-HQ/releases/download/org-runtime-latest/crabhq-org-runtime.tar.gz}"
-INSTALL_DIR="/opt/crabhq-org-runtime"
-TMP_TARBALL="/tmp/crabhq-org-runtime-update.tar.gz"
+RELEASE_URL="${TROOPER_RUNTIME_TARBALL_URL:-https://github.com/absurdfounder/Trooper/releases/download/org-runtime-latest/trooper-org-runtime.tar.gz}"
+INSTALL_DIR="/opt/trooper-org-runtime"
+TMP_TARBALL="/tmp/trooper-org-runtime-update.tar.gz"
 
 echo "[update-org-runtime] Downloading latest runtime bundle..."
 curl -fsSL "$RELEASE_URL" -o "$TMP_TARBALL" || {
@@ -29,7 +29,7 @@ cd "$INSTALL_DIR/server"
 npm install --omit=dev 2>&1 | tail -5
 
 echo "[update-org-runtime] Restarting services..."
-systemctl restart crabhq-server 2>/dev/null && echo "  restarted crabhq-server" || echo "  crabhq-server not found (skipped)"
-systemctl restart crabhq-org-runtime 2>/dev/null && echo "  restarted crabhq-org-runtime" || echo "  crabhq-org-runtime not found (skipped)"
+systemctl restart trooper-server 2>/dev/null && echo "  restarted trooper-server" || echo "  trooper-server not found (skipped)"
+systemctl restart trooper-org-runtime 2>/dev/null && echo "  restarted trooper-org-runtime" || echo "  trooper-org-runtime not found (skipped)"
 
 echo "[update-org-runtime] Done. Runtime updated to latest."

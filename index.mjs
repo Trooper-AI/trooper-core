@@ -119,7 +119,7 @@ function resolvePairedDisplayName(entry = {}, deviceId = '') {
  );
  if (candidate) return candidate;
 
- if (deviceIdentity?.deviceId && String(deviceId) === String(deviceIdentity.deviceId)) return 'CrabsHQ Bridge';
+ if (deviceIdentity?.deviceId && String(deviceId) === String(deviceIdentity.deviceId)) return 'Trooper Bridge';
  const platform = String(entry.platform || metadata.platform || nested.platform || '').toLowerCase();
  if (platform.includes('mac')) return 'Mac Node';
  if (platform.includes('linux')) return 'Linux Node';
@@ -307,9 +307,9 @@ function getSslipDomain() {
 function getVNCLiveViewUrl() {
  const orgId = process.env.ORG_ID || '';
  if (!orgId) return null;
- // Prefer crabhq.com (CF-proxied, reliable SSL) over sslip.io (LE rate limits)
+ // Prefer trooper.so (CF-proxied, reliable SSL) over sslip.io (LE rate limits)
  const orgShort = orgId.toLowerCase().substring(0, 12);
- const domain = `org-${orgShort}.crabhq.com`;
+ const domain = `org-${orgShort}.trooper.so`;
  return `https://${domain}/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify&reconnect=true&reconnect_delay=3000`;
 }
 
@@ -322,7 +322,7 @@ function isVNCAvailable() {
 }
 
 // ── Auto-save browser screenshots to workspace ──────────────────────
-// Persists screenshots so they show up in the CrabsHQ files panel.
+// Persists screenshots so they show up in the Trooper files panel.
 // Saves to /home/node/.openclaw/media/browser/ inside the container.
 const SCREENSHOT_DIR = '/home/node/.openclaw/media/browser';
 let _screenshotDirReady = false;
@@ -507,7 +507,7 @@ const server = createServer(app);
 const BRIDGE_AUTH_TOKEN = process.env.BRIDGE_AUTH_TOKEN || '';
 const bridgeWS = new BridgeWSServer({ server, path: '/ws', bridgeAuthToken: BRIDGE_AUTH_TOKEN });
 initFirebaseAuth();
-const MISSION_CONTROL_URL = process.env.MISSION_CONTROL_URL || process.env.CRABHQ_CALLBACK_URL || '';
+const MISSION_CONTROL_URL = process.env.MISSION_CONTROL_URL || process.env.TROOPER_CALLBACK_URL || '';
 
 // OpenClaw gateway connection config
 const OPENCLAW_URL = process.env.OPENCLAW_URL || 'http://127.0.0.1:18789';
@@ -630,7 +630,7 @@ function buildBridgePairedDeviceEntry(existing = {}) {
   ...existing,
   deviceId: deviceIdentity.deviceId,
   publicKey,
-  displayName: 'CrabsHQ Bridge',
+  displayName: 'Trooper Bridge',
   platform: 'linux',
   role: 'operator',
   roles: ['operator'],
@@ -700,9 +700,9 @@ function isGatewayPairingError(message = '') {
 const OPENCLAW_GATEWAY_TOKEN = getDesiredGatewayToken();
 const OPENCLAW_HOOK_TOKEN = process.env.OPENCLAW_HOOK_TOKEN || '';
 
-// CORS: allow direct frontend access from CrabsHQ domains + dev
+// CORS: allow direct frontend access from Trooper domains + dev
 const CORS_ALLOWED_ORIGINS = [
- /\.crabhq\.com$/,
+ /\.trooper\.com$/,
  /\.netlify\.app$/,
  /^https?:\/\/localhost(:\d+)?$/,
  /^https?:\/\/127\.0\.0\.1(:\d+)?$/,
@@ -992,7 +992,7 @@ class OpenClawGateway {
  const nonce = this._connectNonce || undefined;
  const params = {
  minProtocol: 1, maxProtocol: 4,
- client: { id: 'gateway-client', displayName: 'CrabsHQ Bridge', version: '2.1.0', platform: 'linux', mode: 'backend' },
+ client: { id: 'gateway-client', displayName: 'Trooper Bridge', version: '2.1.0', platform: 'linux', mode: 'backend' },
  auth: { token: this.token },
  role, scopes,
  };
@@ -1219,7 +1219,7 @@ class OpenClawGateway {
  // Route unmatched events to the active session listener (captures nested runId events)
  this._activeSessionListener(stream, data, runId);
  }
- // Broadcast ALL agent events (including unmatched cron/background runs) to CrabsHQ clients
+ // Broadcast ALL agent events (including unmatched cron/background runs) to Trooper clients
  // so the frontend can show live activity for cron jobs, background tasks, etc.
  if (this._onAnyAgentEvent) {
    this._onAnyAgentEvent(stream, data, runId);
@@ -1242,7 +1242,7 @@ class OpenClawGateway {
  const idempotencyKey = opts.idempotencyKey || randomUUID();
  // Session key in canonical format: agent:{agentId}:{rest}
  const _agentId = opts.agentId || 'main';
- const sessionKey = opts.sessionKey || `agent:${_agentId}:hook:crabhq:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
+ const sessionKey = opts.sessionKey || `agent:${_agentId}:hook:trooper:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
  const timeoutMs = opts.timeoutMs || 180000;
  const { explicitModel, effectiveModel: effectiveRequestedModel } = resolveGatewayModelSelection(opts.model);
  const selectedThinking = resolveGatewayThinkingSelection(opts.thinking, effectiveRequestedModel);
@@ -1556,7 +1556,7 @@ class OpenClawGateway {
  const idempotencyKey = opts.idempotencyKey || randomUUID();
  // Session key in canonical format: agent:{agentId}:{rest}
  const _agentId2 = opts.agentId || 'main';
- const sessionKey = opts.sessionKey || `agent:${_agentId2}:hook:crabhq:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
+ const sessionKey = opts.sessionKey || `agent:${_agentId2}:hook:trooper:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
  const timeoutMs = opts.timeoutMs || 180000;
  const runStartedAt = Date.now();
  const _projectFolder = opts.projectFolder || null;
@@ -2420,7 +2420,7 @@ try {
 }
 const gateway = new OpenClawGateway(OPENCLAW_URL, OPENCLAW_GATEWAY_TOKEN);
 
-// ── Live agent event forwarding (cron, background runs → CrabsHQ frontend) ──
+// ── Live agent event forwarding (cron, background runs → Trooper frontend) ──
 gateway._onAnyAgentEvent = (stream, data, runId) => {
   // Only forward meaningful events, not high-frequency text chunks
   if (stream === 'tool_use' || stream === 'tool_result' || stream === 'lifecycle') {
@@ -2474,18 +2474,18 @@ setInterval(() => {
 
 const skillRegistry = new Map();
 
-// ── Forward results back to CrabsHQ ─────────────────────────────────
+// ── Forward results back to Trooper ─────────────────────────────────
 async function forwardToMissionControl(taskId, agentName, result, requestId) {
  if (!MISSION_CONTROL_URL || !taskId) return;
  try {
- console.log(`Forwarding response to CrabsHQ for task ${taskId}`);
+ console.log(`Forwarding response to Trooper for task ${taskId}`);
  const res = await fetch(`${MISSION_CONTROL_URL}/api/agent-response`, {
  method: 'POST',
  headers: { 'Content-Type': 'application/json' },
  body: JSON.stringify({ taskId, agentName: agentName || 'openclaw', response: result, requestId, timestamp: Date.now() }),
  });
- if (!res.ok) console.error(`CrabsHQ callback failed: ${res.status}`);
- } catch (err) { console.error(`Failed to forward to CrabsHQ:`, err.message); }
+ if (!res.ok) console.error(`Trooper callback failed: ${res.status}`);
+ } catch (err) { console.error(`Failed to forward to Trooper:`, err.message); }
 }
 
 // ── ACP Session Registry (tracks active ACP agent sessions) ─────────
@@ -2504,7 +2504,7 @@ setInterval(() => {
  }
 }, 60000);
 
-// ── Agent Registry (maps CrabsHQ agent names to OpenClaw agentIds) ───
+// ── Agent Registry (maps Trooper agent names to OpenClaw agentIds) ───
 const agentRegistry = new Map(); // agentName -> { agentId, role, title, soul, name }
 const AGENT_REGISTRY_PATH = '/opt/openclaw-bridge/agent-registry.json';
 
@@ -2751,7 +2751,7 @@ try {
  if (hardenedActiveMemory.changed) {
  config = hardenedActiveMemory.config;
  changed = true;
- console.log('[bridge] Migrated: hardened active-memory hook for CrabsHQ runtime');
+ console.log('[bridge] Migrated: hardened active-memory hook for Trooper runtime');
  }
  // Startup migration: remove diffs plugin — @pierre/diffs module not available
  if (config.plugins?.entries?.diffs) {
@@ -3338,7 +3338,7 @@ function getLocalGatewayModelProbeUrl(model) {
  const providerConfig = readOpenClawConfig()?.models?.providers?.[provider] || {};
  const root = String(providerConfig.baseUrl || providerConfig.baseURL || providerConfig.url || '').trim().replace(/\/+$/, '');
  if (!root) {
-  throw new Error(`Local model provider "${provider}" is not configured on this VPS. Reconnect the local model from the CrabsHQ desktop app.`);
+  throw new Error(`Local model provider "${provider}" is not configured on this VPS. Reconnect the local model from the Trooper desktop app.`);
  }
  if (provider === 'ollama') return { provider, url: `${root}/api/tags` };
  return { provider, url: `${root.replace(/\/v1$/i, '')}/health` };
@@ -3352,11 +3352,11 @@ async function assertLocalGatewayModelReachable(model) {
  try {
   res = await fetch(probe.url, { signal: AbortSignal.timeout(6000) });
  } catch (error) {
-  throw new Error(`Local model tunnel for ${probe.provider} is unreachable from this VPS. Restart/reconnect the local model in the CrabsHQ desktop app, then select it again. (${error?.message || 'network error'})`);
+  throw new Error(`Local model tunnel for ${probe.provider} is unreachable from this VPS. Restart/reconnect the local model in the Trooper desktop app, then select it again. (${error?.message || 'network error'})`);
  }
  if (!res.ok) {
   const text = await res.text().catch(() => '');
-  throw new Error(`Local model tunnel for ${probe.provider} returned HTTP ${res.status}. Restart/reconnect the local model in the CrabsHQ desktop app, then select it again.${text ? ` ${text.slice(0, 180)}` : ''}`);
+  throw new Error(`Local model tunnel for ${probe.provider} returned HTTP ${res.status}. Restart/reconnect the local model in the Trooper desktop app, then select it again.${text ? ` ${text.slice(0, 180)}` : ''}`);
  }
 }
 
@@ -3406,7 +3406,7 @@ function syncRuntimeIdentityFiles({ workspacePath, agentProfile, preserveSharedF
     companyName: readCompanyNameFromDocs(),
   });
 
-  // Crabs-HQ is the source of truth for the main/Team Lead workspace — it pushes
+  // Trooper is the source of truth for the main/Team Lead workspace — it pushes
   // rich AGENTS.md/SOUL.md/TOOLS.md/etc. via PUT /agents/main/workspace during
   // finalizeProvision. The bridge must only seed defaults for files that don't
   // exist yet; otherwise every downstream POST /agents or PUT /identity call for
@@ -3417,7 +3417,7 @@ function syncRuntimeIdentityFiles({ workspacePath, agentProfile, preserveSharedF
   for (const [fileName, content] of Object.entries(files)) {
     writeWorkspaceTextFile(workspacePath, fileName, content, {
       // Always preserve MEMORY.md (it accumulates runtime state).
-      // For the main workspace, preserve every identity file too so Crabs-HQ's
+      // For the main workspace, preserve every identity file too so Trooper's
       // rich content is never overwritten — the bridge only writes these files
       // as first-boot defaults when nothing is there yet.
       preserveIfExists: isMainWorkspace || (preserveSharedFiles && fileName === 'MEMORY.md'),
@@ -3483,8 +3483,8 @@ function resolveMissionControlSessionKey({ sessionKey, agentName, context } = {}
  const registered = agentRegistry.get(slug);
  const gatewayAgentId = resolveNativeGatewayAgentId(registered, slug);
  return taskId
-   ? `agent:${gatewayAgentId}:hook:crabhq:${slug}:task:${taskId}`
-   : `agent:${gatewayAgentId}:hook:crabhq:${slug}:channel:${channel}`;
+   ? `agent:${gatewayAgentId}:hook:trooper:${slug}:task:${taskId}`
+   : `agent:${gatewayAgentId}:hook:trooper:${slug}:channel:${channel}`;
 }
 
 function extractAgentIdFromSessionKey(sessionKey) {
@@ -3658,7 +3658,7 @@ function summarizeSuccessfulArtifactsFromToolLog(toolLog = []) {
  return null;
 }
 
-function buildCrabsHqSystemPrompt(registered, context = {}, explicitSystemPrompt = undefined) {
+function buildTrooperSystemPrompt(registered, context = {}, explicitSystemPrompt = undefined) {
   if (explicitSystemPrompt) {
   let prompt = explicitSystemPrompt;
  const laneBlock = buildExecutionLanePromptBlock({
@@ -3770,7 +3770,7 @@ async function handleIncomingTask(req, res) {
  const channel = context?.channel || 'general';
  const isSPC = registered?.role === 'SPC';
  // Task-scoped sessions share context per task, chat sessions per channel.
- // CrabsHQ may also pass explicit labeled system session keys for utility runs.
+ // Trooper may also pass explicit labeled system session keys for utility runs.
  const sessionKey = resolveMissionControlSessionKey({
    sessionKey: req.body?.sessionKey,
    agentName,
@@ -3799,7 +3799,7 @@ async function handleIncomingTask(req, res) {
  const isTaskWork = !!(context?.taskId);
  console.log(`[${id}] Routing to OpenClaw agent:${agentId} via WebSocket for ${agentName || 'default'} (session: ${sessionKey})${isTaskWork ? ' [TASK]' : ''}...`);
  // Build a thin runtime prompt with project folder enforcement
- let nonStreamSystemPrompt = buildCrabsHqSystemPrompt(registered, context, systemPrompt || undefined);
+ let nonStreamSystemPrompt = buildTrooperSystemPrompt(registered, context, systemPrompt || undefined);
  if (context?.planMode === true) {
   nonStreamSystemPrompt = nonStreamSystemPrompt
    ? `${nonStreamSystemPrompt}\n\n${buildPlanModeRuntimeGuard()}`
@@ -3896,7 +3896,7 @@ async function handleIncomingTaskStream(req, res) {
  const channel = context?.channel || 'general';
  const isSPC = registered?.role === 'SPC';
  // Task-scoped sessions share context per task, chat sessions per channel.
- // CrabsHQ may also pass explicit labeled system session keys for utility runs.
+ // Trooper may also pass explicit labeled system session keys for utility runs.
  const sessionKey = resolveMissionControlSessionKey({
    sessionKey: req.body?.sessionKey,
    agentName,
@@ -3948,10 +3948,10 @@ async function handleIncomingTaskStream(req, res) {
  onSend: (event, payload) => {
    const dataStr = JSON.stringify(payload).substring(0, 150);
    if (event !== 'text' && event !== 'typing_keepalive') {
-    logDebugEvent('sse_to_crabhq', { event, data: dataStr });
-    console.log(`[SSE→CrabsHQ] event=${event} data=${dataStr}`);
+    logDebugEvent('sse_to_trooper', { event, data: dataStr });
+    console.log(`[SSE→Trooper] event=${event} data=${dataStr}`);
    } else if (event === 'text') {
-    logDebugEvent('sse_to_crabhq', { event, chars: payload?.text?.length || 0 });
+    logDebugEvent('sse_to_trooper', { event, chars: payload?.text?.length || 0 });
    }
  },
  });
@@ -4003,7 +4003,7 @@ const emitViewportScreenshotFrame = ({
 };
 
  const isBrowserTask = context?.browserTask === true;
- let resolvedSystemPrompt = buildCrabsHqSystemPrompt(registered, {
+ let resolvedSystemPrompt = buildTrooperSystemPrompt(registered, {
   ...context,
   matchedSkillNames,
  }, systemPrompt || undefined);
@@ -4168,7 +4168,7 @@ if (endSession) {
  // Add per-tool overhead (~200 tokens per tool call for function definition + wrapping)
  const toolOverhead = toolLog.length * 200;
 
- // Structured outcome hint for CrabsHQ orchestration
+ // Structured outcome hint for Trooper orchestration
 const responseText = response || '';
  const artifactSummary = summarizeSuccessfulArtifactsFromToolLog(toolLog);
  const blockedMatch = typeof responseText === 'string' ? responseText.match(/<blocked\s+reason="([^"]*)">([\s\S]*?)<\/blocked>/i) : null;
@@ -4250,7 +4250,7 @@ desktopRecordingUrl: desktopRecordingUrl || undefined,
  const taskId = context?.taskId;
  const isAsyncCall = context?.notificationType === 'async' || context?.notificationType === 'chat_mention' || context?.notificationType === 'chat_followup';
  if (taskId && isAsyncCall && response) {
- // Append tool log in legacy format for backward compat with CrabsHQ store
+ // Append tool log in legacy format for backward compat with Trooper store
  let fullResult = response;
  if (toolLog.length > 0) {
  fullResult += `\n\n `;
@@ -4293,7 +4293,7 @@ desktopRecordingUrl: desktopRecordingUrl || undefined,
 
 // ── HTTP Routes ──────────────────────────────────────────────────────
 
-// List directory contents (for CrabsHQ Files browser — screenshots, media, etc.)
+// List directory contents (for Trooper Files browser — screenshots, media, etc.)
 const WORKSPACE_CONTAINER_ROOT = '/home/node/.openclaw/workspace';
 const WORKSPACE_HOST_ROOT = '/opt/openclaw-data/workspace';
 const AGENTS_CONFIG_ROOT = '/opt/openclaw-data/config/agents';
@@ -4741,7 +4741,7 @@ app.get('/health', async (req, res) => {
  // During initial provisioning, return 'installing' so provision.js keeps polling
  // and streaming raw logs. The marker file is created at the end of setup-openclaw-full.sh.
  // Fallback: if bridge has been running >5 min, assume setup is complete (handles existing VPS + reboots).
- const isSnapshotBuilder = process.env.CRABHQ_SNAPSHOT_BUILD === '1' || process.env.ORG_ID === 'snapshot-builder';
+ const isSnapshotBuilder = process.env.TROOPER_SNAPSHOT_BUILD === '1' || process.env.ORG_ID === 'snapshot-builder';
  const allowUptimeFallback = !isSnapshotBuilder && process.env.OPENCLAW_HEALTH_UPTIME_FALLBACK !== '0';
  const setupDone = existsSync('/tmp/openclaw-setup-complete')
    || existsSync('/opt/openclaw-bridge/.setup-complete')
@@ -5389,7 +5389,7 @@ async function handleAdminNodeRemove(req, res) {
  }
 }
 
-// Native OpenClaw node removal. CrabsHQ tries these endpoint shapes in order.
+// Native OpenClaw node removal. Trooper tries these endpoint shapes in order.
 app.delete('/admin/nodes/:nodeId', handleAdminNodeRemove);
 app.post('/admin/nodes/remove', express.json(), handleAdminNodeRemove);
 app.post('/admin/nodes', express.json(), (req, res, next) => {
@@ -5572,7 +5572,7 @@ app.get('/admin/data-export', async (req, res) => {
    exportData.exportVersion = '1.0';
 
    res.setHeader('Content-Type', 'application/json');
-   res.setHeader('Content-Disposition', `attachment; filename="crabhq-data-export-${Date.now()}.json"`);
+   res.setHeader('Content-Disposition', `attachment; filename="trooper-data-export-${Date.now()}.json"`);
    res.json(exportData);
  } catch (err) {
    res.status(500).json({ error: err.message });
@@ -5723,7 +5723,7 @@ app.post('/admin/upgrade', async (req, res) => {
    captureLog('info', 'Upgrade triggered: pulling Docker image...');
    steps.push({ step: 'docker_pull', status: 'running' });
    try {
-     const pullOut = execSync('docker pull ghcr.io/absurdfounder/crabhq-gateway:latest 2>&1', { timeout: 120000 }).toString();
+     const pullOut = execSync('docker pull ghcr.io/absurdfounder/trooper-gateway:latest 2>&1', { timeout: 120000 }).toString();
      steps[steps.length - 1] = { step: 'docker_pull', status: 'ok', output: pullOut.slice(-500) };
    } catch (e) {
      steps[steps.length - 1] = { step: 'docker_pull', status: 'failed', error: e.message };
@@ -5810,7 +5810,7 @@ app.get('/admin/db', (req, res) => {
   }
 });
 
-// System stats (CPU, RAM, disk) — no auth needed, non-sensitive metrics for CrabsHQ dashboard
+// System stats (CPU, RAM, disk) — no auth needed, non-sensitive metrics for Trooper dashboard
 app.get('/system-stats', (req, res) => {
  try {
   const cpu = (() => {
@@ -5858,12 +5858,12 @@ app.get('/debug/events', (req, res) => {
  total: _recentDebugEvents.length,
  showing: Math.min(events.length, limit),
  categories: [...new Set(_recentDebugEvents.map(e => e.category))],
- help: 'Filter: ?category=raw_gateway|sse_to_crabhq|tool_use|heuristic_lifecycle|heuristic_gap|subagent_tool_use&limit=200',
+ help: 'Filter: ?category=raw_gateway|sse_to_trooper|tool_use|heuristic_lifecycle|heuristic_gap|subagent_tool_use&limit=200',
  events: events.slice(-limit),
  });
 });
 
-// Full pipeline trace: shows gateway→bridge→crabhq flow side by side
+// Full pipeline trace: shows gateway→bridge→trooper flow side by side
 app.get('/debug/pipeline', (req, res) => {
  const limit = Math.min(parseInt(req.query.limit) || 100, MAX_DEBUG_EVENTS);
  const since = req.query.since ? parseInt(req.query.since) : 0;
@@ -5872,7 +5872,7 @@ app.get('/debug/pipeline', (req, res) => {
  
  // Group by category for pipeline view
  const gateway = events.filter(e => e.category === 'raw_gateway').slice(-limit);
- const sse = events.filter(e => e.category === 'sse_to_crabhq').slice(-limit);
+ const sse = events.filter(e => e.category === 'sse_to_trooper').slice(-limit);
  const tools = events.filter(e => e.category === 'tool_use' || e.category === 'subagent_tool_use').slice(-limit);
  const heuristic = events.filter(e => e.category?.startsWith('heuristic')).slice(-limit);
  
@@ -5893,7 +5893,7 @@ app.get('/debug/pipeline', (req, res) => {
   ws_connected: !!gateway._ws?.readyState,
   recent: {
    gateway: gateway.slice(-20),
-   sse_to_crabhq: sse.slice(-20),
+   sse_to_trooper: sse.slice(-20),
    tools: tools.slice(-10),
    heuristics: heuristic.slice(-5),
   },
@@ -5943,7 +5943,7 @@ app.post('/files/write', (req, res) => {
  }
 });
 
-app.post('/webhook/crabhq', handleIncomingTask);
+app.post('/webhook/trooper', handleIncomingTask);
 app.post('/webhook/mission-control', handleIncomingTask);
 app.post('/webhook/mission-control/stream', handleIncomingTaskStream);
 
@@ -5951,7 +5951,7 @@ app.post('/webhook/mission-control/stream', handleIncomingTaskStream);
 // /resume replays the locally persisted payload through handleIncomingTask
 // so a Bridge restart can recover an in-flight task. Payload never leaves
 // this host — CF only learns status + step via the async callback.
-app.post('/webhook/crabhq/status', (req, res) => {
+app.post('/webhook/trooper/status', (req, res) => {
   const { taskId } = req.body || {};
   if (!taskId) return res.status(400).json({ error: 'Missing taskId' });
   const row = getCfTask(taskId);
@@ -5959,7 +5959,7 @@ app.post('/webhook/crabhq/status', (req, res) => {
   res.json({ taskId: row.task_id, status: row.status, step: row.step, inFlight: isInFlight(taskId) });
 });
 
-app.post('/webhook/crabhq/resume', (req, res) => {
+app.post('/webhook/trooper/resume', (req, res) => {
   const { taskId } = req.body || {};
   if (!taskId) return res.status(400).json({ error: 'Missing taskId' });
   const row = getCfTask(taskId);
@@ -6626,8 +6626,8 @@ app.post('/webhook/background', async (req, res) => {
  if (gateway.isReady) {
  try {
  gateway.runAgent(task, {
- agentName: agentName || 'CrabsHQ',
- sessionKey: sessionKey || `agent:main:hook:crabhq:bg:${Date.now()}`,
+ agentName: agentName || 'Trooper',
+ sessionKey: sessionKey || `agent:main:hook:trooper:bg:${Date.now()}`,
  thinking: thinking || undefined,
  model: explicitModel || undefined,
  }).catch(err => console.error('Background agent failed:', err.message));
@@ -6641,8 +6641,8 @@ app.post('/webhook/background', async (req, res) => {
  method: 'POST',
  headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENCLAW_HOOK_TOKEN}` },
  body: JSON.stringify({
- message: task, name: agentName || 'CrabsHQ',
- sessionKey: sessionKey || `agent:main:hook:crabhq:${Date.now()}`,
+ message: task, name: agentName || 'Trooper',
+ sessionKey: sessionKey || `agent:main:hook:trooper:${Date.now()}`,
  wakeMode: 'now', deliver: false,
  model: explicitModel || undefined, thinking: thinking || undefined,
  timeoutSeconds: timeoutSeconds || 120,
@@ -6939,9 +6939,9 @@ app.post('/api/vault/sync', (req, res) => {
   }
 });
 
-// Proxy: forward API calls from OpenClaw agent sandbox to CrabsHQ backend
+// Proxy: forward API calls from OpenClaw agent sandbox to Trooper backend
 app.post('/api/proxy/:path(*)', async (req, res) => {
- if (!MISSION_CONTROL_URL) return res.status(503).json({ error: 'No CrabsHQ backend configured' });
+ if (!MISSION_CONTROL_URL) return res.status(503).json({ error: 'No Trooper backend configured' });
  try {
  const targetUrl = `${MISSION_CONTROL_URL}/api/${req.params.path}`;
  console.log(`[Proxy] POST ${targetUrl}`);
@@ -6959,7 +6959,7 @@ app.post('/api/proxy/:path(*)', async (req, res) => {
 });
 
 app.patch('/api/proxy/:path(*)', async (req, res) => {
- if (!MISSION_CONTROL_URL) return res.status(503).json({ error: 'No CrabsHQ backend configured' });
+ if (!MISSION_CONTROL_URL) return res.status(503).json({ error: 'No Trooper backend configured' });
  try {
  const targetUrl = `${MISSION_CONTROL_URL}/api/${req.params.path}`;
  console.log(`[Proxy] PATCH ${targetUrl}`);
@@ -6977,7 +6977,7 @@ app.patch('/api/proxy/:path(*)', async (req, res) => {
 });
 
 app.get('/api/proxy/:path(*)', async (req, res) => {
- if (!MISSION_CONTROL_URL) return res.status(503).json({ error: 'No CrabsHQ backend configured' });
+ if (!MISSION_CONTROL_URL) return res.status(503).json({ error: 'No Trooper backend configured' });
  try {
  const targetUrl = `${MISSION_CONTROL_URL}/api/${req.params.path}`;
  const upstream = await fetch(targetUrl, { headers: { 'Content-Type': 'application/json' } });
@@ -7130,7 +7130,7 @@ app.post('/webhook/cron', async (req, res) => {
  headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENCLAW_HOOK_TOKEN}` },
  body: JSON.stringify({
  message: `Use the cron tool to ${action || 'add'} a job: ${JSON.stringify({ name, schedule, message, sessionTarget, wakeMode, jobId })}`,
- name: 'CrabsHQ-Cron', sessionKey: 'agent:main:hook:crabhq:cron', wakeMode: 'now', deliver: false,
+ name: 'Trooper-Cron', sessionKey: 'agent:main:hook:trooper:cron', wakeMode: 'now', deliver: false,
  }),
  });
  const data = await hookRes.json().catch(() => ({}));
@@ -7811,7 +7811,7 @@ app.get('/skills/installed', (req, res) => {
 
 // ── Desktop API Proxy (port 4567 on VPS) ─────────────────────────────
 // The desktop control API runs on localhost:4567, normally accessed via Caddy.
-// This proxy allows the CrabsHQ server to reach it via the bridge (port 3002)
+// This proxy allows the Trooper server to reach it via the bridge (port 3002)
 // even when gatewayUrl (Caddy) is not set.
 
 app.all('/desktop-api/*', async (req, res) => {
@@ -7958,7 +7958,7 @@ app.post('/upgrade', async (req, res) => {
      step('Pulling latest Docker image...');
      try {
        const pullOutput = execSync(
-         'docker pull ghcr.io/absurdfounder/crabhq-gateway:latest 2>&1',
+         'docker pull ghcr.io/absurdfounder/trooper-gateway:latest 2>&1',
          { timeout: 120000, cwd: '/opt/openclaw' }
        ).toString();
        const alreadyUpToDate = pullOutput.includes('Image is up to date');
@@ -7966,7 +7966,7 @@ app.post('/upgrade', async (req, res) => {
 
        // Re-tag and recreate container
        step('Tagging image and recreating container...');
-       execSync('docker tag ghcr.io/absurdfounder/crabhq-gateway:latest openclaw:local', { timeout: 10000 });
+       execSync('docker tag ghcr.io/absurdfounder/trooper-gateway:latest openclaw:local', { timeout: 10000 });
        execSync('docker compose up -d --force-recreate 2>&1', { timeout: 60000, cwd: '/opt/openclaw' });
        step('Gateway container recreated');
 
@@ -8113,7 +8113,7 @@ app.get('/logs', (req, res) => {
 function buildOpenClawCapabilitiesPayload() {
  return {
   ok: true,
-  source: 'crabhq-openclawbridge',
+  source: 'trooper-openclawbridge',
   version: '2.1.0',
   verified: true,
   endpoints: {
@@ -8190,7 +8190,7 @@ function buildOpenClawCapabilitiesPayload() {
    providerNativeReasoning: true,
   },
   image: {
-   customImage: process.env.OPENCLAW_DOCKER_IMAGE || 'ghcr.io/absurdfounder/crabhq-gateway:latest',
+   customImage: process.env.OPENCLAW_DOCKER_IMAGE || 'ghcr.io/absurdfounder/trooper-gateway:latest',
    baseImage: 'ghcr.io/openclaw/openclaw:latest',
    rebuildRequiredForLatestBase: true,
   },
@@ -9063,7 +9063,7 @@ const _syncWarnings = [];
 
 // ── Provider Settings (SQLite-backed) ───────────────────────────────
 // Stores model routing, provider models, fallbacks, and pending flag
-// so Crabs-HQ never needs to keep keys or routing in Firestore.
+// so Trooper never needs to keep keys or routing in Firestore.
 
 /** Read a config key from SQLite, return parsed JSON or null. */
 function readConfigKey(key) {
@@ -9775,9 +9775,9 @@ app.get('/debug/agent-context', (req, res) => {
     const browserTask = String(req.query.browserTask || '').trim() === 'true';
     const agentId = resolveNativeGatewayAgentId(registered, slug);
     const sessionKey = taskId
-      ? `agent:${agentId}:hook:crabhq:${slug}:task:${taskId}`
-      : `agent:${agentId}:hook:crabhq:${slug}:channel:${channel}`;
-    const extraSystemPrompt = buildCrabsHqSystemPrompt(
+      ? `agent:${agentId}:hook:trooper:${slug}:task:${taskId}`
+      : `agent:${agentId}:hook:trooper:${slug}:channel:${channel}`;
+    const extraSystemPrompt = buildTrooperSystemPrompt(
       registered || { name: agentName, title: '', role: '' },
       { channel, taskId: taskId || null, taskTitle, executionLane, browserTask },
       undefined,
@@ -9820,7 +9820,7 @@ app.get('/debug/agent-context', (req, res) => {
         extraSystemPrompt,
         notes: [
           'Identity is expected to come from the native OpenClaw workspace files and the live session thread.',
-          'CrabsHQ now passes only thin session/lane guidance here, not duplicated soul/company/memory/task summaries.',
+          'Trooper now passes only thin session/lane guidance here, not duplicated soul/company/memory/task summaries.',
           'Ordinary chat should not inspect session history or ask to resume prior work unless the user explicitly asks.',
           'Missing native SPC agents now raise an explicit error instead of silently falling back to main.',
         ],
@@ -10235,8 +10235,8 @@ exec node dist/index.js gateway --allow-unconfigured --bind lan --port "$GATEWAY
  const bridgePath = '/opt/openclaw-bridge/index.mjs';
  let bridgeCode = fs.readFileSync(bridgePath, 'utf8');
  let bridgePatched = false;
- if (bridgeCode.includes("id: 'crabhq-bridge'")) {
- bridgeCode = bridgeCode.replace("id: 'crabhq-bridge'", "id: 'gateway-client'");
+ if (bridgeCode.includes("id: 'trooper-bridge'")) {
+ bridgeCode = bridgeCode.replace("id: 'trooper-bridge'", "id: 'gateway-client'");
  bridgePatched = true;
  }
  if (bridgeCode.includes('maxProtocol: 1')) {
@@ -10403,7 +10403,7 @@ function buildVoiceCapabilitiesPayload() {
   },
   ttsModel: process.env.OPENAI_TTS_MODEL || 'gpt-4o-mini-tts',
   fallbackTtsModel: 'tts-1',
-  note: 'CrabsHQ can proxy OpenAI STT/TTS today; native OpenClaw full-agent voice is available through the gateway capability layer.',
+  note: 'Trooper can proxy OpenAI STT/TTS today; native OpenClaw full-agent voice is available through the gateway capability layer.',
  };
 }
 

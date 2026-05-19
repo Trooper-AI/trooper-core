@@ -4,7 +4,7 @@
 This script is idempotent - running it twice is harmless. It finds the
 REST `GET /api/tasks` handler and threads `req.firebaseUser?.uid` into
 `listTasks(...)` so the handler is user-scoped. This closes the
-cross-tenant leakage risk introduced when the Render crabs-hq server
+cross-tenant leakage risk introduced when the Render trooper server
 started reading tasks through this endpoint.
 
 Run from the openclawbridge repo root:
