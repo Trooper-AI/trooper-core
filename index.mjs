@@ -3607,6 +3607,11 @@ function buildRegisteredAgentProfile({ requestedName, slug, existing = {}, incom
   skills: normalizeAgentValueList(incoming?.skills ?? existing?.skills ?? []),
   tools: normalizeAgentValueList(incoming?.tools ?? existing?.tools ?? []),
   installedSkillIds: normalizeAgentValueList(incoming?.installedSkillIds ?? existing?.installedSkillIds ?? []),
+  goals: normalizeAgentValueList(incoming?.goals ?? existing?.goals ?? []),
+  prompt: typeof incoming?.prompt === 'string' ? incoming.prompt : (existing?.prompt || ''),
+  integrations: normalizeAgentValueList(incoming?.integrations ?? existing?.integrations ?? []),
+  pluginIds: normalizeAgentValueList(incoming?.pluginIds ?? existing?.pluginIds ?? []),
+  recommendedSkills: normalizeAgentValueList(incoming?.recommendedSkills ?? existing?.recommendedSkills ?? []),
   avatar: incoming?.avatar !== undefined ? (incoming.avatar || null) : (existing.avatar || null),
  };
 }
@@ -6164,7 +6169,7 @@ app.get('/recording/status', (req, res) => {
 
 // Create a new SPC agent
 app.post('/agents', (req, res) => {
- const { name, title, soul, skills, tools, model, installedSkillIds, avatar, role } = req.body;
+ const { name, title, soul, skills, tools, model, installedSkillIds, avatar, role, goals, prompt, integrations, pluginIds, recommendedSkills } = req.body;
  if (!name) return res.status(400).json({ error: 'Agent name required' });
 
  const id = agentSlug(name);
@@ -6181,6 +6186,11 @@ app.post('/agents', (req, res) => {
    skills: skills || [],
    tools: tools || [],
    installedSkillIds: installedSkillIds || [],
+   goals: goals || [],
+   prompt: prompt || '',
+   integrations: integrations || [],
+   pluginIds: pluginIds || [],
+   recommendedSkills: recommendedSkills || [],
    avatar: avatar || null,
  };
  agentRegistry.set(id, leadProfile);
@@ -6210,6 +6220,11 @@ app.post('/agents', (req, res) => {
    skills: skills || [],
    tools: tools || [],
    installedSkillIds: installedSkillIds || [],
+   goals: goals || [],
+   prompt: prompt || '',
+   integrations: integrations || [],
+   pluginIds: pluginIds || [],
+   recommendedSkills: recommendedSkills || [],
    avatar: avatar || null,
  };
  syncRuntimeIdentityFiles({ workspacePath, agentProfile: nextAgentProfile });
@@ -6259,7 +6274,7 @@ app.put('/agents/:name', (req, res) => {
  const agent = agentRegistry.get(slug);
  if (!agent) return res.status(404).json({ error: `Agent "${req.params.name}" not found` });
 
- const { soul, title, skills, tools, model, workspaceFiles, installedSkillIds, avatar, role, fallbacks: updateFallbacks, params: updateParams } = req.body;
+ const { soul, title, skills, tools, model, workspaceFiles, installedSkillIds, avatar, role, goals, prompt, integrations, pluginIds, recommendedSkills, fallbacks: updateFallbacks, params: updateParams } = req.body;
 
  try {
  const previousAgentId = agent.agentId;
@@ -6273,6 +6288,11 @@ app.put('/agents/:name', (req, res) => {
    skills: skills ?? agent.skills ?? [],
    tools: tools ?? agent.tools ?? [],
    installedSkillIds: installedSkillIds ?? agent.installedSkillIds ?? [],
+   goals: goals ?? agent.goals ?? [],
+   prompt: prompt ?? agent.prompt ?? '',
+   integrations: integrations ?? agent.integrations ?? [],
+   pluginIds: pluginIds ?? agent.pluginIds ?? [],
+   recommendedSkills: recommendedSkills ?? agent.recommendedSkills ?? [],
    avatar,
    role,
   },
@@ -6398,9 +6418,10 @@ app.get('/agents/:name/workspace', (req, res) => {
  workspacePath = getAgentWorkspacePath('main');
  } else {
  const slug = agentSlug(name);
- const agent = agentRegistry.get(slug);
- if (!agent) return res.status(404).json({ error: `Agent "${name}" not found` });
- workspacePath = ensureAgentWorkspacePath(agent.agentId);
+ const agent = agentRegistry.get(slug) || Array.from(agentRegistry.values()).find((entry) => entry?.agentId === slug);
+ const agentId = agent?.agentId || (slug.startsWith('spc-') ? slug : '');
+ if (!agentId) return res.status(404).json({ error: `Agent "${name}" not found` });
+ workspacePath = ensureAgentWorkspacePath(agentId);
  }
 
  try {
