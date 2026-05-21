@@ -3188,6 +3188,7 @@ function ensureWorkspaceBootstrapFiles(workspacePath = MAIN_WORKSPACE_PATH, opti
   const placeholders = {
    'MEMORIES.md': EMPTY_MEMORIES_MD,
    'KNOWLEDGE.md': EMPTY_KNOWLEDGE_MD,
+   'INTEGRATIONS.md': '# Integration Permissions\n\nNo integration permission policy has been saved yet. Trooper will update this file when plugin access rules are configured.\n',
   };
   for (const [fileName, content] of Object.entries(placeholders)) {
    const target = `${workspacePath}/${fileName}`;
@@ -3198,7 +3199,7 @@ function ensureWorkspaceBootstrapFiles(workspacePath = MAIN_WORKSPACE_PATH, opti
    ? '# Skills\n\n_Global OpenClaw runtime skills are provisioned here for the org workspace._\n'
    : '# Skills\n\n_Runtime skills are installed globally for the org. This folder is only for agent-local custom skills when explicitly created.\n\nUse SKILLS.md and TOOLS.md in this workspace for role-specific guidance on which global skills, plugins, and CLIs to reach for.\n';
   writeTextFileIfChanged(skillsReadme, skillsReadmeContent);
-  try { execSync(`chown -R 1000:1000 ${workspacePath}/memory ${workspacePath}/skills ${workspacePath}/Channels ${workspacePath}/MEMORIES.md ${workspacePath}/KNOWLEDGE.md 2>/dev/null`, { timeout: 3000 }); } catch {}
+  try { execSync(`chown -R 1000:1000 ${workspacePath}/memory ${workspacePath}/skills ${workspacePath}/Channels ${workspacePath}/MEMORIES.md ${workspacePath}/KNOWLEDGE.md ${workspacePath}/INTEGRATIONS.md 2>/dev/null`, { timeout: 3000 }); } catch {}
  } catch (err) {
   console.warn(`[workspace] Failed to ensure bootstrap files for ${workspacePath}: ${err.message}`);
  }
@@ -3544,7 +3545,7 @@ function syncRuntimeIdentityFiles({ workspacePath, agentProfile, preserveSharedF
   }
 
   if (!isMainWorkspace) {
-    for (const sharedFile of ['COMPANY.md', 'MEMORIES.md', 'KNOWLEDGE.md']) {
+    for (const sharedFile of ['COMPANY.md', 'MEMORIES.md', 'KNOWLEDGE.md', 'INTEGRATIONS.md']) {
       try {
         const sharedContent = readFileSync(`/opt/openclaw-data/workspace/${sharedFile}`, 'utf8');
         if (sharedContent) {
@@ -10254,6 +10255,211 @@ app.post('/deep-research', async (req, res) => {
  }
 });
 
+// ── Integration permissions ───────────────────────────────────────────
+const INTEGRATION_PERMISSIONS_PATH = '/opt/openclaw-data/config/integration-permissions.json';
+const INTEGRATION_PERMISSIONS_MIRROR_PATH = '/opt/openclaw-data/workspace/.trooper/integration-permissions.json';
+const INTEGRATION_PERMISSIONS_GUIDE_PATH = '/opt/openclaw-data/workspace/INTEGRATIONS.md';
+const INTEGRATION_ACCESS_LEVELS = ['none', 'read', 'comment', 'draft', 'write', 'admin'];
+const INTEGRATION_ACCESS_RANK = Object.freeze(
+ Object.fromEntries(INTEGRATION_ACCESS_LEVELS.map((level, index) => [level, index])),
+);
+
+function normalizeAccessLevel(value, fallback = 'none') {
+ const normalized = String(value || '').trim().toLowerCase().replace(/[_\s-]+/g, '-');
+ if (normalized === 'read-only' || normalized === 'readonly') return 'read';
+ if (normalized === 'read-comment' || normalized === 'read+comment') return 'comment';
+ if (normalized === 'full' || normalized === 'full-access') return 'admin';
+ return INTEGRATION_ACCESS_RANK[normalized] !== undefined ? normalized : fallback;
+}
+
+function inferIntegrationActionAccess(action = '') {
+ const text = String(action || '').toLowerCase();
+ if (/\b(admin|authorize|oauth|connect|disconnect|permission|secret|token|key|billing|delete|remove)\b/.test(text)) return 'admin';
+ if (/\b(send|post|publish|create|update|edit|write|upload|move|archive|invite|merge|approve|reject)\b/.test(text)) return 'write';
+ if (/\b(draft|prepare|compose|generate|propose)\b/.test(text)) return 'draft';
+ if (/\b(comment|reply|react|annotate)\b/.test(text)) return 'comment';
+ return 'read';
+}
+
+function normalizePermissionRule(rule = {}, fallback = {}) {
+ if (typeof rule === 'string') return { accessLevel: normalizeAccessLevel(rule, fallback.accessLevel || 'none') };
+ if (!rule || typeof rule !== 'object') return { ...fallback };
+ const accessLevel = normalizeAccessLevel(rule.accessLevel || rule.access || rule.level, fallback.accessLevel || 'none');
+ return {
+  ...rule,
+  accessLevel,
+  allowedActions: Array.isArray(rule.allowedActions) ? rule.allowedActions.map(String).filter(Boolean) : undefined,
+  deniedActions: Array.isArray(rule.deniedActions) ? rule.deniedActions.map(String).filter(Boolean) : undefined,
+  approvalRequired: Array.isArray(rule.approvalRequired) ? rule.approvalRequired.map(String).filter(Boolean) : undefined,
+ };
+}
+
+function normalizeIntegrationPermissionsPolicy(raw = {}) {
+ const policy = raw && typeof raw === 'object' ? raw : {};
+ return {
+  version: 1,
+  updatedAt: policy.updatedAt || null,
+  defaultAccess: normalizeAccessLevel(policy.defaultAccess || policy.defaults?.accessLevel || policy.defaults?.access || 'write', 'write'),
+  defaults: normalizePermissionRule(policy.defaults || {}, { accessLevel: policy.defaultAccess || 'write' }),
+  plugins: policy.plugins && typeof policy.plugins === 'object' ? policy.plugins : {},
+  connections: policy.connections && typeof policy.connections === 'object' ? policy.connections : {},
+  agents: policy.agents && typeof policy.agents === 'object' ? policy.agents : {},
+  notes: typeof policy.notes === 'string' ? policy.notes : '',
+ };
+}
+
+function readIntegrationPermissionsPolicy() {
+ try {
+  const raw = JSON.parse(readFileSync(INTEGRATION_PERMISSIONS_PATH, 'utf8'));
+  return normalizeIntegrationPermissionsPolicy(raw);
+ } catch {
+  return normalizeIntegrationPermissionsPolicy({});
+ }
+}
+
+function writeIntegrationPermissionsArtifacts(policy) {
+ const normalized = normalizeIntegrationPermissionsPolicy({ ...policy, updatedAt: new Date().toISOString() });
+ mkdirSync(dirname(INTEGRATION_PERMISSIONS_PATH), { recursive: true });
+ mkdirSync(dirname(INTEGRATION_PERMISSIONS_MIRROR_PATH), { recursive: true });
+ writeFileSync(INTEGRATION_PERMISSIONS_PATH, JSON.stringify(normalized, null, 2), { mode: 0o600 });
+ writeFileSync(INTEGRATION_PERMISSIONS_MIRROR_PATH, JSON.stringify(redactDiagnosticValue(normalized), null, 2), { mode: 0o640 });
+ const guide = renderIntegrationPermissionsMarkdown(normalized);
+ writeFileSync(INTEGRATION_PERMISSIONS_GUIDE_PATH, guide, { mode: 0o644 });
+ try {
+  const agentsDir = '/opt/openclaw-data/config/agents';
+  for (const dirName of readdirSync(agentsDir)) {
+   const workspacePath = `${agentsDir}/${dirName}/workspace`;
+   if (existsSync(workspacePath)) writeFileSync(`${workspacePath}/INTEGRATIONS.md`, guide, { mode: 0o644 });
+  }
+ } catch {}
+ try {
+  execSync(`chown 1000:1000 ${INTEGRATION_PERMISSIONS_PATH} ${INTEGRATION_PERMISSIONS_MIRROR_PATH} ${INTEGRATION_PERMISSIONS_GUIDE_PATH} 2>/dev/null || true`, { timeout: 3000 });
+  execSync(`chmod 600 ${INTEGRATION_PERMISSIONS_PATH} && chmod 640 ${INTEGRATION_PERMISSIONS_MIRROR_PATH} && chmod 644 ${INTEGRATION_PERMISSIONS_GUIDE_PATH}`, { timeout: 3000 });
+ } catch {}
+ return normalized;
+}
+
+function renderIntegrationPermissionsMarkdown(policy) {
+ const lines = [
+  '# Integration Permissions',
+  '',
+  'Trooper manages this file from the VPS permission policy. Treat it as runtime guidance only; enforcement happens in the bridge before integration calls are executed.',
+  '',
+  `Default access: ${policy.defaultAccess}`,
+  '',
+  'Access levels: none, read, comment, draft, write, admin.',
+  '',
+ ];
+ const writeRules = (title, rules = {}) => {
+  const entries = Object.entries(rules || {});
+  if (!entries.length) return;
+  lines.push(`## ${title}`, '');
+  for (const [id, rule] of entries) {
+   const normalized = normalizePermissionRule(rule, { accessLevel: policy.defaultAccess });
+   lines.push(`- ${id}: ${normalized.accessLevel}`);
+   if (normalized.agents && typeof normalized.agents === 'object') {
+    for (const [agentId, agentRule] of Object.entries(normalized.agents)) {
+     lines.push(`  - ${agentId}: ${normalizePermissionRule(agentRule, normalized).accessLevel}`);
+    }
+   }
+  }
+  lines.push('');
+ };
+ writeRules('Plugins', policy.plugins);
+ writeRules('Connections', policy.connections);
+ const agentEntries = Object.entries(policy.agents || {});
+ if (agentEntries.length) {
+  lines.push('## Agent Overrides', '');
+  for (const [agentId, agentPolicy] of agentEntries) {
+   lines.push(`- ${agentId}`);
+   for (const [pluginId, rule] of Object.entries(agentPolicy?.plugins || {})) {
+    lines.push(`  - plugin ${pluginId}: ${normalizePermissionRule(rule, { accessLevel: policy.defaultAccess }).accessLevel}`);
+   }
+   for (const [connectionId, rule] of Object.entries(agentPolicy?.connections || {})) {
+    lines.push(`  - connection ${connectionId}: ${normalizePermissionRule(rule, { accessLevel: policy.defaultAccess }).accessLevel}`);
+   }
+  }
+  lines.push('');
+ }
+ if (policy.notes) lines.push('## Notes', '', policy.notes, '');
+ return `${lines.join('\n').trim()}\n`;
+}
+
+function actionMatchesPattern(pattern = '', action = '') {
+ if (!pattern) return false;
+ const normalizedPattern = String(pattern).toLowerCase();
+ const normalizedAction = String(action).toLowerCase();
+ if (normalizedPattern === normalizedAction) return true;
+ if (normalizedPattern.endsWith('*')) return normalizedAction.startsWith(normalizedPattern.slice(0, -1));
+ return false;
+}
+
+function findIntegrationPermissionRule(policy, { agentId, pluginId, connectionId, accountId }) {
+ const candidates = [];
+ const normalizedAgentId = String(agentId || 'main').trim() || 'main';
+ const normalizedPluginId = String(pluginId || '').trim();
+ const normalizedConnectionId = String(connectionId || '').trim();
+ const normalizedAccountId = String(accountId || '').trim();
+ const agentPolicy = policy.agents?.[normalizedAgentId] || {};
+ if (normalizedConnectionId && agentPolicy.connections?.[normalizedConnectionId]) candidates.push(agentPolicy.connections[normalizedConnectionId]);
+ if (normalizedPluginId && normalizedAccountId && agentPolicy.connections?.[`${normalizedPluginId}:${normalizedAccountId}`]) candidates.push(agentPolicy.connections[`${normalizedPluginId}:${normalizedAccountId}`]);
+ if (normalizedPluginId && agentPolicy.plugins?.[normalizedPluginId]) candidates.push(agentPolicy.plugins[normalizedPluginId]);
+ if (normalizedConnectionId && policy.connections?.[normalizedConnectionId]) candidates.push(policy.connections[normalizedConnectionId]);
+ if (normalizedPluginId && normalizedAccountId && policy.connections?.[`${normalizedPluginId}:${normalizedAccountId}`]) candidates.push(policy.connections[`${normalizedPluginId}:${normalizedAccountId}`]);
+ if (normalizedPluginId && policy.plugins?.[normalizedPluginId]) candidates.push(policy.plugins[normalizedPluginId]);
+ return candidates[0] || policy.defaults || { accessLevel: policy.defaultAccess };
+}
+
+function checkIntegrationPermission(input = {}) {
+ const policy = readIntegrationPermissionsPolicy();
+ const action = String(input.action || input.tool || input.operation || 'read').trim() || 'read';
+ const requiredAccess = normalizeAccessLevel(input.requiredAccess || inferIntegrationActionAccess(action), 'read');
+ const baseRule = findIntegrationPermissionRule(policy, input);
+ const rule = normalizePermissionRule(baseRule, { accessLevel: policy.defaultAccess });
+ const deniedActions = rule.deniedActions || [];
+ if (deniedActions.some((pattern) => actionMatchesPattern(pattern, action))) {
+  return { allowed: false, decision: 'denied_action', accessLevel: rule.accessLevel, requiredAccess, reason: `Action ${action} is denied` };
+ }
+ const allowedActions = rule.allowedActions || [];
+ if (allowedActions.length && !allowedActions.some((pattern) => actionMatchesPattern(pattern, action))) {
+  return { allowed: false, decision: 'action_not_allowed', accessLevel: rule.accessLevel, requiredAccess, reason: `Action ${action} is not in allowedActions` };
+ }
+ const allowed = (INTEGRATION_ACCESS_RANK[rule.accessLevel] ?? 0) >= (INTEGRATION_ACCESS_RANK[requiredAccess] ?? 1);
+ return {
+  allowed,
+  decision: allowed ? 'allowed' : 'insufficient_access',
+  accessLevel: rule.accessLevel,
+  requiredAccess,
+  approvalRequired: rule.approvalRequired || [],
+  reason: allowed ? 'Allowed by integration policy' : `${rule.accessLevel} access cannot perform ${requiredAccess} actions`,
+ };
+}
+
+app.get('/integration-permissions', (req, res) => {
+ try {
+  res.json({ policy: readIntegrationPermissionsPolicy() });
+ } catch (err) {
+  res.status(500).json({ error: err.message });
+ }
+});
+
+app.put('/integration-permissions', (req, res) => {
+ try {
+  const policy = writeIntegrationPermissionsArtifacts(req.body?.policy || req.body || {});
+  res.json({ policy });
+ } catch (err) {
+  res.status(500).json({ error: err.message });
+ }
+});
+
+app.post('/integration-permissions/check', (req, res) => {
+ try {
+  res.json(checkIntegrationPermission(req.body || {}));
+ } catch (err) {
+  res.status(500).json({ error: err.message });
+ }
+});
+
 // ── Composio connections (proxies to Composio API) ────────────────────
 function getComposioKey() {
  try {
@@ -10336,6 +10542,47 @@ app.get('/composio/tools', async (req, res) => {
  res.json({ items, cursor: data.next_cursor || data.cursor, total_items: data.total_items, total_pages: data.total_pages });
  } catch (err) {
  console.error('Composio tools error:', err.message);
+ res.status(500).json({ error: err.message });
+ }
+});
+
+app.post('/composio/tools/execute/:toolSlug', async (req, res) => {
+ try {
+ const composioKey = getComposioKey();
+ if (!composioKey) return res.status(400).json({ error: 'Composio API key not configured' });
+ const toolSlug = String(req.params.toolSlug || '').trim();
+ if (!toolSlug) return res.status(400).json({ error: 'Missing Composio tool slug' });
+ const body = req.body || {};
+ const inferredPluginId = String(body.pluginId || body.toolkitSlug || body.toolkit_slug || toolSlug.split('_')[0] || '').toLowerCase();
+ const decision = checkIntegrationPermission({
+  agentId: body.agentId || body.agent_id || req.query.agentId,
+  pluginId: inferredPluginId,
+  connectionId: body.connectionId || body.connectedAccountId || body.connected_account_id,
+  accountId: body.accountId || body.account_id || body.connectedAccountId || body.connected_account_id,
+  action: toolSlug,
+ });
+ if (!decision.allowed) {
+  return res.status(403).json({ error: 'Integration permission denied', decision });
+ }
+ const forwardBody = { ...body };
+ delete forwardBody.agentId;
+ delete forwardBody.agent_id;
+ delete forwardBody.pluginId;
+ delete forwardBody.toolkitSlug;
+ delete forwardBody.connectionId;
+ const resp = await fetch(`https://backend.composio.dev/api/v3/tools/execute/${encodeURIComponent(toolSlug)}`, {
+  method: 'POST',
+  headers: { 'x-api-key': composioKey, 'Content-Type': 'application/json' },
+  body: JSON.stringify(forwardBody),
+  signal: AbortSignal.timeout(30000),
+ });
+ const text = await resp.text();
+ let data = {};
+ try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+ if (!resp.ok) return res.status(resp.status).json(data);
+ res.json({ ...data, permission: decision });
+ } catch (err) {
+ console.error('Composio execute error:', err.message);
  res.status(500).json({ error: err.message });
  }
 });
