@@ -1006,6 +1006,8 @@ if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "__UNSET_OPE
  "baseUrl": "https://openrouter.ai/api/v1",
  "api": "openai-completions",
  "models": [
+ { "id": "qwen/qwen3.7-max", "name": "Trooper Auto", "contextWindow": 128000 },
+ { "id": "moonshotai/kimi-k2.6", "name": "Trooper Premium", "contextWindow": 128000 },
  { "id": "anthropic/claude-sonnet-4-5", "name": "Claude Sonnet 4.5 (OR)", "contextWindow": 200000 },
  { "id": "openai/gpt-5.2", "name": "GPT-5.2 (OR)", "contextWindow": 128000 },
  { "id": "openai/gpt-5-mini", "name": "GPT-5 Mini (OR)", "contextWindow": 128000 },

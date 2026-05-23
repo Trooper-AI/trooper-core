@@ -8884,9 +8884,18 @@ const KNOWN_MODEL_ALIASES = {
   'claude-haiku-4-5': 'claude-haiku-4-5',
 };
 
+const TROOPER_OPENROUTER_TIER_MODELS = [
+ { id: 'openrouter/qwen/qwen3.7-max', openrouterId: 'qwen/qwen3.7-max', name: 'Trooper Auto', contextWindow: 128000 },
+ { id: 'openrouter/moonshotai/kimi-k2.6', openrouterId: 'moonshotai/kimi-k2.6', name: 'Trooper Premium', contextWindow: 128000 },
+];
+
 function normalizeModelId(model) {
  if (!model) return model;
  let m = String(model).trim();
+ const trooperTier = TROOPER_OPENROUTER_TIER_MODELS.find((entry) =>
+  m.toLowerCase() === entry.id.toLowerCase() || m.toLowerCase() === entry.openrouterId.toLowerCase()
+ );
+ if (trooperTier) return trooperTier.id;
  // Only normalize explicit known aliases. Never blanket-convert dots↔dashes across providers.
  const EXACT_MODEL_MAP = {
    'gpt': 'openai/gpt-5.4',
@@ -9202,8 +9211,11 @@ const _syncWarnings = [];
  openrouter: { key: openrouterKey, config: {
  baseUrl: 'https://openrouter.ai/api/v1', api: 'openai-completions',
  models: [
+ { id: 'qwen/qwen3.7-max', name: 'Trooper Auto', contextWindow: 128000 },
+ { id: 'moonshotai/kimi-k2.6', name: 'Trooper Premium', contextWindow: 128000 },
  { id: 'anthropic/claude-sonnet-4-5', name: 'Claude Sonnet 4.5 (OR)', contextWindow: 200000 },
  { id: 'openai/gpt-5.2', name: 'GPT-5.2 (OR)', contextWindow: 128000 },
+ { id: 'openai/gpt-5-mini', name: 'GPT-5 Mini (OR)', contextWindow: 128000 },
  { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro (OR)', contextWindow: 1000000 },
  ] }},
  'openai-codex': { key: (openaiCodexAuthProfile?.access || hasFreshStoredCodexOAuthProfile()) ? 'oauth' : undefined, config: buildOpenAiCodexProviderConfig() },
