@@ -72,6 +72,13 @@ import { readBridgeVersion } from './lib/version-info.mjs';
 import { applyTelegramTokenToOpenClawConfig, buildTelegramEnvUpdates } from './lib/channel-config.mjs';
 import { hardenActiveMemoryConfigForBridge } from './lib/active-memory-config.mjs';
 import { writeJsonFileIfChanged, writeTextFileIfChanged } from './lib/file-write-guards.mjs';
+import {
+  installOpenClawPlugin,
+  isOpenClawPluginHostPath,
+  runAllowlistedGatewayExec,
+  syncGatewayPlugin,
+  writePluginFilesFromAbsolutePaths,
+} from './lib/gateway-plugins.mjs';
 
 const OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write', 'operator.pairing', 'operator.approvals', 'operator.talk.secrets'];
 
@@ -6329,6 +6336,23 @@ app.post('/files/write', (req, res) => {
  if (!files || !Array.isArray(files) || files.length === 0) {
  return res.status(400).json({ error: 'files array required: [{ path, content }]' });
  }
+
+ // Trooper-managed OpenClaw plugins are written under /opt/openclaw-data/plugins/.
+ if (files.every((file) => isOpenClawPluginHostPath(file?.path))) {
+  try {
+   const result = writePluginFilesFromAbsolutePaths({
+    files,
+    mkdirSync,
+    writeFileSync,
+    execSync,
+   });
+   console.log(`📦 Wrote ${result.written} plugin files (${result.pluginIds.join(', ') || 'none'})`);
+   return res.json({ success: true, written: result.written, pluginIds: result.pluginIds });
+  } catch (err) {
+   return res.status(500).json({ error: err.message });
+  }
+ }
+
  const name = agentName || 'main';
  let basePath;
  if (name === 'main' || name === 'Team Lead') {
@@ -8324,6 +8348,49 @@ app.post('/gateway/restart', (req, res) => {
  res.json({ success: true, message: 'Gateway container restarted', pairedRepair });
  } catch (err) {
  res.status(500).json({ error: 'Failed to restart gateway', details: err.stderr?.toString() || err.message });
+ }
+});
+
+app.post('/gateway/plugins/sync', (req, res) => {
+ try {
+  const { pluginId, files, install = true } = req.body || {};
+  const result = syncGatewayPlugin({
+   pluginId,
+   files,
+   install: install !== false,
+   mkdirSync,
+   writeFileSync,
+   execSync,
+  });
+  console.log(`📦 Synced OpenClaw plugin ${result.pluginId} (${result.written} files${result.installed ? ', installed' : ''})`);
+  res.json({ success: true, ...result });
+ } catch (err) {
+  res.status(/required|invalid|allowlisted|written/i.test(err.message) ? 400 : 500).json({ error: err.message });
+ }
+});
+
+app.post('/gateway/plugins/install', (req, res) => {
+ try {
+  const pluginPath = String(req.body?.path || '').trim();
+  const pluginId = req.body?.pluginId;
+  const result = installOpenClawPlugin({ pluginPath, pluginId, execSync });
+  console.log(`📦 Installed OpenClaw plugin from ${result.pluginPath}`);
+  res.json({ success: true, ...result });
+ } catch (err) {
+  res.status(/required|invalid|allowlisted/i.test(err.message) ? 400 : 500).json({ error: err.message });
+ }
+});
+
+app.post('/gateway/exec', (req, res) => {
+ try {
+  const result = runAllowlistedGatewayExec({
+   command: req.body?.command,
+   cwd: req.body?.cwd,
+   execSync,
+  });
+  res.json({ success: true, ...result });
+ } catch (err) {
+  res.status(/required|allowlisted/i.test(err.message) ? 400 : 500).json({ error: err.message });
  }
 });
 
