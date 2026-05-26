@@ -773,16 +773,8 @@ function sanitizeBravePluginConfigForGatewayStart(config, repairs) {
  const rawConfig = entry.config && typeof entry.config === 'object' && !Array.isArray(entry.config)
   ? entry.config
   : {};
- const rawWebSearch = rawConfig.webSearch && typeof rawConfig.webSearch === 'object' && !Array.isArray(rawConfig.webSearch)
-  ? rawConfig.webSearch
-  : {};
- const webSearch = {};
- for (const key of ['apiKey', 'mode', 'baseUrl']) {
-  if (rawWebSearch[key] !== undefined) webSearch[key] = rawWebSearch[key];
- }
- const nextConfig = Object.keys(webSearch).length ? { webSearch } : {};
- if (JSON.stringify(rawConfig) !== JSON.stringify(nextConfig)) {
-  entry.config = nextConfig;
+ if (Object.keys(rawConfig).length > 0) {
+  entry.config = {};
   repairs.push('plugins.entries.brave.config: removed schema-invalid fields');
  }
 }
@@ -1037,6 +1029,7 @@ class OpenClawGateway {
  this._eventListeners = new Map();
  this._reconnectTimer = null;
  this._connectPromise = null;
+ this._nextReconnectAt = 0;
  this._reconnectDelay = 5000;
  this._connectNonce = null;
  this._authResolve = null;
@@ -1058,6 +1051,13 @@ class OpenClawGateway {
  // Attempt reconnect if not connected; returns true if ready
  async ensureConnected() {
  if (this.isReady) return true;
+ const now = Date.now();
+ if (this._nextReconnectAt && now < this._nextReconnectAt) {
+   const waitMs = Math.max(0, this._nextReconnectAt - now);
+   if (!this._reconnectTimer) this._reconnectTimer = setTimeout(() => this.connect(), waitMs);
+   console.log(`[OpenClaw] Reconnect already scheduled in ${Math.ceil(waitMs / 1000)}s; skipping eager reconnect`);
+   return false;
+ }
  // Cancel any pending slow reconnect timer and try immediately
  if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
  this._reconnectDelay = 5000;
@@ -1080,6 +1080,7 @@ class OpenClawGateway {
 
  forceReconnect(delayMs = 0, reason = 'manual') {
  if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+ this._nextReconnectAt = Date.now() + Math.max(0, delayMs);
  this.connected = false;
  this._connectPromise = null;
  this._stopPing();
@@ -1110,6 +1111,7 @@ class OpenClawGateway {
  return new Promise((resolve) => {
  // Clear any pending reconnect timer to prevent close→reconnect→close loops
  if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+ this._nextReconnectAt = 0;
  if (this.ws) {
    // Remove listeners before closing to prevent on('close') from scheduling another reconnect
    this.ws.removeAllListeners('close');
@@ -1202,6 +1204,7 @@ class OpenClawGateway {
  this._historyInflight.clear();
  this._historyCache.clear();
  this._historyQueue.splice(0);
+ this._nextReconnectAt = Date.now() + this._reconnectDelay;
  this._reconnectTimer = setTimeout(() => this.connect(), this._reconnectDelay);
  this._reconnectDelay = Math.min(this._reconnectDelay * 1.5, 30000);
  });
@@ -8576,14 +8579,29 @@ app.get('/gateway/config', (req, res) => {
 
 app.put('/gateway/config', (req, res) => {
  try {
- writeOpenClawConfig(normalizeOpenClawConfigForWrite(req.body));
+ const changed = writeOpenClawConfig(normalizeOpenClawConfigForWrite(req.body));
+ const configRepair = repairOpenClawConfigForGatewayStart('config-update');
+ if (!changed && !configRepair.updated) {
+  return res.json({
+    success: true,
+    message: 'Config already current; gateway restart skipped',
+    changed: false,
+    configRepair,
+  });
+ }
  console.log('Gateway config updated, restarting...');
  upsertBridgePairedDevice({ force: true, reason: 'config-update' });
- execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
+ const restartOutput = execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 }).toString();
  gateway.token = getDesiredGatewayToken() || gateway.token;
- gateway.forceReconnect(5000, 'config-update');
- res.json({ success: true, message: 'Config updated and gateway restarted' });
- } catch (err) { res.status(500).json({ error: 'Failed to update config', details: err.message }); }
+ gateway.forceReconnect(15000, 'config-update');
+ res.json({
+   success: true,
+   message: 'Config updated and gateway restart scheduled',
+   changed,
+   configRepair,
+   restartOutput: restartOutput.trim().slice(-2000),
+ });
+ } catch (err) { res.status(500).json({ error: 'Failed to update config', details: err.stderr?.toString() || err.message }); }
 });
 
 // ── VPS System Stats ─────────────────────────────────────────────────
@@ -9256,22 +9274,11 @@ app.post('/config/api-keys', async (req, res) => {
  const existingBrave = config.plugins.entries.brave && typeof config.plugins.entries.brave === 'object'
   ? config.plugins.entries.brave
   : {};
- const existingBraveConfig = existingBrave.config && typeof existingBrave.config === 'object'
-  ? existingBrave.config
-  : {};
- const existingBraveWebSearch = existingBraveConfig.webSearch && typeof existingBraveConfig.webSearch === 'object'
-  ? existingBraveConfig.webSearch
-  : {};
  if (braveKey) {
-  const webSearch = {};
-  for (const key of ['mode', 'baseUrl']) {
-   if (existingBraveWebSearch[key] !== undefined) webSearch[key] = existingBraveWebSearch[key];
-  }
-  webSearch.apiKey = braveKey;
   config.plugins.entries.brave = {
    ...existingBrave,
    enabled: true,
-   config: { webSearch },
+   config: {},
   };
   if (!config.plugins.allow || !Array.isArray(config.plugins.allow)) config.plugins.allow = [];
   if (!config.plugins.allow.includes('brave')) config.plugins.allow.push('brave');
