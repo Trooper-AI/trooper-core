@@ -73,6 +73,7 @@ import { applyTelegramTokenToOpenClawConfig, buildTelegramEnvUpdates } from './l
 import { hardenActiveMemoryConfigForBridge } from './lib/active-memory-config.mjs';
 import { writeJsonFileIfChanged, writeTextFileIfChanged } from './lib/file-write-guards.mjs';
 import {
+  installOpenClawNpmPlugin,
   installOpenClawPlugin,
   isOpenClawPluginHostPath,
   runAllowlistedGatewayExec,
@@ -784,7 +785,9 @@ function prepareOpenClawConfigForGatewayStart(config) {
   const search = next.tools?.web?.search;
   if (search && typeof search === 'object' && !Array.isArray(search)) {
    const provider = typeof search.provider === 'string' ? search.provider.trim().toLowerCase() : '';
-   if (provider === 'brave') {
+   const braveEntry = next.plugins?.entries?.brave;
+   const braveConfigured = braveEntry && braveEntry.enabled !== false && next.meta?.trooperBravePluginInstalled === true;
+   if (provider === 'brave' && !braveConfigured) {
     delete search.provider;
     delete search.apiKey;
     repairs.push('tools.web.search.provider: removed unavailable brave provider');
@@ -8505,6 +8508,16 @@ app.post('/gateway/plugins/install', (req, res) => {
  }
 });
 
+app.post('/gateway/plugins/install-package', (req, res) => {
+ try {
+  const result = installOpenClawNpmPlugin({ packageName: req.body?.packageName, execSync });
+  console.log(`📦 Installed OpenClaw plugin package ${result.packageName}`);
+  res.json({ success: true, ...result });
+ } catch (err) {
+  res.status(/required|allowlisted/i.test(err.message) ? 400 : 500).json({ error: err.message });
+ }
+});
+
 app.post('/gateway/exec', (req, res) => {
  try {
   const result = runAllowlistedGatewayExec({
@@ -9217,16 +9230,42 @@ app.post('/config/api-keys', async (req, res) => {
 	 if (braveKey !== undefined) {
 	 try {
 	 const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
- // Store Brave for bridge-side research without forcing OpenClaw's plugin-backed
- // web_search provider to "brave"; current gateway builds reject that provider
- // unless a separate brave plugin is installed and enabled.
+ if (!config.plugins || typeof config.plugins !== 'object') config.plugins = {};
+ if (!config.plugins.entries || typeof config.plugins.entries !== 'object') config.plugins.entries = {};
+ const existingBrave = config.plugins.entries.brave && typeof config.plugins.entries.brave === 'object'
+  ? config.plugins.entries.brave
+  : {};
+ const existingBraveConfig = existingBrave.config && typeof existingBrave.config === 'object'
+  ? existingBrave.config
+  : {};
+ if (braveKey) {
+  config.plugins.entries.brave = {
+   ...existingBrave,
+   enabled: true,
+   config: {
+    ...existingBraveConfig,
+    webSearch: {
+     ...(existingBraveConfig.webSearch && typeof existingBraveConfig.webSearch === 'object' ? existingBraveConfig.webSearch : {}),
+     apiKey: braveKey,
+    },
+    webFetch: {
+     ...(existingBraveConfig.webFetch && typeof existingBraveConfig.webFetch === 'object' ? existingBraveConfig.webFetch : {}),
+     apiKey: braveKey,
+    },
+   },
+  };
+  if (!config.plugins.allow || !Array.isArray(config.plugins.allow)) config.plugins.allow = [];
+  if (!config.plugins.allow.includes('brave')) config.plugins.allow.push('brave');
+ } else if (config.plugins.entries.brave) {
+  config.plugins.entries.brave = { ...existingBrave, enabled: false };
+ }
  if (!config.tools) config.tools = {};
  if (!config.tools.web) config.tools.web = {};
  if (!config.tools.web.search || typeof config.tools.web.search !== 'object') {
  config.tools.web.search = {};
  }
- if (String(config.tools.web.search.provider || '').toLowerCase() === 'brave') {
- delete config.tools.web.search.provider;
+ if (String(config.tools.web.search.provider || '').toLowerCase() === 'brave' && config.meta?.trooperBravePluginInstalled !== true) {
+  delete config.tools.web.search.provider;
  }
  delete config.tools.web.search.apiKey;
 	 writeOpenClawConfig(config);
