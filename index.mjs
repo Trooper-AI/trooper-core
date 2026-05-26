@@ -740,13 +740,75 @@ function readWorkspaceTextFile(fileName, maxChars = 50000) {
  }
 }
 
-function writeOpenClawConfig(config) {
- normalizeOpenClawAgentsList(config);
- const result = writeJsonFileIfChanged(OPENCLAW_CONFIG_PATH, config);
+function mergeAllowAlsoAllow(scope, repairs, path = 'tools') {
+ if (!scope || typeof scope !== 'object' || Array.isArray(scope)) return;
+ const hasAllow = Array.isArray(scope.allow);
+ const hasAlsoAllow = Array.isArray(scope.alsoAllow);
+ if (hasAllow && hasAlsoAllow) {
+  const merged = [];
+  for (const value of [...scope.allow, ...scope.alsoAllow]) {
+   if (typeof value !== 'string' || !value.trim()) continue;
+   if (!merged.includes(value)) merged.push(value);
+  }
+  scope.allow = merged;
+  delete scope.alsoAllow;
+  repairs.push(`${path}: merged alsoAllow into allow`);
+ } else if (!hasAllow && hasAlsoAllow) {
+  scope.allow = scope.alsoAllow.filter((value) => typeof value === 'string' && value.trim());
+  delete scope.alsoAllow;
+  repairs.push(`${path}: converted alsoAllow to allow`);
+ }
+
+ for (const [key, value] of Object.entries(scope)) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+   mergeAllowAlsoAllow(value, repairs, `${path}.${key}`);
+  }
+ }
+}
+
+function prepareOpenClawConfigForGatewayStart(config) {
+ const next = cloneJson(config);
+ const repairs = [];
+ normalizeOpenClawAgentsList(next);
+
+ const providers = next?.models?.providers;
+ if (providers && typeof providers === 'object' && !Array.isArray(providers)) {
+  if (Object.prototype.hasOwnProperty.call(providers, 'composio')) {
+   delete providers.composio;
+   repairs.push('models.providers.composio: removed non-model provider overlay');
+  }
+ }
+
+ if (next.tools && typeof next.tools === 'object') {
+  mergeAllowAlsoAllow(next.tools, repairs);
+ }
+
+ return { config: next, repairs };
+}
+
+function writePreparedOpenClawConfig(prepared) {
+ const result = writeJsonFileIfChanged(OPENCLAW_CONFIG_PATH, prepared.config);
  if (result.written) {
   try { execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 }); } catch {}
  }
  return result.written;
+}
+
+function writeOpenClawConfig(config) {
+ const prepared = prepareOpenClawConfigForGatewayStart(config);
+ if (prepared.repairs.length) {
+  console.log(`[bridge] Repaired OpenClaw config before write: ${prepared.repairs.join('; ')}`);
+ }
+ return writePreparedOpenClawConfig(prepared);
+}
+
+function repairOpenClawConfigForGatewayStart(reason = 'gateway-start') {
+ const prepared = prepareOpenClawConfigForGatewayStart(readOpenClawConfig());
+ const updated = writePreparedOpenClawConfig(prepared);
+ if (prepared.repairs.length) {
+  console.log(`[bridge] Repaired OpenClaw config (${reason}): ${prepared.repairs.join('; ')}`);
+ }
+ return { updated, repairs: prepared.repairs, config: prepared.config };
 }
 
 function readGatewayTokenFromConfig() {
@@ -774,15 +836,17 @@ function syncGatewayAuthTokenInConfig() {
  const existing = readOpenClawConfig();
  const desiredToken = getDesiredGatewayToken();
  if (!desiredToken) {
- return { updated: false, token: '', config: existing };
+ const configRepair = repairOpenClawConfigForGatewayStart('sync-gateway-auth-no-token');
+ return { updated: configRepair.updated, token: '', config: configRepair.config, configRepair };
  }
  const currentToken = typeof existing?.gateway?.auth?.token === 'string' ? existing.gateway.auth.token.trim() : '';
  if (currentToken === desiredToken) {
- return { updated: false, token: desiredToken, config: existing };
+ const configRepair = repairOpenClawConfigForGatewayStart('sync-gateway-auth');
+ return { updated: configRepair.updated, token: desiredToken, config: configRepair.config, configRepair };
  }
  const next = normalizeOpenClawConfigForWrite(existing, existing);
  writeOpenClawConfig(next);
- return { updated: true, token: desiredToken, config: next };
+ return { updated: true, token: desiredToken, config: readOpenClawConfig() };
 }
 
 const OPENCLAW_DEVICES_DIR = '/opt/openclaw-data/config/devices';
@@ -8387,6 +8451,7 @@ app.post('/gateway/patch-auth', (req, res) => {
 app.post('/gateway/restart', (req, res) => {
  try {
  console.log('Restarting OpenClaw gateway container...');
+ const configRepair = repairOpenClawConfigForGatewayStart('gateway-restart');
  const pairedRepair = upsertBridgePairedDevice({ force: true, reason: 'gateway-restart' });
  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
  // Re-approve device and reconnect after restart
@@ -8395,7 +8460,7 @@ app.post('/gateway/restart', (req, res) => {
  gateway.token = getDesiredGatewayToken() || gateway.token;
  gateway.forceReconnect(5000, 'gateway-restart');
  }, 5000);
- res.json({ success: true, message: 'Gateway container restarted', pairedRepair });
+ res.json({ success: true, message: 'Gateway container restarted', configRepair, pairedRepair });
  } catch (err) {
  res.status(500).json({ error: 'Failed to restart gateway', details: err.stderr?.toString() || err.message });
  }
