@@ -1650,6 +1650,8 @@ When the user asks you to open a website, browse, or interact with a GUI, **alwa
 - To launch Chrome visibly: `DISPLAY=:99 google-chrome-stable --no-sandbox <url> &`
 - The user sees it live in their dashboard — no VNC client needed
 - **Never say you can't share the GUI** — the user CAN see it via Trooper panels
+- If the output needs a browser-session recording, keep the important visual work on `DISPLAY=:99`; raw `google-chrome --headless` and Playwright headless runs are not visible in the recording.
+- For a one-off screenshot artifact without a live recording, prefer `npx playwright screenshot ...` over raw `google-chrome --headless`, which can fail on this VPS because of Chrome crashpad.
 
 ### When to use which:
 - Quick lookups, scraping, screenshots → headless
@@ -1810,8 +1812,19 @@ if ! pgrep -f "Xvnc :99" >/dev/null 2>&1; then
  -SecurityTypes None -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents &
  sleep 0.5
 fi
+mkdir -p /home/node/.cache/openclaw-chrome-profile /home/node/.cache/google-chrome /tmp/openclaw-crashpad
+chown -R 1000:1000 /home/node/.cache/openclaw-chrome-profile /home/node/.cache/google-chrome /tmp/openclaw-crashpad 2>/dev/null || true
 export DISPLAY=:99
+export CHROME_LOG_FILE=/tmp/openclaw-chrome.log
 exec /usr/bin/google-chrome-stable \
+ --no-sandbox \
+ --disable-dev-shm-usage \
+ --disable-gpu \
+ --disable-crashpad \
+ --disable-crash-reporter \
+ --no-first-run \
+ --no-default-browser-check \
+ --user-data-dir=/home/node/.cache/openclaw-chrome-profile \
  --disable-blink-features=AutomationControlled \
  --use-fake-device-for-media-stream \
  --use-fake-ui-for-media-stream \

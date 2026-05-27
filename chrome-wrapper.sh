@@ -9,4 +9,21 @@ if ! pgrep -f "Xvnc :99" >/dev/null 2>&1; then
   sleep 1
 fi
 export DISPLAY=:99
-exec /usr/bin/google-chrome-stable --disable-blink-features=AutomationControlled "$@"
+mkdir -p /home/node/.cache/openclaw-chrome-profile /home/node/.cache/google-chrome /tmp/openclaw-crashpad
+chown -R 1000:1000 /home/node/.cache/openclaw-chrome-profile /home/node/.cache/google-chrome /tmp/openclaw-crashpad 2>/dev/null || true
+export CHROME_LOG_FILE=/tmp/openclaw-chrome.log
+CHROME_BIN=/usr/bin/google-chrome-stable
+if [ ! -x "$CHROME_BIN" ]; then
+  CHROME_BIN=/usr/bin/google-chrome
+fi
+exec "$CHROME_BIN" \
+  --no-sandbox \
+  --disable-dev-shm-usage \
+  --disable-gpu \
+  --disable-crashpad \
+  --disable-crash-reporter \
+  --no-first-run \
+  --no-default-browser-check \
+  --user-data-dir=/home/node/.cache/openclaw-chrome-profile \
+  --disable-blink-features=AutomationControlled \
+  "$@"

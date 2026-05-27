@@ -4598,10 +4598,12 @@ const specialistMode = resolveSpecialistPromptMode(effectiveAgentProfile, contex
 const emitViewportScreenshotFrame = ({
  action = 'Visible browser viewport',
  label = 'Visible browser viewport',
+ persist = false,
 } = {}) => {
  const viewportFrame = captureViewportFrame(':99');
  if (!viewportFrame) return false;
  try {
+  const screenshotPath = persist ? saveBrowserScreenshot(viewportFrame.base64, 'png') : null;
   sendSSE('screenshot_frame', buildScreenshotFramePayload({
    base64: viewportFrame.base64,
    timestamp: Date.now(),
@@ -4609,6 +4611,7 @@ const emitViewportScreenshotFrame = ({
    label,
    captureKind: 'viewport',
    geometry: viewportFrame.geometry,
+   screenshotPath,
   }));
  return true;
  } catch {
@@ -4784,7 +4787,13 @@ const recordingUrl = recordingPath ? `/files${recordingPath}` : null;
 const desktopRecordingUrl = desktopRecordingPath ? `/files${desktopRecordingPath}` : null;
 
 const endSession = getSkillBrowserSession();
-if (browserSessionActive) emitViewportScreenshotFrame();
+if (browserSessionActive) {
+ emitViewportScreenshotFrame({
+  action: 'Final visible browser viewport',
+  label: 'Final visible browser viewport',
+  persist: true,
+ });
+}
 
 // Signal browser session end
 if (endSession) {
