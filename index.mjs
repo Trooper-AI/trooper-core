@@ -3438,13 +3438,129 @@ function pickNonCodexRuntimeFallbackModel() {
  return null;
 }
 
+function isCodexModelAlias(model) {
+ if (!model) return false;
+ const raw = String(model).trim().toLowerCase();
+ return raw.startsWith('openai-codex/');
+}
+
+function modelHasCodexRuntimeMapping(model, config) {
+ if (!model || !config?.agents?.defaults?.models || typeof config.agents.defaults.models !== 'object') return false;
+ const raw = String(model).trim();
+ const normalized = normalizeGatewayModelId(raw);
+ const candidates = [raw, normalized].filter(Boolean);
+ return candidates.some((key) => config.agents.defaults.models?.[key]?.agentRuntime?.id === 'codex');
+}
+
+function modelRequiresCodexRuntime(model, config) {
+ return isCodexModelAlias(model) || modelHasCodexRuntimeMapping(model, config);
+}
+
+function hasUsableCodexAuthProfiles(auth) {
+ return Object.entries(auth?.profiles || {}).some(([key, profile]) =>
+  key.startsWith('openai-codex:') && isUsableCodexOAuthProfile(profile)
+ );
+}
+
+function sanitizeUnavailableCodexRuntimeModels(config, fallbackModel, { hasCodexAuth = false } = {}) {
+ if (!config || typeof config !== 'object' || hasCodexAuth || !fallbackModel) return false;
+ let changed = false;
+ const rewriteModel = (model) => {
+  if (!model || isGatewayInheritedModel(model)) return undefined;
+  if (modelRequiresCodexRuntime(model, config)) return fallbackModel;
+  return model;
+ };
+ const normalizeFallbacks = (fallbacks, primary) => {
+  if (!Array.isArray(fallbacks)) return [];
+  return fallbacks
+   .map(rewriteModel)
+   .filter((model, index, arr) => model && model !== primary && arr.indexOf(model) === index);
+ };
+
+ if (config.agents?.defaults?.model) {
+  if (typeof config.agents.defaults.model === 'string') {
+   const nextPrimary = rewriteModel(config.agents.defaults.model);
+   if (nextPrimary !== config.agents.defaults.model) {
+    config.agents.defaults.model = nextPrimary ? { primary: nextPrimary, fallbacks: [] } : {};
+    changed = true;
+   }
+  } else if (typeof config.agents.defaults.model === 'object') {
+   const currentPrimary = config.agents.defaults.model.primary;
+   const nextPrimary = rewriteModel(currentPrimary);
+   if (nextPrimary !== currentPrimary) {
+    if (nextPrimary) config.agents.defaults.model.primary = nextPrimary;
+    else delete config.agents.defaults.model.primary;
+    changed = true;
+   }
+   if (Array.isArray(config.agents.defaults.model.fallbacks)) {
+    const before = config.agents.defaults.model.fallbacks.join('\u0000');
+    const nextFallbacks = normalizeFallbacks(config.agents.defaults.model.fallbacks, config.agents.defaults.model.primary);
+    if (nextFallbacks.join('\u0000') !== before) {
+     config.agents.defaults.model.fallbacks = nextFallbacks;
+     changed = true;
+    }
+   }
+  }
+ }
+
+ if (config.agents?.defaults?.subagents?.model) {
+  const current = config.agents.defaults.subagents.model;
+  const next = rewriteModel(current);
+  if (next !== current) {
+   if (next) config.agents.defaults.subagents.model = next;
+   else delete config.agents.defaults.subagents.model;
+   changed = true;
+  }
+ }
+
+ if (Array.isArray(config.agents?.list)) {
+  for (const agent of config.agents.list) {
+   if (!agent?.model || typeof agent.model !== 'object') continue;
+   const currentPrimary = agent.model.primary;
+   const nextPrimary = rewriteModel(currentPrimary);
+   if (nextPrimary !== currentPrimary) {
+    if (nextPrimary) agent.model.primary = nextPrimary;
+    else delete agent.model.primary;
+    changed = true;
+   }
+   if (Array.isArray(agent.model.fallbacks)) {
+    const before = agent.model.fallbacks.join('\u0000');
+    const nextFallbacks = normalizeFallbacks(agent.model.fallbacks, agent.model.primary);
+    if (nextFallbacks.join('\u0000') !== before) {
+     agent.model.fallbacks = nextFallbacks;
+     changed = true;
+    }
+   }
+   if (!agent.model.primary && (!Array.isArray(agent.model.fallbacks) || agent.model.fallbacks.length === 0)) {
+    delete agent.model;
+    changed = true;
+   }
+  }
+ }
+
+ const modelConfigs = config.agents?.defaults?.models;
+ if (modelConfigs && typeof modelConfigs === 'object') {
+  for (const [modelId, modelConfig] of Object.entries(modelConfigs)) {
+   if (modelConfig?.agentRuntime?.id !== 'codex') continue;
+   delete modelConfig.agentRuntime;
+   if (Object.keys(modelConfig).length === 0) delete modelConfigs[modelId];
+   changed = true;
+  }
+  if (Object.keys(modelConfigs).length === 0) delete config.agents.defaults.models;
+ }
+
+ return changed;
+}
+
 function resolveRuntimeCodexRefreshBypass(requestedModel) {
- const normalized = requestedModel ? normalizeGatewayModelId(requestedModel) : normalizeGatewayModelId(readConfiguredDefaultModelId() || '');
- if (normalized !== 'openai/gpt-5.4') return null;
+ const rawModel = requestedModel || readConfiguredDefaultModelId() || '';
+ let config = null;
+ try { config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8')); } catch {}
+ if (!modelRequiresCodexRuntime(rawModel, config)) return null;
  const codexStatus = getStoredCodexOAuthProfileStatus();
- if (!codexStatus.usable || codexStatus.fresh) return null;
+ if (codexStatus.fresh) return null;
  return {
-  reason: codexStatus.reason || 'stale_codex_oauth',
+  reason: codexStatus.reason || 'missing_codex_oauth',
   fallbackModel: pickNonCodexRuntimeFallbackModel(),
   expiresMs: codexStatus.expiresMs || null,
  };
@@ -3697,7 +3813,7 @@ try {
   // configured to boot into openai-codex/* models. Pick a working provider from
   // the auth profile store instead. This prevents fresh installs from entering
   // a repeated "No API key found for provider openai-codex" failure loop.
-  const hasValidCodexProfile = Object.entries(auth.profiles).some(([k, v]) => k.startsWith('openai-codex:') && isUsableCodexOAuthProfile(v));
+  const hasValidCodexProfile = hasUsableCodexAuthProfiles(auth);
   if (!hasValidCodexProfile) {
    try {
     const chooseFallbackModel = () => {
@@ -3711,56 +3827,12 @@ try {
     if (!fallbackModel) throw new Error('no usable fallback auth profile found');
     const configPath = '/opt/openclaw-data/config/openclaw.json';
     const config = JSON.parse(readFileSync(configPath, 'utf8'));
-    let configChanged = false;
-    const rewrite = (v) => {
-     if (typeof v === 'string' && v.startsWith('openai-codex/')) return fallbackModel;
-     if (isGatewayInheritedModel(v)) return undefined;
-     return v;
-    };
-    if (config.agents?.defaults?.model?.primary?.startsWith?.('openai-codex/')) {
-     config.agents.defaults.model.primary = fallbackModel;
-     configChanged = true;
+    const configChanged = sanitizeUnavailableCodexRuntimeModels(config, fallbackModel, { hasCodexAuth: false });
+    if (configChanged) {
+     writeOpenClawConfig(config);
+     console.log(`[bridge] Rewrote Codex runtime model references to ${fallbackModel} (no Codex OAuth profile available)`);
     }
-    if (Array.isArray(config.agents?.defaults?.model?.fallbacks)) {
-     const before = config.agents.defaults.model.fallbacks.join('\u0000');
-     config.agents.defaults.model.fallbacks = config.agents.defaults.model.fallbacks
-      .map(rewrite)
-      .filter((v, i, arr) => v && v !== config.agents.defaults.model.primary && arr.indexOf(v) === i);
-     if (config.agents.defaults.model.fallbacks.join('\u0000') !== before) configChanged = true;
-    }
-    if (config.agents?.defaults?.subagents?.model?.startsWith?.('openai-codex/')) {
-     config.agents.defaults.subagents.model = fallbackModel;
-     configChanged = true;
-    }
-    if (Array.isArray(config.agents?.list)) {
-     for (const agent of config.agents.list) {
-      if (!agent.model || typeof agent.model !== 'object') continue;
-      if (agent.model.primary?.startsWith?.('openai-codex/')) {
-       agent.model.primary = fallbackModel;
-       configChanged = true;
-      }
-      if (isGatewayInheritedModel(agent.model.primary)) {
-       delete agent.model.primary;
-       configChanged = true;
-      }
-      if (Array.isArray(agent.model.fallbacks)) {
-       const before = agent.model.fallbacks.join('\u0000');
-       agent.model.fallbacks = agent.model.fallbacks
-        .map(rewrite)
-        .filter((v, i, arr) => v && v !== agent.model.primary && arr.indexOf(v) === i);
-       if (agent.model.fallbacks.join('\u0000') !== before) configChanged = true;
-      }
-      if (!agent.model.primary && (!Array.isArray(agent.model.fallbacks) || agent.model.fallbacks.length === 0)) {
-       delete agent.model;
-       configChanged = true;
-      }
-     }
-    }
-	    if (configChanged) {
-	     writeOpenClawConfig(config);
-	     console.log(`[bridge] Rewrote openai-codex model references to ${fallbackModel} (no Codex OAuth profile available)`);
-	    }
-   } catch (e) { console.warn('[bridge] Failed to rewrite openai-codex model references:', e.message); }
+   } catch (e) { console.warn('[bridge] Failed to rewrite Codex runtime model references:', e.message); }
   }
  }
  if (authChanged) {
@@ -4084,9 +4156,15 @@ function removeOpenClawAgentConfig(agentId) {
 
 function upsertOpenClawSpcConfig(agentId, { model, fallbacks, params } = {}) {
  const clearModelOverride = isGatewayInheritedModel(model);
- const normalizedModel = model && !clearModelOverride ? normalizeGatewayModelId(model) : null;
- const normalizedFallbacks = normalizeGatewayFallbackModels(fallbacks);
+ const requestedModel = model && !clearModelOverride ? normalizeGatewayModelId(model) : null;
  updateOpenClawConfig((config) => {
+  const codexAvailable = hasRuntimeProviderCredential('openai-codex');
+  const normalizedModel = requestedModel && (!modelRequiresCodexRuntime(model, config) || codexAvailable) ? requestedModel : null;
+  const normalizedFallbacks = normalizedModel
+   ? normalizeGatewayFallbackModels(fallbacks).filter((fallback) => !modelRequiresCodexRuntime(fallback, config) || codexAvailable)
+   : [];
+  const safeDefault = pickNonCodexRuntimeFallbackModel();
+  if (!codexAvailable && safeDefault) sanitizeUnavailableCodexRuntimeModels(config, safeDefault, { hasCodexAuth: false });
   if (!config.agents.list) config.agents.list = [];
   config.agents.list = config.agents.list.filter((entry) => entry.id !== agentId);
   config.agents.list.push({
@@ -6951,12 +7029,18 @@ app.post('/agents', (req, res) => {
 
  // Add agent to openclaw.json agents.list
  const { fallbacks, params } = req.body;
- const normalizedModel = model && !isGatewayInheritedModel(model) ? normalizeGatewayModelId(model) : null;
- const normalizedFallbacks = normalizedModel ? normalizeGatewayFallbackModels(fallbacks) : [];
+ const requestedModel = model && !isGatewayInheritedModel(model) ? normalizeGatewayModelId(model) : null;
  updateOpenClawConfig((config) => {
- if (!config.agents.list) config.agents.list = [];
- // Remove existing entry if any
- config.agents.list = config.agents.list.filter(a => a.id !== agentId);
+  const codexAvailable = hasRuntimeProviderCredential('openai-codex');
+  const normalizedModel = requestedModel && (!modelRequiresCodexRuntime(model, config) || codexAvailable) ? requestedModel : null;
+  const normalizedFallbacks = normalizedModel
+   ? normalizeGatewayFallbackModels(fallbacks).filter((fallback) => !modelRequiresCodexRuntime(fallback, config) || codexAvailable)
+   : [];
+  const safeDefault = pickNonCodexRuntimeFallbackModel();
+  if (!codexAvailable && safeDefault) sanitizeUnavailableCodexRuntimeModels(config, safeDefault, { hasCodexAuth: false });
+  if (!config.agents.list) config.agents.list = [];
+  // Remove existing entry if any
+  config.agents.list = config.agents.list.filter(a => a.id !== agentId);
  config.agents.list.push({
  id: agentId,
  ...(normalizedModel ? { model: {
@@ -9555,7 +9639,10 @@ const pickSafeNativeDefaultModel = (config, requestedFallbacks = []) => {
  for (const candidate of candidates) {
   const normalized = candidate ? normalizeModelId(candidate) : null;
   if (!normalized || isGatewayInheritedModel(normalized) || isLocalGatewayModel(normalized)) continue;
-  if (normalized.startsWith('openai-codex/') && !hasConfiguredProviderCredential('openai-codex')) continue;
+  if (
+   (normalized.startsWith('openai-codex/') || modelRequiresCodexRuntime(candidate, config))
+   && !hasConfiguredProviderCredential('openai-codex')
+  ) continue;
   return normalized;
  }
  return null;
@@ -9626,6 +9713,11 @@ const _syncWarnings = [];
      ? { primary: config.agents.defaults.model, fallbacks: [] }
      : {};
  }
+ const codexAvailable = Boolean(openaiCodexAuthProfile?.access || hasFreshStoredCodexOAuthProfile());
+ const safeNonCodexDefault = pickSafeNativeDefaultModel(config, defaultFallbacks) || pickCredentialBackedDefaultModel();
+ if (!codexAvailable && safeNonCodexDefault && sanitizeUnavailableCodexRuntimeModels(config, safeNonCodexDefault, { hasCodexAuth: false })) {
+   console.log(`[bridge] Removed unavailable Codex runtime model mappings; using ${safeNonCodexDefault}`);
+ }
  if (defaultModel !== undefined) {
    const normalizedModel = defaultModel ? normalizeModelId(defaultModel) : null;
    if (normalizedModel && isLocalGatewayModel(normalizedModel)) {
@@ -9641,10 +9733,12 @@ const _syncWarnings = [];
        console.warn(`[bridge] ${msg}`);
        _syncWarnings.push(msg);
      }
-   } else if (normalizedModel?.startsWith?.('openai-codex/') && !openaiCodexAuthProfile?.access && !hasFreshStoredCodexOAuthProfile()) {
+   } else if ((normalizedModel?.startsWith?.('openai-codex/') || modelRequiresCodexRuntime(defaultModel, config)) && !codexAvailable) {
      const msg = `Skipped default model update to ${normalizedModel}: Codex OAuth profile is missing`;
      console.warn(`[bridge] ${msg}`);
      _syncWarnings.push(msg);
+     const safeModel = pickSafeNativeDefaultModel(config, defaultFallbacks) || pickCredentialBackedDefaultModel();
+     if (safeModel) config.agents.defaults.model.primary = safeModel;
    } else {
      config.agents.defaults.model.primary = normalizedModel || undefined;
      console.log(`[bridge] Updating default model to: ${normalizedModel}`);
@@ -9652,7 +9746,10 @@ const _syncWarnings = [];
  }
  if (defaultFallbacks !== undefined) {
    const normalizedFallbacks = Array.isArray(defaultFallbacks)
-     ? defaultFallbacks.filter(Boolean).map(normalizeModelId).filter((model) => !isLocalGatewayModel(model))
+     ? defaultFallbacks
+      .filter(Boolean)
+      .map(normalizeModelId)
+      .filter((model) => !isLocalGatewayModel(model) && (!modelRequiresCodexRuntime(model, config) || codexAvailable))
      : [];
    config.agents.defaults.model.fallbacks = normalizedFallbacks;
    console.log(`[bridge] Updating default fallbacks to: ${normalizedFallbacks.join(', ') || '(none)'}`);
