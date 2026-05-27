@@ -1635,7 +1635,7 @@ class OpenClawGateway {
  const sessionKey = opts.sessionKey || `agent:${_agentId}:hook:trooper:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
  const timeoutMs = opts.timeoutMs || 180000;
  const { explicitModel, effectiveModel: effectiveRequestedModel } = resolveGatewayModelSelection(opts.model);
- const selectedThinking = resolveGatewayThinkingSelection(opts.thinking, effectiveRequestedModel);
+ const selectedThinking = resolveGatewayThinkingSelection(opts.thinking, effectiveRequestedModel, { explicitModel });
  await assertLocalGatewayModelReachable(effectiveRequestedModel);
 
  const textChunks = [];
@@ -2024,7 +2024,7 @@ class OpenClawGateway {
  const runStartedAt = Date.now();
  const _projectFolder = opts.projectFolder || null;
  const { explicitModel, effectiveModel: effectiveRequestedModel } = resolveGatewayModelSelection(opts.model);
- const selectedThinking = resolveGatewayThinkingSelection(opts.thinking, effectiveRequestedModel);
+ const selectedThinking = resolveGatewayThinkingSelection(opts.thinking, effectiveRequestedModel, { explicitModel });
  const steerMode = opts.steer === true;
  if (!steerMode) await assertLocalGatewayModelReachable(effectiveRequestedModel);
  const steerWaitTimeoutMs = Math.max(30000, Math.min(timeoutMs, Number(opts.steerTimeoutMs) || timeoutMs));
@@ -4030,10 +4030,14 @@ async function assertLocalGatewayModelReachable(model) {
  }
 }
 
-function resolveGatewayThinkingSelection(thinking, model) {
+function resolveGatewayThinkingSelection(thinking, model, { explicitModel = null } = {}) {
  const requested = thinking === undefined || thinking === null || thinking === ''
    ? undefined
    : String(thinking);
+ if (!explicitModel && requested && requested !== 'off') {
+  console.log(`[bridge] Dropping thinking=${requested} for inherited/default model route`);
+  return undefined;
+ }
  if (!isLocalGatewayModel(model)) return requested;
  if (requested && requested !== 'off') {
   console.log(`[bridge] Forcing thinking=off for local model ${model} (requested ${requested})`);
