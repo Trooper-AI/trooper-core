@@ -1115,7 +1115,8 @@ ${MODELS_PROVIDERS}
  "web_search", "web_fetch", "browser",
  "memory_recall", "memory_search", "memory_get",
  "sessions_list", "sessions_history", "sessions_send", "sessions_spawn", "session_status",
- "agents_list", "image", "message", "cron", "gateway", "nodes",
+ "agents_list", "image", "image_generate", "video_generate", "music_generate",
+ "message", "cron", "gateway", "nodes",
  "llm-task", "lobster"
  ],
  "exec": {

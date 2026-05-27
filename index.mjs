@@ -728,6 +728,85 @@ function readRuntimeEnvSummary() {
  return { path: envPath, present };
 }
 
+const OPENCLAW_GENERATION_MODEL_FIELD_BY_SLOT = {
+ image_gen: 'imageGenerationModel',
+ video_gen: 'videoGenerationModel',
+ music_gen: 'musicGenerationModel',
+};
+
+const OPENCLAW_GENERATION_TOOL_BY_SLOT = {
+ image_gen: 'image_generate',
+ video_gen: 'video_generate',
+ music_gen: 'music_generate',
+};
+
+function ensureOpenClawToolAllowed(config, toolName) {
+ if (!toolName) return false;
+ if (!config.tools || typeof config.tools !== 'object' || Array.isArray(config.tools)) config.tools = {};
+ if (!Array.isArray(config.tools.allow)) config.tools.allow = [];
+ if (config.tools.allow.includes(toolName)) return false;
+ config.tools.allow.push(toolName);
+ return true;
+}
+
+function normalizeRoutingModelIdForOpenClaw(modelId) {
+ const model = String(modelId || '').trim();
+ return model || '';
+}
+
+function applyMediaGenerationRoutingToOpenClawConfig(config, routing = {}, fallbacks = {}) {
+ if (!config.agents || typeof config.agents !== 'object' || Array.isArray(config.agents)) config.agents = {};
+ if (!config.agents.defaults || typeof config.agents.defaults !== 'object' || Array.isArray(config.agents.defaults)) {
+  config.agents.defaults = {};
+ }
+
+ let changed = false;
+ const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
+ for (const [slot, field] of Object.entries(OPENCLAW_GENERATION_MODEL_FIELD_BY_SLOT)) {
+  const toolName = OPENCLAW_GENERATION_TOOL_BY_SLOT[slot];
+  const hasRouting = hasOwn(routing, slot);
+  const hasFallbacks = hasOwn(fallbacks, slot);
+  if (!hasRouting && !hasFallbacks) {
+   if (config.agents.defaults[field]) {
+    changed = ensureOpenClawToolAllowed(config, toolName) || changed;
+   }
+   continue;
+  }
+
+  const primary = normalizeRoutingModelIdForOpenClaw(routing?.[slot]);
+  const slotFallbacks = Array.isArray(fallbacks?.[slot])
+   ? fallbacks[slot].map(normalizeRoutingModelIdForOpenClaw).filter(Boolean)
+   : [];
+
+  if (!primary) {
+   if (Object.prototype.hasOwnProperty.call(config.agents.defaults, field)) {
+    delete config.agents.defaults[field];
+    changed = true;
+   }
+   continue;
+  }
+
+  const nextValue = slotFallbacks.length ? { primary, fallbacks: slotFallbacks } : primary;
+  if (JSON.stringify(config.agents.defaults[field]) !== JSON.stringify(nextValue)) {
+   config.agents.defaults[field] = nextValue;
+   changed = true;
+  }
+  changed = ensureOpenClawToolAllowed(config, toolName) || changed;
+ }
+ return changed;
+}
+
+function syncStoredMediaGenerationRoutingToOpenClawConfig(reason = 'provider-settings') {
+ const routing = readConfigKey('modelRouting') || {};
+ const fallbacks = readConfigKey('modelRoutingFallbacks') || {};
+ const config = readOpenClawConfig();
+ const changed = applyMediaGenerationRoutingToOpenClawConfig(config, routing, fallbacks);
+ if (!changed) return false;
+ writeOpenClawConfig(config);
+ console.log(`[bridge] Synced native media generation routing to OpenClaw config (${reason})`);
+ return true;
+}
+
 function readWorkspaceTextFile(fileName, maxChars = 50000) {
  const workspaceRoot = '/opt/openclaw-data/workspace';
  const safeName = String(fileName || '').replace(/^\/+/, '');
@@ -9799,6 +9878,7 @@ const _syncWarnings = [];
      return;
    }
    config.agents.defaults[field] = fallbacks.length ? { primary, fallbacks } : primary;
+   ensureOpenClawToolAllowed(config, OPENCLAW_GENERATION_TOOL_BY_SLOT[slot]);
    console.log(`[bridge] Updating ${field} to: ${primary}${fallbacks.length ? ` (+${fallbacks.length} fallback)` : ''}`);
  };
  setGenerationModel('image_gen', 'imageGenerationModel');
@@ -10126,9 +10206,14 @@ app.get('/config/provider-settings', (req, res) => {
   } catch {}
 
   // Settings from SQLite
-  const modelRouting = readConfigKey('modelRouting') || {};
-  const providerModels = readConfigKey('providerModels') || {};
-  const modelRoutingFallbacks = readConfigKey('modelRoutingFallbacks') || {};
+ const modelRouting = readConfigKey('modelRouting') || {};
+ const providerModels = readConfigKey('providerModels') || {};
+ const modelRoutingFallbacks = readConfigKey('modelRoutingFallbacks') || {};
+  try {
+   syncStoredMediaGenerationRoutingToOpenClawConfig('provider-settings-read');
+  } catch (e) {
+   console.warn(`[bridge] Media generation routing sync skipped during provider-settings read: ${e.message}`);
+  }
   const pendingBridgeApply = readConfigKey('pendingBridgeApply') || false;
   const defaultModel = modelRouting.chat || readConfigKey('defaultModel') || null;
   const composerChatModel = readConfigKey('composerChatModel') || null;
@@ -10194,6 +10279,13 @@ app.put('/config/provider-settings', (req, res) => {
   if (chatThinkingLevel !== undefined) writeConfigKey('chatThinkingLevel', chatThinkingLevel || 'auto');
   if (localModelUrl !== undefined) writeConfigKey('localModelUrl', String(localModelUrl || '').trim().replace(/\/+$/, ''));
   if (ollamaBaseUrl !== undefined) writeConfigKey('ollamaBaseUrl', String(ollamaBaseUrl || '').trim().replace(/\/+$/, ''));
+  if (modelRouting !== undefined || modelRoutingFallbacks !== undefined) {
+   try {
+    syncStoredMediaGenerationRoutingToOpenClawConfig('provider-settings-write');
+   } catch (e) {
+    console.warn(`[bridge] Media generation routing sync failed during provider-settings write: ${e.message}`);
+   }
+  }
   res.json({ ok: true });
  } catch (err) {
   res.status(500).json({ error: err.message });
