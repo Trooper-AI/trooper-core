@@ -5200,7 +5200,7 @@ const SYSTEM_WORKSPACE_FILES = new Set([
  'USER.md',
 ]);
 const SYSTEM_WORKSPACE_DIRS = new Set(['memory', 'state']);
-const ROOT_VIRTUAL_DIRS = new Set(['System', 'Team', 'Channels']);
+const ROOT_VIRTUAL_DIRS = new Set(['System', 'Team', 'Channels', 'Media']);
 const ALLOWED_LIST_PATHS = ['/tmp', WORKSPACE_CONTAINER_ROOT, MEDIA_CONTAINER_ROOT, WORKSPACE_HOST_ROOT, AGENTS_CONFIG_ROOT];
 
 function cleanWorkspacePath(value = '/') {
@@ -5439,6 +5439,10 @@ function listVirtualWorkspaceRoot() {
   .filter((entry) => !shouldHideWorkspaceRootEntry(entry));
  const byName = new Map(actualEntries.map((entry) => [entry.name, entry]));
  const entries = [];
+ const media = containerEntryStat(MEDIA_CONTAINER_ROOT);
+ if (media?.type === 'dir') {
+  entries.push({ name: 'Media', type: 'dir', path: '/Media', size: media.size || 0, modified: media.modified || null });
+ }
  const tasks = byName.get('Tasks') || getWorkspaceEntry('Tasks');
  if (tasks) entries.push({ ...tasks, name: 'Tasks', path: '/Tasks' });
  entries.push(byName.get('Channels') || { name: 'Channels', type: 'dir', path: '/Channels', size: 0, modified: null });
@@ -5459,7 +5463,7 @@ function listVirtualWorkspaceRoot() {
   }
  } catch {}
 
- const order = new Map(['Screenshots', 'Tasks', 'Channels', 'Team', 'apps', 'skills', 'System'].map((name, index) => [name, index]));
+ const order = new Map(['Screenshots', 'Media', 'Tasks', 'Channels', 'Team', 'apps', 'skills', 'System'].map((name, index) => [name, index]));
  return entries.sort((a, b) => {
   const ao = order.has(a.name) ? order.get(a.name) : 50;
   const bo = order.has(b.name) ? order.get(b.name) : 50;
@@ -5518,6 +5522,16 @@ function resolveWorkspacePathForFiles(rawPath = '/', { file = false } = {}) {
   return {
    kind: 'host',
    realPath: path.join(WORKSPACE_HOST_ROOT, rel),
+   displayPath: virtualPath,
+   virtualBase: virtualPath,
+  };
+ }
+
+ if (virtualPath === '/Media' || virtualPath.startsWith('/Media/')) {
+  const rel = virtualPath === '/Media' ? '' : virtualPath.slice('/Media/'.length);
+  return {
+   kind: 'container',
+   realPath: rel ? `${MEDIA_CONTAINER_ROOT}/${rel}` : MEDIA_CONTAINER_ROOT,
    displayPath: virtualPath,
    virtualBase: virtualPath,
   };
@@ -10981,6 +10995,38 @@ app.get('/api/session-status', async (req, res) => {
     if (!sessionKey) return res.status(400).json({ error: 'sessionKey is required' });
     const session = await gateway.fetchSessionSnapshot(sessionKey);
     res.json({ ok: true, session });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/session-history', async (req, res) => {
+  try {
+    const sessionKey = String(req.query.sessionKey || '').trim();
+    if (!sessionKey) return res.status(400).json({ error: 'sessionKey is required' });
+    const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 160));
+    const timeoutMs = Math.max(1000, Math.min(30000, Number(req.query.timeoutMs) || 10000));
+    const messages = await gateway.fetchSessionHistory(sessionKey, limit, { timeoutMs });
+    res.set('Cache-Control', 'no-store');
+    res.json({ ok: true, sessionKey, messages });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/session-tool-events', async (req, res) => {
+  try {
+    const sessionKey = String(req.query.sessionKey || '').trim();
+    if (!sessionKey) return res.status(400).json({ error: 'sessionKey is required' });
+    const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 160));
+    const timeoutMs = Math.max(1000, Math.min(30000, Number(req.query.timeoutMs) || 10000));
+    const messages = await gateway.fetchSessionHistory(sessionKey, limit, { timeoutMs });
+    const events = extractHistoryToolEvents(messages, {
+      sessionKey,
+      source: 'session_history_http',
+    });
+    res.set('Cache-Control', 'no-store');
+    res.json({ ok: true, sessionKey, events, messages });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
