@@ -8813,10 +8813,22 @@ app.post('/gateway/patch-auth', (req, res) => {
  execSync('chown node:node /opt/openclaw-bridge/device-identity.json 2>/dev/null || chown 1000:1000 /opt/openclaw-bridge/device-identity.json 2>/dev/null || true', { timeout: 5000 });
  execSync('chmod 600 /opt/openclaw-bridge/device-identity.json 2>/dev/null || true', { timeout: 5000 });
  const pairedRepair = upsertBridgePairedDevice({ force: true, reason: 'patch-auth' });
- // Restart gateway to apply paired.json changes
- execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
  gateway.token = getDesiredGatewayToken() || gateway.token;
- gateway.forceReconnect(15000, 'patch-auth');
+ const alreadySettling = gateway.expectedReconnectUntil && Date.now() < gateway.expectedReconnectUntil;
+ if (alreadySettling && req.body?.force !== true) {
+  return res.json({
+   success: true,
+   skippedRestart: true,
+   message: 'Identity fixed and paired.json repaired; gateway restart already settling',
+   authRepair: repair,
+   pairedRepair,
+   expectedReconnectUntil: gateway.expectedReconnectUntil,
+  });
+ }
+ // Restart gateway to apply paired.json changes. Use a generous settle window so
+ // external repair loops do not restart it again before the websocket re-pairs.
+ execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
+ gateway.forceReconnect(30000, 'patch-auth');
  res.json({ success: true, message: 'Identity fixed, gateway auth synced, paired.json repaired, and gateway restarted', authRepair: repair, pairedRepair });
  } catch (err) {
  res.status(500).json({ error: 'Patch failed', details: err.message });
@@ -8825,15 +8837,24 @@ app.post('/gateway/patch-auth', (req, res) => {
 
 app.post('/gateway/restart', (req, res) => {
  try {
+ const alreadySettling = gateway.expectedReconnectUntil && Date.now() < gateway.expectedReconnectUntil;
+ if (alreadySettling && req.body?.force !== true) {
+  return res.json({
+   success: true,
+   skippedRestart: true,
+   message: 'Gateway restart already settling',
+   expectedReconnectUntil: gateway.expectedReconnectUntil,
+  });
+ }
  console.log('Restarting OpenClaw gateway container...');
  const configRepair = repairOpenClawConfigForGatewayStart('gateway-restart');
  const pairedRepair = upsertBridgePairedDevice({ force: true, reason: 'gateway-restart' });
  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
+ gateway.forceReconnect(30000, 'gateway-restart');
  // Re-approve device and reconnect after restart
  setTimeout(async () => {
  try { execSync(`docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null; docker exec openclaw-openclaw-gateway-1 chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null`, { timeout: 15000 }); } catch {}
  gateway.token = getDesiredGatewayToken() || gateway.token;
- gateway.forceReconnect(5000, 'gateway-restart');
  }, 5000);
  res.json({ success: true, message: 'Gateway container restarted', configRepair, pairedRepair });
  } catch (err) {
