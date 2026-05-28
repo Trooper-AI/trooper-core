@@ -1176,11 +1176,14 @@ class OpenClawGateway {
    const configRepair = repairOpenClawConfigForGatewayStart('connect-reset-recovery');
    upsertBridgePairedDevice({ force: true, reason: 'connect-reset-recovery' });
    this.token = getDesiredGatewayToken() || this.token;
-   console.warn(`[OpenClaw] Repeated gateway socket resets; restarting gateway (${msg})`);
+   console.warn(`[OpenClaw] Repeated gateway socket resets; repaired auth state and backing off (${msg})`);
    if (configRepair.repairs?.length) {
     console.warn(`[OpenClaw] Config repaired before reset recovery: ${configRepair.repairs.join('; ')}`);
    }
-   execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
+   if (process.env.OPENCLAW_RESET_RECOVERY_RESTART === '1') {
+    console.warn('[OpenClaw] OPENCLAW_RESET_RECOVERY_RESTART=1; restarting gateway after reset recovery');
+    execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
+   }
    this.forceReconnect(30000, 'connect-reset-recovery');
  } catch (recoveryErr) {
    console.error('[OpenClaw] Gateway reset recovery failed:', recoveryErr.message);
