@@ -1037,6 +1037,18 @@ function upsertBridgePairedDevice({ force = false, reason = 'repair' } = {}) {
  };
 }
 
+function getBridgeOperatorDeviceToken() {
+ if (!deviceIdentity?.deviceId) return '';
+ try {
+  const paired = JSON.parse(readFileSync(OPENCLAW_PAIRED_JSON_PATH, 'utf8'));
+  const entry = paired?.[deviceIdentity.deviceId];
+  const token = entry?.tokens?.operator?.token;
+  return typeof token === 'string' && token.trim() ? token.trim() : '';
+ } catch {
+  return '';
+ }
+}
+
 function isGatewayPairingError(message = '') {
  return /pairing required|not paired|unpaired|device.*pair|pair.*device|approval required|device.*approval/i.test(String(message || ''));
 }
@@ -1464,18 +1476,20 @@ class OpenClawGateway {
  const role = 'operator';
  const scopes = OPERATOR_SCOPES;
  const nonce = this._connectNonce || undefined;
+ const operatorDeviceToken = getBridgeOperatorDeviceToken();
+ const authToken = operatorDeviceToken || this.token;
  const params = {
  minProtocol: 1, maxProtocol: 4,
  client: { id: 'gateway-client', displayName: 'Trooper Bridge', version: '2.1.0', platform: 'linux', mode: 'backend' },
- auth: { token: this.token },
+ auth: { token: authToken },
  role, scopes,
  };
 
- if (USE_GATEWAY_DEVICE_AUTH && nonce) {
+ if ((USE_GATEWAY_DEVICE_AUTH || operatorDeviceToken) && deviceIdentity?.privateKeyPem) {
  const signedAtMs = Date.now();
  const payload = buildDeviceAuthPayload({
  deviceId: deviceIdentity.deviceId, clientId: 'gateway-client', clientMode: 'backend',
- role, scopes, signedAtMs, token: this.token, nonce,
+ role, scopes, signedAtMs, token: authToken, nonce,
  });
  const signature = signDevicePayload(deviceIdentity.privateKeyPem, payload);
  const publicKey = getDevicePublicKeyBase64Url(deviceIdentity);
