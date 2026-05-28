@@ -62,7 +62,7 @@ run_as_node "node dist/index.js doctor --repair" 2>&1 \
 
 # Start gateway as node user
 if [ "$(id -u)" = "0" ]; then
-  exec su -s /bin/bash node -c "DISPLAY=:99 NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind loopback --port '$GATEWAY_PORT'"
+  exec su -s /bin/bash node -c "DISPLAY=:99 NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind lan --port '$GATEWAY_PORT'"
 else
-  exec bash -lc "DISPLAY=:99 NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind loopback --port '$GATEWAY_PORT'"
+  exec bash -lc "DISPLAY=:99 NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind lan --port '$GATEWAY_PORT'"
 fi

@@ -1314,9 +1314,9 @@ chmod 666 /home/node/.openclaw/devices/*.json 2>/dev/null || true
 
 # Drop back to node user for the gateway process when running as root.
 if [ "$(id -u)" = "0" ]; then
-  exec su -s /bin/bash node -c "DISPLAY=:99 JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind loopback --port '$GATEWAY_PORT'"
+  exec su -s /bin/bash node -c "DISPLAY=:99 JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind lan --port '$GATEWAY_PORT'"
 else
-  exec bash -lc "DISPLAY=:99 JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind loopback --port '$GATEWAY_PORT'"
+  exec bash -lc "DISPLAY=:99 JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind lan --port '$GATEWAY_PORT'"
 fi
 STARTUP
 chmod +x /opt/openclaw-data/startup.sh

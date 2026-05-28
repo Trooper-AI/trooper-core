@@ -1144,11 +1144,10 @@ class OpenClawGateway {
 
 	 async _probeGatewayHttpReady() {
 	 const baseUrl = this.url.replace(/^ws/i, 'http').replace(/\/$/, '');
-	 const healthUrl = `${baseUrl}/healthz`;
+	 const healthUrl = `${baseUrl}/`;
 	 const stableMs = Math.max(0, Number(process.env.OPENCLAW_WS_HEALTH_STABLE_MS || 8000));
 	 try {
 	   const res = await fetch(healthUrl, { signal: AbortSignal.timeout(2000) });
-	   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 	   const now = Date.now();
 	   if (!this._gatewayHttpReadySince) this._gatewayHttpReadySince = now;
 	   const ageMs = now - this._gatewayHttpReadySince;
