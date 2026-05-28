@@ -1116,6 +1116,9 @@ class OpenClawGateway {
  this._pingInterval = null;
  this._lastSelfApproveMs = 0; // cooldown: don't restart gateway more than once per 5 min
  this._lastAuthRepairMs = 0;
+ this._resetErrorWindowStartedAt = 0;
+ this._resetErrorCount = 0;
+ this._lastResetRecoveryMs = 0;
  this.lastAuthError = null;
  this.lastAuthAt = null;
  this.lastConnectedAt = null;
@@ -1153,6 +1156,35 @@ class OpenClawGateway {
  this._reconnectDelay = 5000;
  console.log('[OpenClaw] Eager reconnect attempt (request triggered)...');
  return await this.connect();
+ }
+
+ _maybeRecoverGatewayAfterConnectReset(err) {
+ const msg = String(err?.message || err || '');
+ if (!/(socket hang up|ECONNRESET)/i.test(msg)) return;
+ const now = Date.now();
+ if (!this._resetErrorWindowStartedAt || now - this._resetErrorWindowStartedAt > 90000) {
+   this._resetErrorWindowStartedAt = now;
+   this._resetErrorCount = 0;
+ }
+ this._resetErrorCount += 1;
+ if (this._resetErrorCount < 3) return;
+ if (now - this._lastResetRecoveryMs < 120000) return;
+ this._lastResetRecoveryMs = now;
+ this._resetErrorCount = 0;
+ try {
+   const configRepair = repairOpenClawConfigForGatewayStart('connect-reset-recovery');
+   upsertBridgePairedDevice({ force: true, reason: 'connect-reset-recovery' });
+   this.token = getDesiredGatewayToken() || this.token;
+   console.warn(`[OpenClaw] Repeated gateway socket resets; restarting gateway (${msg})`);
+   if (configRepair.repairs?.length) {
+    console.warn(`[OpenClaw] Config repaired before reset recovery: ${configRepair.repairs.join('; ')}`);
+   }
+   execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
+   this.forceReconnect(15000, 'connect-reset-recovery');
+ } catch (recoveryErr) {
+   console.error('[OpenClaw] Gateway reset recovery failed:', recoveryErr.message);
+   captureLog('error', `Gateway reset recovery failed: ${recoveryErr.message}`, { stack: recoveryErr.stack });
+ }
  }
 
  async connect() {
@@ -1230,6 +1262,8 @@ class OpenClawGateway {
  this.connected = true;
  this.lastConnectedAt = Date.now();
  this.lastError = null;
+ this._resetErrorWindowStartedAt = 0;
+ this._resetErrorCount = 0;
  this.expectedReconnectUntil = 0;
  this.lastReconnectReason = null;
  this._reconnectDelay = 5000;
@@ -1313,6 +1347,7 @@ class OpenClawGateway {
  this.lastError = err.message;
  console.error('[OpenClaw] WebSocket error:', err.message);
  captureLog('error', `Gateway WebSocket error: ${err.message}`, { stack: err.stack });
+ this._maybeRecoverGatewayAfterConnectReset(err);
  });
 
  setTimeout(() => {
@@ -8897,7 +8932,14 @@ app.put('/gateway/config', (req, res) => {
     configRepair,
   });
  }
- const restartRequested = req.query?.restart === 'true' || req.body?.restartGateway === true || req.body?.restart === true;
+ const hotReloadRequested = req.query?.hotReload === 'true'
+  || req.query?.reload === 'hot'
+  || req.body?.hotReloadGateway === true
+  || req.body?.hotReload === true;
+ const restartRequested = !hotReloadRequested
+  || req.query?.restart === 'true'
+  || req.body?.restartGateway === true
+  || req.body?.restart === true;
  upsertBridgePairedDevice({ force: true, reason: 'config-update' });
  gateway.token = getDesiredGatewayToken() || gateway.token;
  let applyOutput = '';
@@ -8909,6 +8951,7 @@ app.put('/gateway/config', (req, res) => {
   console.log('Gateway config updated, requesting hot reload...');
   try {
    applyOutput = execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>&1', { timeout: 5000 }).toString();
+   gateway.forceReconnect(5000, 'config-hot-reload');
   } catch (reloadErr) {
    applyOutput = reloadErr.message;
   }
@@ -10103,13 +10146,14 @@ const _syncWarnings = [];
  return { ok: signaled, steps, errors };
  };
 
- const restartRequested = req.body?.restartGateway === true || req.body?.restart === true || req.body?.restartContainers === true;
+ const hotReloadRequested = req.body?.hotReloadGateway === true || req.body?.hotReload === true;
+ const restartRequested = !hotReloadRequested || req.body?.restartGateway === true || req.body?.restart === true || req.body?.restartContainers === true;
  let reloadMode = 'hot';
  let restartOk = true;
  let hotReloadResult = null;
 
  if (restartRequested) {
- console.log('Restarting OpenClaw containers after key update (requested)...');
+ console.log(`Restarting OpenClaw containers after key update (${hotReloadRequested ? 'fallback' : 'default'} restart)...`);
  try {
  await run('cd /opt/openclaw && docker compose down && docker compose up -d', { timeout: 60000 });
  reloadMode = 'restart';
@@ -10121,18 +10165,31 @@ const _syncWarnings = [];
  }
 
  if (restartOk) {
- hotReloadResult = await runHotReload();
- try {
- await run(`docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null; docker exec openclaw-openclaw-gateway-1 chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null`, { timeout: 15000 });
- console.log('[keys] Bridge device re-approved after restart');
- } catch (e) { console.warn('[keys] Device auto-approve failed (will retry on connect):', e.message); }
- setTimeout(() => gateway.connect(), 5000);
+  hotReloadResult = await runHotReload();
+  try {
+   await run(`docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null; docker exec openclaw-openclaw-gateway-1 chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null`, { timeout: 15000 });
+   console.log('[keys] Bridge device re-approved after restart');
+  } catch (e) { console.warn('[keys] Device auto-approve failed (will retry on connect):', e.message); }
+ upsertBridgePairedDevice({ force: true, reason: 'api-keys-update' });
+ gateway.token = getDesiredGatewayToken() || gateway.token;
+ gateway.forceReconnect(15000, 'api-keys-update');
  }
  } else {
  hotReloadResult = await runHotReload();
  if (!hotReloadResult.ok) {
- reloadMode = 'manual_restart_required';
- warnings.push('Hot reload signal failed; the key/config was saved, but a manual gateway restart may be required for OpenClaw to pick it up.');
+ console.warn('[keys] Hot reload failed; falling back to controlled gateway restart');
+ try {
+  await run('cd /opt/openclaw && docker compose down && docker compose up -d', { timeout: 60000 });
+  reloadMode = 'restart';
+  upsertBridgePairedDevice({ force: true, reason: 'api-keys-hot-reload-fallback' });
+  gateway.token = getDesiredGatewayToken() || gateway.token;
+  gateway.forceReconnect(15000, 'api-keys-hot-reload-fallback');
+ } catch (restartErr) {
+  reloadMode = 'manual_restart_required';
+  warnings.push('Hot reload signal failed; controlled gateway restart also failed, so a manual gateway restart may be required.');
+  warnings.push(`Gateway restart failed: ${restartErr.message}`);
+  console.error('[keys] Controlled restart fallback failed:', restartErr.message);
+ }
  }
  }
 
