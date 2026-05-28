@@ -1485,7 +1485,7 @@ class OpenClawGateway {
  role, scopes,
  };
 
- if ((USE_GATEWAY_DEVICE_AUTH || operatorDeviceToken) && deviceIdentity?.privateKeyPem) {
+ if ((USE_GATEWAY_DEVICE_AUTH || operatorDeviceToken) && nonce && deviceIdentity?.privateKeyPem) {
  const signedAtMs = Date.now();
  const payload = buildDeviceAuthPayload({
  deviceId: deviceIdentity.deviceId, clientId: 'gateway-client', clientMode: 'backend',
@@ -1508,7 +1508,7 @@ class OpenClawGateway {
  // Handle connect.challenge — gateway sends nonce, we re-auth with it signed
  if (frame.type === 'event' && frame.event === 'connect.challenge') {
  const nonce = frame.payload?.nonce;
- if (USE_GATEWAY_DEVICE_AUTH && nonce) {
+ if ((USE_GATEWAY_DEVICE_AUTH || getBridgeOperatorDeviceToken()) && nonce) {
  console.log('[OpenClaw] Received connect challenge, re-authenticating with nonce...');
  this._connectNonce = nonce;
  this._sendConnect();
