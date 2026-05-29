@@ -7981,24 +7981,7 @@ makeCollectionRoutes(app, db, rulesTable, "rules", ["id","name","content","enabl
 makeCollectionRoutes(app, db, playbooksTable, "playbooks", ["id","name","data","created_at","updated_at"]);
 makeCollectionRoutes(app, db, policiesTable, "policies", ["id","data","created_at","updated_at"]);
 
-// ── Messages API ──────────────────────────────────────────────────────────
-// GET /api/messages — recent messages for a channel
-app.get('/api/messages', (req, res) => {
- try {
- const { channel = 'general', limit = 50 } = req.query;
- const results = db
-  .select()
-  .from(messagesTable)
-  .where(eq(messagesTable.channel, channel))
-  .orderBy(desc(messagesTable.created_at))
-  .limit(Math.min(parseInt(limit) || 50, 200))
-  .all()
-  .reverse(); // oldest first
- res.json({ messages: results });
- } catch (err) {
- res.status(500).json({ error: err.message });
- }
-});
+// Messages REST API — registered via registerMessageRoutes() in lib/api-routes.mjs
 
 // ── Vault File Dump (Obsidian → VPS) ────────────────────────────────
 import { mkdirSync as fsMkdirSync, writeFileSync as fsWriteFileSync, existsSync as fsExistsSync } from 'fs';
