@@ -1242,6 +1242,62 @@ function isGatewayPairingError(message = '') {
  return /pairing required|not paired|unpaired|device.*pair|pair.*device|approval required|device.*approval/i.test(String(message || ''));
 }
 
+function ensureOpenClawComposeOverride({ reason = 'repair' } = {}) {
+ const overridePath = '/opt/openclaw/docker-compose.override.yml';
+ if (!existsSync('/opt/openclaw')) return { changed: false, skipped: true, reason: 'missing-openclaw-dir' };
+ const dockerGid = (() => {
+  try { return execSync('getent group docker | cut -d: -f3', { timeout: 3000 }).toString().trim() || '0'; } catch { return '0'; }
+ })();
+ const gatewayPortMatches = String(process.env.OPENCLAW_GATEWAY_PORT || process.env.GATEWAY_PORT || '18789').match(/\d+/g) || [];
+ const gatewayPort = gatewayPortMatches[gatewayPortMatches.length - 1] || '18789';
+ const next = [
+  'services:',
+  '  openclaw-gateway:',
+  '    network_mode: host',
+  '    volumes:',
+  '      - /var/run/docker.sock:/var/run/docker.sock',
+  '      - /usr/bin/docker:/usr/bin/docker:ro',
+  '      - /opt/openclaw-data/startup.sh:/opt/startup.sh:ro',
+  '      - /opt/openclaw-data/chrome-wrapper.sh:/opt/chrome-wrapper.sh:ro',
+  '      - /var/run/openclaw:/var/run/openclaw',
+  '    group_add:',
+  `      - "${dockerGid}"`,
+  '    environment:',
+  '      OPENAI_API_KEY: ${OPENAI_API_KEY:-}',
+  '      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}',
+  '      GEMINI_API_KEY: ${GEMINI_API_KEY:-}',
+  '      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}',
+  '      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}',
+  '      BRAVE_API_KEY: ${BRAVE_API_KEY}',
+  '      CHROME_PATH: /opt/chrome-wrapper.sh',
+  '      CHROMIUM_PATH: /opt/chrome-wrapper.sh',
+  '      PUPPETEER_EXECUTABLE_PATH: /opt/chrome-wrapper.sh',
+  '      OPENCLAW_BROWSER_EXECUTABLE: /opt/chrome-wrapper.sh',
+  '      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY}',
+  '      TMPDIR: /var/tmp',
+  '      TMP: /var/tmp',
+  '      TEMP: /var/tmp',
+  '      OPENCLAW_TMPDIR: /var/tmp/openclaw-1000',
+  '      OPENCLAW_NATIVE_HOOK_RELAY_DIR: /var/tmp/openclaw-native-hook-relays-1000',
+  '      JITI_CACHE_DIR: /var/tmp/jiti',
+  '    user: "0:0"',
+  '    entrypoint: ["/bin/bash", "/opt/entrypoint.sh"]',
+  `    command: ["${gatewayPort}"]`,
+  '  openclaw-cli:',
+  '    profiles: ["disabled"]',
+  '',
+ ].join('\n');
+ let current = '';
+ try { current = readFileSync(overridePath, 'utf8'); } catch {}
+ if (current === next) return { changed: false, path: overridePath, reason };
+ try {
+  if (current) writeFileSync(`${overridePath}.bak.${Date.now()}`, current);
+ } catch {}
+ writeFileSync(overridePath, next, { mode: 0o644 });
+ console.log(`[OpenClaw] docker-compose override repaired (${reason})`);
+ return { changed: true, path: overridePath, reason };
+}
+
 const OPENCLAW_GATEWAY_TOKEN = getDesiredGatewayToken();
 const OPENCLAW_HOOK_TOKEN = process.env.OPENCLAW_HOOK_TOKEN || '';
 
@@ -6183,6 +6239,8 @@ app.post('/admin/restart-services', async (req, res) => {
 
    // Restart Docker containers (openclaw gateway)
    try {
+     const composeRepair = ensureOpenClawComposeOverride({ reason: 'admin-restart-services' });
+     results.push({ service: 'openclaw-compose', action: composeRepair.changed ? 'repaired' : 'unchanged' });
      execSync('cd /opt/openclaw && docker compose down 2>&1', { timeout: 30000 });
      results.push({ service: 'openclaw-gateway', action: 'stopped' });
    } catch (e) {
@@ -12056,25 +12114,7 @@ exec node dist/index.js gateway --allow-unconfigured --bind lan --port "\$GATEWA
  fs.writeFileSync('/opt/openclaw-data/startup.sh', startupScript, { mode: 0o755 });
  console.log('Startup script written to /opt/openclaw-data/startup.sh');
 
- // Ensure docker-compose override has startup entrypoint + volume mount
- const overridePath = '/opt/openclaw/docker-compose.override.yml';
- let override = fs.readFileSync(overridePath, 'utf8');
- if (!override.includes('startup.sh')) {
- // Add volume mount and entrypoint for startup script
- override = override.replace(
- / volumes:/,
- ' volumes:\n - /opt/openclaw-data/startup.sh:/opt/startup.sh:ro'
- );
- if (!override.includes('entrypoint:')) {
- // Find the command line and replace with entrypoint
- override = override.replace(
- / command: .*/,
- ' entrypoint: ["/bin/bash", "/opt/startup.sh"]\n command: ["18789"]'
- );
- }
- fs.writeFileSync(overridePath, override);
- console.log('Docker-compose override patched with startup entrypoint');
- }
+ ensureOpenClawComposeOverride({ reason: 'update' });
  } catch (e) { console.error('Failed to write startup script:', e.message); }
 
  await run('cd /opt/openclaw && docker compose down && docker compose up -d');
