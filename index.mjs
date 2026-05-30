@@ -6209,6 +6209,7 @@ app.get('/health', async (req, res) => {
 
  const gatewayStatus = buildGatewayRuntimeStatus();
  const gatewayHealthy = gatewayStatus.connected === true;
+ const bridgeOnline = setupDone && gatewayStatus.running !== false;
  const gatewayState = !setupDone
    ? 'installing'
    : normalizeGatewayState(gatewayStatus.status, { setupDone, activeOperation: gatewayStatus.currentOperation });
@@ -6216,7 +6217,7 @@ app.get('/health', async (req, res) => {
    ? 'installing'
    : gatewayHealthy
      ? 'ok'
-     : gatewayStatus.transient
+     : (gatewayStatus.transient || bridgeOnline)
        ? 'recovering'
        : 'degraded';
 
@@ -6227,6 +6228,8 @@ app.get('/health', async (req, res) => {
 
  res.json({
  status: healthStatus,
+ bridge_online: bridgeOnline,
+ gateway_available: gatewayHealthy,
  gateway_state: gatewayState,
  service: 'openclaw-bridge',
 	 reason: healthStatus === 'ok' || healthStatus === 'installing' ? null : gatewayStatus.stateReason,
