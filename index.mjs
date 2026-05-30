@@ -2043,7 +2043,7 @@ class OpenClawGateway {
  // Session key in canonical format: agent:{agentId}:{rest}
  const _agentId = opts.agentId || 'main';
  const sessionKey = opts.sessionKey || `agent:${_agentId}:hook:trooper:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
- const timeoutMs = opts.timeoutMs || 180000;
+ const timeoutMs = opts.timeoutMs || 600000;
  const { explicitModel, effectiveModel: effectiveRequestedModel } = resolveGatewayModelSelection(opts.model);
  const selectedThinking = resolveGatewayThinkingSelection(opts.thinking, effectiveRequestedModel, { explicitModel });
  await assertLocalGatewayModelReachable(effectiveRequestedModel);
@@ -2430,7 +2430,7 @@ class OpenClawGateway {
  // Session key in canonical format: agent:{agentId}:{rest}
  const _agentId2 = opts.agentId || 'main';
  const sessionKey = opts.sessionKey || `agent:${_agentId2}:hook:trooper:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
- const timeoutMs = opts.timeoutMs || 180000;
+ const timeoutMs = opts.timeoutMs || 600000;
  const runStartedAt = Date.now();
  const _projectFolder = opts.projectFolder || null;
  const { explicitModel, effectiveModel: effectiveRequestedModel } = resolveGatewayModelSelection(opts.model);
@@ -4944,7 +4944,7 @@ async function handleIncomingTask(req, res) {
  thinking: thinking || undefined,
  model: nonStreamModel,
  extraSystemPrompt: nonStreamSystemPrompt,
- timeoutMs: isTaskWork ? 600000 : 180000,
+ timeoutMs: 600000,
  };
  let result;
  try {
@@ -5159,10 +5159,10 @@ const emitViewportScreenshotFrame = ({
 	 let streamingEffectiveModel = null;
 	 try {
 	 console.log(`[${id}] SSE streaming to OpenClaw agent:${agentId} for ${agentName || 'default'}${context?.executionLane ? ` [lane:${context.executionLane}]` : isBrowserTask ? ' [browser task]' : ''}...`);
-	 // Task work needs longer inactivity timeout — gateway agents do internal tool work
-	 // that emits WS events. 600s for tasks, 180s for chat.
+	 // Chat and task work both need a long inactivity window because OpenClaw can
+	 // stay alive while a connector/tool is resolving quietly.
 	 const isTaskWork = !!(context?.taskId);
-	 const inactivityMs = isTaskWork ? 600000 : 180000;
+	 const inactivityMs = 600000;
 	 ({ explicitModel: streamingExplicitModel, effectiveModel: streamingEffectiveModel } = resolveGatewayModelSelection(model));
 	 const codexBypass = resolveRuntimeCodexRefreshBypass(streamingExplicitModel || streamingEffectiveModel);
 	 if (codexBypass?.fallbackModel) {
@@ -12259,12 +12259,62 @@ app.post('/composio/tools/execute/:toolSlug', async (req, res) => {
  if (!decision.allowed) {
   return res.status(403).json({ error: 'Integration permission denied', decision });
  }
+ const args = body.arguments && typeof body.arguments === 'object' && !Array.isArray(body.arguments)
+  ? body.arguments
+  : {};
+ const entityId = String(body.entity_id || body.entityId || body.user_id || body.userId || args.entity_id || args.entityId || '').trim();
+ const connectedAccountId = String(
+  body.connected_account_id
+  || body.connectedAccountId
+  || body.connection_id
+  || body.connectionId
+  || body.account_id
+  || body.accountId
+  || args.connected_account_id
+  || args.connectedAccountId
+  || args.connection_id
+  || args.connectionId
+  || args.account_id
+  || args.accountId
+  || ''
+ ).trim();
  const forwardBody = { ...body };
  delete forwardBody.agentId;
  delete forwardBody.agent_id;
  delete forwardBody.pluginId;
+ delete forwardBody.plugin_id;
+ delete forwardBody.composioSlug;
+ delete forwardBody.composio_slug;
  delete forwardBody.toolkitSlug;
+ delete forwardBody.toolkit_slug;
+ delete forwardBody.requestedAccess;
+ delete forwardBody.requested_access;
  delete forwardBody.connectionId;
+ delete forwardBody.connection_id;
+ delete forwardBody.accountId;
+ delete forwardBody.account_id;
+ delete forwardBody.connectedAccountId;
+ delete forwardBody.connected_account_id;
+ delete forwardBody.entityId;
+ delete forwardBody.entity_id;
+ delete forwardBody.userId;
+ delete forwardBody.user_id;
+ if (forwardBody.arguments && typeof forwardBody.arguments === 'object' && !Array.isArray(forwardBody.arguments)) {
+  forwardBody.arguments = { ...forwardBody.arguments };
+  delete forwardBody.arguments.entity_id;
+  delete forwardBody.arguments.entityId;
+  delete forwardBody.arguments.connected_account_id;
+  delete forwardBody.arguments.connectedAccountId;
+  delete forwardBody.arguments.connection_id;
+  delete forwardBody.arguments.connectionId;
+  delete forwardBody.arguments.account_id;
+  delete forwardBody.arguments.accountId;
+ }
+ if (entityId) {
+  forwardBody.entity_id = entityId;
+  forwardBody.user_id = entityId;
+ }
+ if (connectedAccountId) forwardBody.connected_account_id = connectedAccountId;
  const resp = await fetch(`https://backend.composio.dev/api/v3/tools/execute/${encodeURIComponent(toolSlug)}`, {
   method: 'POST',
   headers: { 'x-api-key': composioKey, 'Content-Type': 'application/json' },
