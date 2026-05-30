@@ -901,6 +901,57 @@ function redactDiagnosticText(text = '') {
   .replace(/\b(sk-[A-Za-z0-9_-]{12,}|sk-or-[A-Za-z0-9_-]{12,}|AIza[0-9A-Za-z_-]{20,})\b/g, '[redacted]');
 }
 
+const TROOPER_DIAGNOSTICS_DIR = process.env.TROOPER_DIAGNOSTICS_DIR || '/root/trooper-diagnostics';
+const TROOPER_DIAGNOSTICS_LOG_DIR = path.join(TROOPER_DIAGNOSTICS_DIR, 'logs');
+const TROOPER_DIAGNOSTICS_SNAPSHOT_DIR = path.join(TROOPER_DIAGNOSTICS_DIR, 'snapshots');
+
+function ensureDiagnosticsDirs() {
+ try {
+  mkdirSync(TROOPER_DIAGNOSTICS_LOG_DIR, { recursive: true, mode: 0o700 });
+  mkdirSync(TROOPER_DIAGNOSTICS_SNAPSHOT_DIR, { recursive: true, mode: 0o700 });
+  return TROOPER_DIAGNOSTICS_DIR;
+ } catch (err) {
+  const fallback = '/opt/openclaw-data/diagnostics';
+  mkdirSync(path.join(fallback, 'logs'), { recursive: true, mode: 0o700 });
+  mkdirSync(path.join(fallback, 'snapshots'), { recursive: true, mode: 0o700 });
+  return fallback;
+ }
+}
+
+function diagnosticsPath(...parts) {
+ const root = ensureDiagnosticsDirs();
+ return path.join(root, ...parts);
+}
+
+function appendDiagnosticEvent(level, message, meta = {}) {
+ try {
+  const entry = {
+   ts: new Date().toISOString(),
+   level,
+   message,
+   meta: redactDiagnosticValue(meta),
+  };
+  writeFileSync(diagnosticsPath('events.jsonl'), `${JSON.stringify(entry)}\n`, { flag: 'a', mode: 0o600 });
+ } catch {}
+}
+
+function safeDiagnosticExec(command, { timeout = 8000, maxBuffer = 4 * 1024 * 1024 } = {}) {
+ try {
+  return {
+   ok: true,
+   command,
+   output: redactDiagnosticText(execSync(command, { timeout, maxBuffer, encoding: 'utf8' }).trim()),
+  };
+ } catch (err) {
+  return {
+   ok: false,
+   command,
+   error: redactDiagnosticText(err.message),
+   output: redactDiagnosticText(String(err.stdout || err.stderr || '').trim()),
+  };
+ }
+}
+
 function readRuntimeEnvSummary() {
  const envPath = '/opt/openclaw/.env';
  let envContent = '';
@@ -5879,7 +5930,12 @@ app.get('/files/*', (req, res) => {
 // so provision.js can fetch final logs before returning success
 app.get('/deploy-logs', (req, res) => {
  try {
-   const data = existsSync('/tmp/deploy.log') ? readFileSync('/tmp/deploy.log', 'utf8') : '[]';
+   const durablePath = diagnosticsPath('logs', 'deploy.log');
+   const data = existsSync('/tmp/deploy.log')
+    ? readFileSync('/tmp/deploy.log', 'utf8')
+    : existsSync(durablePath)
+     ? readFileSync(durablePath, 'utf8')
+     : '[]';
    res.set('Content-Type', 'application/json');
    res.set('Access-Control-Allow-Origin', '*');
    res.send(data);
@@ -5889,7 +5945,12 @@ app.get('/deploy-logs', (req, res) => {
 });
 app.get('/deploy-logs-raw', (req, res) => {
  try {
-   const data = existsSync('/tmp/deploy-raw.log') ? readFileSync('/tmp/deploy-raw.log', 'utf8') : '';
+   const durablePath = diagnosticsPath('logs', 'openclaw-setup.log');
+   const data = existsSync('/tmp/deploy-raw.log')
+    ? readFileSync('/tmp/deploy-raw.log', 'utf8')
+    : existsSync(durablePath)
+     ? readFileSync(durablePath, 'utf8')
+     : '';
    res.set('Content-Type', 'text/plain; charset=utf-8');
    res.set('Access-Control-Allow-Origin', '*');
    res.send(data);
@@ -6037,6 +6098,84 @@ function buildGatewayRuntimeStatus({ includeLogs = false } = {}) {
  };
 }
 
+let lastAutomaticDiagnosticSnapshotAt = 0;
+let automaticDiagnosticSnapshotInFlight = false;
+
+function collectDiagnosticSnapshot(reason = 'manual', { heavy = false } = {}) {
+ const generatedAt = new Date().toISOString();
+ const safeReason = String(reason || 'manual').replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 80) || 'manual';
+ const snapshot = {
+  ok: true,
+  generatedAt,
+  reason: safeReason,
+  diagnosticsDir: ensureDiagnosticsDirs(),
+  bridge: {
+   version: readBridgeVersion(),
+   uptimeSeconds: Math.floor(process.uptime()),
+   pid: process.pid,
+   node: process.version,
+   cwd: process.cwd(),
+  },
+  gateway: buildGatewayRuntimeStatus({ includeLogs: false }),
+  env: readRuntimeEnvSummary(),
+  commands: {
+   dockerPs: safeDiagnosticExec('docker ps -a --no-trunc 2>&1', { timeout: 6000 }),
+   composePs: safeDiagnosticExec('cd /opt/openclaw && docker compose ps 2>&1', { timeout: 6000 }),
+   bridgeStatus: safeDiagnosticExec('systemctl status openclaw-bridge --no-pager 2>&1', { timeout: 6000 }),
+   gatewayStatus: safeDiagnosticExec('docker inspect --format="{{json .State}}" openclaw-openclaw-gateway-1 2>&1', { timeout: 6000 }),
+   disk: safeDiagnosticExec('df -h / /opt /root 2>&1', { timeout: 5000 }),
+   memory: safeDiagnosticExec('free -m 2>&1', { timeout: 5000 }),
+  },
+ };
+ if (heavy) {
+  snapshot.commands.bridgeLogs = safeDiagnosticExec('journalctl -u openclaw-bridge --no-pager -n 400 --output=short-iso 2>&1', { timeout: 12000, maxBuffer: 8 * 1024 * 1024 });
+  snapshot.commands.pollerLogs = safeDiagnosticExec('journalctl -u openclaw-poller --no-pager -n 200 --output=short-iso 2>&1', { timeout: 8000, maxBuffer: 4 * 1024 * 1024 });
+  snapshot.commands.gatewayLogs = safeDiagnosticExec('docker logs openclaw-openclaw-gateway-1 --tail 400 --timestamps 2>&1', { timeout: 15000, maxBuffer: 8 * 1024 * 1024 });
+  snapshot.commands.openclawDoctor = safeDiagnosticExec('docker exec openclaw-openclaw-gateway-1 openclaw doctor --json 2>&1', { timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
+  snapshot.commands.composeOverride = safeDiagnosticExec('cat /opt/openclaw/docker-compose.override.yml 2>&1', { timeout: 3000 });
+ }
+ const redacted = redactDiagnosticValue(snapshot);
+ const latestPath = diagnosticsPath('latest.json');
+ const snapshotPath = diagnosticsPath('snapshots', `${generatedAt.replace(/[:.]/g, '-')}-${safeReason}.json`);
+ const textPath = diagnosticsPath('latest.txt');
+ writeFileSync(latestPath, JSON.stringify(redacted, null, 2), { mode: 0o600 });
+ writeFileSync(snapshotPath, JSON.stringify(redacted, null, 2), { mode: 0o600 });
+ const text = [
+  `generatedAt=${generatedAt}`,
+  `reason=${safeReason}`,
+  `bridgeVersion=${snapshot.bridge.version}`,
+  `gateway.connected=${snapshot.gateway.connected}`,
+  `gateway.state=${snapshot.gateway.state}`,
+  `gateway.reason=${snapshot.gateway.stateReason || ''}`,
+  '',
+  '## docker ps',
+  snapshot.commands.dockerPs.output || snapshot.commands.dockerPs.error || '',
+  '',
+  '## compose ps',
+  snapshot.commands.composePs.output || snapshot.commands.composePs.error || '',
+  '',
+  '## bridge status',
+  snapshot.commands.bridgeStatus.output || snapshot.commands.bridgeStatus.error || '',
+  '',
+  '## gateway logs',
+  snapshot.commands.gatewayLogs?.output || snapshot.commands.gatewayLogs?.error || '(not captured; request heavy=true)',
+ ].join('\n');
+ writeFileSync(textPath, redactDiagnosticText(text), { mode: 0o600 });
+ appendDiagnosticEvent('info', `Diagnostic snapshot captured: ${safeReason}`, { latestPath, snapshotPath, heavy });
+ return { ...redacted, latestPath, snapshotPath, textPath };
+}
+
+function maybeCaptureGatewayProblemSnapshot(reason) {
+ const now = Date.now();
+ if (automaticDiagnosticSnapshotInFlight || now - lastAutomaticDiagnosticSnapshotAt < 60000) return;
+ lastAutomaticDiagnosticSnapshotAt = now;
+ automaticDiagnosticSnapshotInFlight = true;
+ setTimeout(() => {
+  try { collectDiagnosticSnapshot(reason, { heavy: true }); } catch {}
+  finally { automaticDiagnosticSnapshotInFlight = false; }
+ }, 0);
+}
+
 app.get('/health', async (req, res) => {
  // During initial provisioning, return 'installing' so provision.js keeps polling
  // and streaming raw logs. The marker file is created at the end of setup-openclaw-full.sh.
@@ -6079,6 +6218,11 @@ app.get('/health', async (req, res) => {
        ? 'recovering'
        : 'degraded';
 
+ if (healthStatus !== 'ok' && healthStatus !== 'installing') {
+  appendDiagnosticEvent('warn', `Health degraded: ${gatewayStatus.stateReason || gatewayStatus.status || 'unknown'}`, { gateway: gatewayStatus });
+  maybeCaptureGatewayProblemSnapshot(`health-${gatewayStatus.stateReason || gatewayStatus.status || 'degraded'}`);
+ }
+
  res.json({
  status: healthStatus,
  gateway_state: gatewayState,
@@ -6102,6 +6246,10 @@ app.get('/health', async (req, res) => {
 	 },
 	 mode: gatewayHealthy ? 'websocket' : gatewayStatus.transient ? 'gateway-recovering' : 'poller-fallback',
  pending: pendingRequests.size, skills: skillRegistry.size,
+ diagnostics: {
+  dir: ensureDiagnosticsDirs(),
+  latest: diagnosticsPath('latest.json'),
+ },
  version: readBridgeVersion(),
  uptime: Math.floor(process.uptime()),
  });
@@ -6241,6 +6389,8 @@ app.post('/admin/restart-services', async (req, res) => {
    try {
      const composeRepair = ensureOpenClawComposeOverride({ reason: 'admin-restart-services' });
      results.push({ service: 'openclaw-compose', action: composeRepair.changed ? 'repaired' : 'unchanged' });
+     appendDiagnosticEvent('info', 'Admin restart-services requested', { composeRepair });
+     collectDiagnosticSnapshot('before-admin-restart-services', { heavy: true });
      execSync('cd /opt/openclaw && docker compose down 2>&1', { timeout: 30000 });
      results.push({ service: 'openclaw-gateway', action: 'stopped' });
    } catch (e) {
@@ -6250,8 +6400,10 @@ app.post('/admin/restart-services', async (req, res) => {
    try {
      execSync('cd /opt/openclaw && docker compose up -d 2>&1', { timeout: 60000 });
      results.push({ service: 'openclaw-gateway', action: 'started' });
+     collectDiagnosticSnapshot('after-admin-restart-services', { heavy: true });
    } catch (e) {
      results.push({ service: 'openclaw-gateway', action: 'start-failed', error: e.message });
+     maybeCaptureGatewayProblemSnapshot('admin-restart-services-start-failed');
    }
 
    // Restart bridge service (if under systemd)
@@ -6955,7 +7107,11 @@ app.get('/admin/raw-logs/bridge', (req, res) => {
      try {
        output = execSync(`pm2 logs openclaw-bridge --nostream --lines ${lines} 2>/dev/null`, { timeout: 5000 }).toString();
      } catch {
-       output = '(No bridge logs available — not running under systemd or pm2)';
+       try {
+         output = existsSync(diagnosticsPath('latest.txt')) ? readFileSync(diagnosticsPath('latest.txt'), 'utf8') : '(No bridge logs available — not running under systemd or pm2)';
+       } catch {
+         output = '(No bridge logs available — not running under systemd or pm2)';
+       }
      }
    }
    if (search) {
@@ -6963,6 +7119,7 @@ app.get('/admin/raw-logs/bridge', (req, res) => {
    }
    res.json({ source: 'bridge', lines: output.split('\n').length, output });
  } catch (err) {
+   maybeCaptureGatewayProblemSnapshot('bridge-raw-logs-failed');
    res.status(500).json({ error: err.message });
  }
 });
@@ -6980,6 +7137,7 @@ app.get('/admin/raw-logs/gateway', (req, res) => {
    }
    res.json({ source: 'gateway', lines: output.split('\n').length, output });
  } catch (err) {
+   maybeCaptureGatewayProblemSnapshot('gateway-raw-logs-failed');
    res.json({ source: 'gateway', lines: 0, output: `(Gateway logs unavailable: ${err.message})` });
  }
 });
@@ -7000,6 +7158,14 @@ app.get('/admin/raw-logs/all', (req, res) => {
      gatewayOut = gatewayOut.replace(/\x1b\[[0-9;]*m/g, '');
    } catch {}
 
+   if (!bridgeOut && !gatewayOut) {
+     maybeCaptureGatewayProblemSnapshot('raw-logs-all-empty');
+     try {
+       const fallback = readFileSync(diagnosticsPath('latest.txt'), 'utf8');
+       bridgeOut = fallback;
+     } catch {}
+   }
+
    const bridgeLines = bridgeOut.split('\n').filter(Boolean).map(l => ({ source: 'bridge', line: l }));
    const gatewayLines = gatewayOut.split('\n').filter(Boolean).map(l => ({ source: 'gateway', line: l }));
    
@@ -7017,6 +7183,28 @@ app.get('/admin/raw-logs/all', (req, res) => {
    });
  } catch (err) {
    res.status(500).json({ error: err.message });
+ }
+});
+
+// GET/POST /admin/diagnostics — durable VPS-side evidence bundle.
+app.get('/admin/diagnostics', (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+  const latestPath = diagnosticsPath('latest.json');
+  const latest = existsSync(latestPath) ? JSON.parse(readFileSync(latestPath, 'utf8')) : collectDiagnosticSnapshot('admin-read', { heavy: false });
+  res.json({ ok: true, diagnosticsDir: ensureDiagnosticsDirs(), latestPath, latest });
+ } catch (err) {
+  res.status(500).json({ ok: false, error: err.message, diagnosticsDir: ensureDiagnosticsDirs() });
+ }
+});
+
+app.post('/admin/diagnostics/snapshot', (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+  const snapshot = collectDiagnosticSnapshot(req.body?.reason || 'admin-request', { heavy: req.body?.heavy !== false });
+  res.json({ ok: true, snapshot });
+ } catch (err) {
+  res.status(500).json({ ok: false, error: err.message, diagnosticsDir: ensureDiagnosticsDirs() });
  }
 });
 
@@ -8976,7 +9164,7 @@ app.post('/skills/:slug/install', async (req, res) => {
 
 	  let resolvedSkillId = skillId;
 	  let resolvedSlug = buildSkillsMarketplaceSlug(sourceRepo, resolvedSkillId);
-	  console.log(`📦 Installing skill "${slug}" via skills.sh...`);
+	  console.log(`📦 Installing skill "${slug}"...`);
 	  let output = '';
 	  let cliError = '';
 	  let materialized = null;
@@ -9015,14 +9203,37 @@ app.post('/skills/:slug/install', async (req, res) => {
 	      : null,
 	    });
 	   }
-	   console.warn(`[skills] Direct materialization for "${slug}" did not find SKILL.md; falling back to skills.sh.`);
+	   console.warn(`[skills] Direct materialization for "${slug}" did not find SKILL.md.`);
 	  }
+	  const gatewayContainer = readGatewayContainerStatus({ includeLogs: false });
+	  const canRunSkillsCli = gatewayContainer.running && gateway.isReady;
+	  if (!canRunSkillsCli) {
+	   const message = hasDirectSkillPayload
+	    ? 'Skill content was unavailable and the gateway is not ready, so Trooper skipped the fragile skills.sh fallback. Retry after the gateway reconnects or send SKILL.md content directly.'
+	    : 'Gateway is not ready, so Trooper skipped skills.sh install instead of executing inside a restarting container.';
+	   appendDiagnosticEvent('warn', `Skill install skipped while gateway unavailable: ${slug}`, { slug, gateway: gatewayContainer, materialized });
+	   maybeCaptureGatewayProblemSnapshot(`skill-install-gateway-unavailable-${slug}`);
+	   return res.status(503).json({
+	    error: message,
+	    slug,
+	    runtimeReady: false,
+	    gateway: gatewayContainer,
+	    materialized,
+	    diagnostics: {
+	     dir: ensureDiagnosticsDirs(),
+	     latest: diagnosticsPath('latest.json'),
+	    },
+	   });
+	  }
+	  console.log(`📦 Installing skill "${slug}" via skills.sh...`);
 	  try {
 	   output = runSkillsCliInstall(sourceRepo, resolvedSkillId);
 	   console.log(`✅ Skill "${slug}" installed: ${output.trim().split('\n').pop()}`);
 	  } catch (err) {
 	   cliError = formatExecError(err);
 	   console.error(`❌ skills.sh install failed for "${slug}":`, cliError);
+	   appendDiagnosticEvent('warn', `skills.sh install failed: ${slug}`, { slug, cliError });
+	   maybeCaptureGatewayProblemSnapshot(`skill-install-failed-${slug}`);
 	  }
 
 	  if (!cliError) {
@@ -9266,6 +9477,8 @@ app.post('/gateway/restart', (req, res) => {
   });
  }
  console.log('Restarting OpenClaw gateway container...');
+ appendDiagnosticEvent('info', 'Gateway restart requested', { body: req.body || {} });
+ collectDiagnosticSnapshot('before-gateway-restart', { heavy: true });
  const configRepair = repairOpenClawConfigForGatewayStart('gateway-restart');
  const pairedRepair = upsertBridgePairedDevice({ force: true, reason: 'gateway-restart' });
  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
@@ -9277,6 +9490,7 @@ app.post('/gateway/restart', (req, res) => {
  }, 5000);
  res.json({ success: true, message: 'Gateway container restarted', configRepair, pairedRepair });
  } catch (err) {
+ maybeCaptureGatewayProblemSnapshot('gateway-restart-failed');
  res.status(500).json({ error: 'Failed to restart gateway', details: err.stderr?.toString() || err.message });
  }
 });
@@ -9742,6 +9956,7 @@ app.get('/models/list', async (req, res) => {
 app.get('/diagnostics/export', async (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
  const startedAt = Date.now();
+ const durableSnapshot = collectDiagnosticSnapshot('diagnostics-export', { heavy: true });
  const safeExec = (command, timeout = 10000) => {
   try {
    return { ok: true, output: execSync(command, { timeout, encoding: 'utf8' }).trim() };
@@ -9791,6 +10006,12 @@ app.get('/diagnostics/export', async (req, res) => {
   },
   config: redactDiagnosticValue(readOpenClawConfig()),
   env: readRuntimeEnvSummary(),
+  durableDiagnostics: {
+   dir: ensureDiagnosticsDirs(),
+   latestPath: durableSnapshot.latestPath,
+   snapshotPath: durableSnapshot.snapshotPath,
+   textPath: durableSnapshot.textPath,
+  },
  });
 });
 

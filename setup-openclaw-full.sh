@@ -112,11 +112,22 @@ run_cmd() {
   fi
 }
 
-# Deploy log — writes to /tmp/deploy.log, served via HTTP on BRIDGE_PORT
-DEPLOY_LOG=/tmp/deploy.log
-DEPLOY_RAW_LOG=/tmp/deploy-raw.log
+# Durable diagnostics/logs. Keep symlinks in /tmp for older provision probes,
+# but write the actual evidence under /root so restarts do not make users blind.
+TROOPER_DIAGNOSTICS_DIR=/root/trooper-diagnostics
+TROOPER_DIAGNOSTICS_LOG_DIR="$TROOPER_DIAGNOSTICS_DIR/logs"
+mkdir -p "$TROOPER_DIAGNOSTICS_LOG_DIR" "$TROOPER_DIAGNOSTICS_DIR/snapshots"
+chmod 700 "$TROOPER_DIAGNOSTICS_DIR" 2>/dev/null || true
+mkdir -p /var/log/journal 2>/dev/null || true
+systemctl restart systemd-journald 2>/dev/null || true
+
+# Deploy log — served via HTTP on BRIDGE_PORT and persisted under diagnostics.
+DEPLOY_LOG="$TROOPER_DIAGNOSTICS_LOG_DIR/deploy.log"
+DEPLOY_RAW_LOG="$TROOPER_DIAGNOSTICS_LOG_DIR/openclaw-setup.log"
 echo '[]' > "$DEPLOY_LOG"
 : > "$DEPLOY_RAW_LOG"
+ln -sf "$DEPLOY_LOG" /tmp/deploy.log 2>/dev/null || true
+ln -sf "$DEPLOY_RAW_LOG" /tmp/deploy-raw.log 2>/dev/null || true
 dlog() {
  local msg="$1" step="${2:-installing}"
  local ts=$(date +%s000 2>/dev/null || echo 0)
@@ -1268,6 +1279,12 @@ services:
       PUPPETEER_EXECUTABLE_PATH: /opt/chrome-wrapper.sh
       OPENCLAW_BROWSER_EXECUTABLE: /opt/chrome-wrapper.sh
       COMPOSIO_API_KEY: \${COMPOSIO_API_KEY}
+      TMPDIR: /var/tmp
+      TMP: /var/tmp
+      TEMP: /var/tmp
+      OPENCLAW_TMPDIR: /var/tmp/openclaw-1000
+      OPENCLAW_NATIVE_HOOK_RELAY_DIR: /var/tmp/openclaw-native-hook-relays-1000
+      JITI_CACHE_DIR: /var/tmp/jiti
     user: "0:0"
     entrypoint: ["/bin/bash", "/opt/entrypoint.sh"]
     command: ["${GATEWAY_PORT}"]
@@ -2783,6 +2800,8 @@ RemainAfterExit=yes
 WorkingDirectory=/opt/openclaw
 ExecStart=/usr/bin/docker compose up -d
 ExecStop=/usr/bin/docker compose down
+StandardOutput=append:/root/trooper-diagnostics/logs/openclaw-docker.service.log
+StandardError=append:/root/trooper-diagnostics/logs/openclaw-docker.service.log
 
 [Install]
 WantedBy=multi-user.target
@@ -2816,6 +2835,9 @@ Environment=MISSION_CONTROL_URL=https://trooper-production.up.railway.app
 Environment=ORG_ID=${ORG_ID}
 Environment=OPENCLAW_COMPANY_PROVIDER_KEYS=${OPENCLAW_COMPANY_PROVIDER_KEYS}
 Environment=TROOPER_SNAPSHOT_BUILD=${TROOPER_SNAPSHOT_BUILD:-0}
+Environment=TROOPER_DIAGNOSTICS_DIR=/root/trooper-diagnostics
+StandardOutput=append:/root/trooper-diagnostics/logs/openclaw-bridge.service.log
+StandardError=append:/root/trooper-diagnostics/logs/openclaw-bridge.service.log
 Environment=NODE_ENV=production
 Environment=BROWSERBASE_API_KEY=${BROWSERBASE_API_KEY}
 Environment=BROWSERBASE_PROJECT_ID=${BROWSERBASE_PROJECT_ID}
@@ -2912,6 +2934,8 @@ Environment=OPENCLAW_MODEL=${RESOLVED_MODEL}
 Environment=POLL_INTERVAL=3000
 Environment=REQUEST_TIMEOUT=180000
 Environment=NODE_ENV=production
+StandardOutput=append:/root/trooper-diagnostics/logs/openclaw-poller.service.log
+StandardError=append:/root/trooper-diagnostics/logs/openclaw-poller.service.log
 
 [Install]
 WantedBy=multi-user.target
