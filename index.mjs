@@ -349,6 +349,7 @@ function isBrowserTool(tool) {
 // instead of polling screenshots. Caddy proxies /vnc/* → websockify:6080.
 // Cache the sslip.io domain derived from the Caddyfile (set once at startup or first use)
 let _sslipDomain = null;
+const _gatewayDomainReachabilityCache = new Map();
 function getSslipDomain() {
  if (_sslipDomain !== null) return _sslipDomain || null;
  try {
@@ -360,12 +361,34 @@ function getSslipDomain() {
  return null;
 }
 
+function canResolveGatewayDomain(domain) {
+ const cached = _gatewayDomainReachabilityCache.get(domain);
+ if (cached && Date.now() - cached.checkedAt < 300000) return cached.ok;
+ try {
+   execFileSync('getent', ['hosts', domain], { stdio: 'ignore', timeout: 1500 });
+   _gatewayDomainReachabilityCache.set(domain, { ok: true, checkedAt: Date.now() });
+   return true;
+ } catch {
+   _gatewayDomainReachabilityCache.set(domain, { ok: false, checkedAt: Date.now() });
+   return false;
+ }
+}
+
 function getVNCLiveViewUrl() {
  const orgId = process.env.ORG_ID || '';
- if (!orgId) return null;
- // Prefer crabhq.com (CF-proxied, reliable SSL) over sslip.io (LE rate limits)
+ const explicitUrl = String(process.env.TROOPER_PUBLIC_GATEWAY_URL || process.env.PUBLIC_GATEWAY_URL || '').trim().replace(/\/+$/, '');
+ if (explicitUrl) {
+   return `${explicitUrl}/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify&reconnect=true&reconnect_delay=3000`;
+ }
+ const sslipDomain = getSslipDomain();
+ if (!orgId) {
+   if (!sslipDomain) return null;
+   return `https://${sslipDomain}/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify&reconnect=true&reconnect_delay=3000`;
+ }
  const orgShort = orgId.toLowerCase().substring(0, 12);
- const domain = `org-${orgShort}.crabhq.com`;
+ const canonicalDomain = `org-${orgShort}.crabhq.com`;
+ const domain = canResolveGatewayDomain(canonicalDomain) ? canonicalDomain : sslipDomain;
+ if (!domain) return null;
  return `https://${domain}/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify&reconnect=true&reconnect_delay=3000`;
 }
 

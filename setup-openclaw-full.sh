@@ -397,10 +397,11 @@ if [ -z "$SERVER_PUBLIC_IP" ]; then
 fi
 
 # Derive hostname from ORG_ID (lowercase, first 12 chars)
-# DNS is created by provision.js (Render-side) — VPS always uses crabhq.com domain
+# DNS is created by the Trooper API after Cloudflare confirms the record. The
+# sslip.io host remains the working fallback while DNS is unavailable.
 ORG_SHORT=$(echo "${ORG_ID}" | tr '[:upper:]' '[:lower:]' | head -c 12)
 HTTPS_DOMAIN="org-${ORG_SHORT}.crabhq.com"
-echo "HTTPS domain: ${HTTPS_DOMAIN} (DNS created by provision.js)"
+echo "HTTPS domain: ${HTTPS_DOMAIN} (DNS managed by Trooper API)"
 
 if [ -n "$SERVER_PUBLIC_IP" ]; then
  SSLIP_DOMAIN=$(echo "$SERVER_PUBLIC_IP" | tr '.' '-').sslip.io
@@ -650,30 +651,10 @@ if [ -n "${CF_API_TOKEN:-}" ] && [ -n "${ORG_ID:-}" ]; then
          {\"service\":\"http_status:404\"}
        ]}}" >/dev/null 2>&1
 
-     # Route DNS to tunnel (CNAME) — upsert to handle stale records from previous deploys
-     CF_ZONE_ID="da3b8c817a0e3479c05f3f2aac6e04e7"
-     EXISTING_DNS_ID=$(curl -sf \
-       -H "Authorization: Bearer ${CF_API_TOKEN}" \
-       "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?name=${HTTPS_DOMAIN}" | \
-       python3 -c "import sys,json; r=json.load(sys.stdin).get('result',[]); print(r[0]['id'] if r else '')" 2>/dev/null || true)
-     DNS_PAYLOAD="{\"type\":\"CNAME\",\"name\":\"${HTTPS_DOMAIN}\",\"content\":\"${TUNNEL_ID}.cfargotunnel.com\",\"ttl\":1,\"proxied\":true}"
-     if [ -n "$EXISTING_DNS_ID" ]; then
-       # Update existing record (may be stale A record or old CNAME)
-       curl -sf -X PUT \
-         -H "Authorization: Bearer ${CF_API_TOKEN}" \
-         -H "Content-Type: application/json" \
-         "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records/${EXISTING_DNS_ID}" \
-         -d "$DNS_PAYLOAD" >/dev/null 2>&1 || true
-       echo "DNS record updated: ${HTTPS_DOMAIN} → ${TUNNEL_ID}.cfargotunnel.com"
-     else
-       # Create new record
-       curl -sf -X POST \
-         -H "Authorization: Bearer ${CF_API_TOKEN}" \
-         -H "Content-Type: application/json" \
-         "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records" \
-         -d "$DNS_PAYLOAD" >/dev/null 2>&1 || true
-       echo "DNS record created: ${HTTPS_DOMAIN} → ${TUNNEL_ID}.cfargotunnel.com"
-     fi
+     # DNS is managed by the Trooper control plane during finalization/recheck.
+     # Keeping the VPS from writing CNAMEs avoids A/CNAME races that can leave
+     # users with an org-*.crabhq.com URL that does not resolve.
+     echo "Cloudflare DNS upsert skipped on VPS; Trooper API owns ${HTTPS_DOMAIN}"
 
      # Set up cloudflared as a systemd service using tunnel token
      if [ -n "$TUNNEL_TOKEN" ]; then
