@@ -75,8 +75,9 @@ import {
   attachConfigFileMetadata,
   buildConfigConflict,
   getSubmittedConfigHash,
-  isForcedConfigWrite,
   jsonFileHash,
+  preserveSystemManagedSections,
+  shouldRejectConfigWrite,
   stripTrooperFileMetadata,
   writeJsonFileIfChanged,
   writeTextFileIfChanged,
@@ -1175,7 +1176,7 @@ function getDesiredGatewayToken() {
 }
 
 function normalizeOpenClawConfigForWrite(nextConfig, existingConfig = readOpenClawConfig()) {
- const normalized = cloneJson(stripTrooperFileMetadata(nextConfig));
+ const normalized = cloneJson(nextConfig);
  const existing = cloneJson(existingConfig);
  const desiredToken = getDesiredGatewayToken() || existing?.gateway?.auth?.token || '';
  if (!normalized.gateway || typeof normalized.gateway !== 'object') normalized.gateway = {};
@@ -12483,9 +12484,7 @@ app.put('/config/openclaw', (req, res) => {
 	 if (!data || typeof data !== 'object') return res.status(400).json({ error: 'Invalid JSON body' });
 	 const restart = req.query.restart === 'true' || req.query.restart === '1' || req.body?.restart === true;
 	 const current = readOpenClawConfig();
-	 const submittedHash = getSubmittedConfigHash(data);
-	 const currentHash = jsonFileHash(current);
-	 if (submittedHash && submittedHash !== currentHash && !isForcedConfigWrite(data)) {
+	 if (shouldRejectConfigWrite({ file: 'openclaw.json', current, submitted: data })) {
 	  return res.status(409).json(buildConfigConflict({ file: 'openclaw.json', current, submitted: data }));
 	 }
 	 // Backup existing
@@ -12494,7 +12493,8 @@ app.put('/config/openclaw', (req, res) => {
 	 writeFileSync(OPENCLAW_CONFIG_PATH + '.bak', existing);
 	 writeTimestampedBackup(OPENCLAW_CONFIG_PATH, existing, 'pre-write');
 	 } catch {}
-		 const changed = writeOpenClawConfig(normalizeOpenClawConfigForWrite(data));
+		 const safeData = preserveSystemManagedSections({ file: 'openclaw.json', current, submitted: data });
+		 const changed = writeOpenClawConfig(normalizeOpenClawConfigForWrite(safeData, current));
 		 if (changed && restart) {
 		  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
 		  gateway.forceReconnect(30000, 'config-openclaw-update');
@@ -12524,7 +12524,7 @@ app.put('/config/auth-profiles', (req, res) => {
  try { existing = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8')); } catch {}
  const submittedHash = getSubmittedConfigHash(data);
  const currentHash = existing ? jsonFileHash(existing) : '';
- if (submittedHash && currentHash && submittedHash !== currentHash && !isForcedConfigWrite(data)) {
+ if (existing && submittedHash && currentHash && shouldRejectConfigWrite({ file: 'auth-profiles.json', current: existing, submitted: data })) {
   return res.status(409).json(buildConfigConflict({ file: 'auth-profiles.json', current: existing, submitted: data }));
  }
  if (data.profiles && typeof data.profiles === 'object') {
