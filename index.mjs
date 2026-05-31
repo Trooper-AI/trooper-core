@@ -71,7 +71,17 @@ import { startFleetHeartbeat } from './lib/fleet-heartbeat.mjs';
 import { readBridgeVersion } from './lib/version-info.mjs';
 import { applyTelegramTokenToOpenClawConfig, buildTelegramEnvUpdates } from './lib/channel-config.mjs';
 import { hardenActiveMemoryConfigForBridge } from './lib/active-memory-config.mjs';
-import { writeJsonFileIfChanged, writeTextFileIfChanged } from './lib/file-write-guards.mjs';
+import {
+  attachConfigFileMetadata,
+  buildConfigConflict,
+  getSubmittedConfigHash,
+  isForcedConfigWrite,
+  jsonFileHash,
+  stripTrooperFileMetadata,
+  writeJsonFileIfChanged,
+  writeTextFileIfChanged,
+  writeTimestampedBackup,
+} from './lib/file-write-guards.mjs';
 import {
   installOpenClawNpmPlugin,
   installOpenClawPlugin,
@@ -1165,7 +1175,7 @@ function getDesiredGatewayToken() {
 }
 
 function normalizeOpenClawConfigForWrite(nextConfig, existingConfig = readOpenClawConfig()) {
- const normalized = cloneJson(nextConfig);
+ const normalized = cloneJson(stripTrooperFileMetadata(nextConfig));
  const existing = cloneJson(existingConfig);
  const desiredToken = getDesiredGatewayToken() || existing?.gateway?.auth?.token || '';
  if (!normalized.gateway || typeof normalized.gateway !== 'object') normalized.gateway = {};
@@ -12428,9 +12438,11 @@ exec node dist/index.js gateway --allow-unconfigured --bind lan --port "\$GATEWA
  try {
  const fs = await import('fs');
  const configPath = '/opt/openclaw-data/config/openclaw.json';
- const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+ const existingConfigText = fs.readFileSync(configPath, 'utf8');
+ const config = JSON.parse(existingConfigText);
  if (config.gateway && !config.gateway.trustedProxies) {
  config.gateway.trustedProxies = ['127.0.0.1', '172.16.0.0/12'];
+ writeTimestampedBackup(configPath, existingConfigText, 'pre-update-patch');
 	 writeOpenClawConfig(config);
  await run('cd /opt/openclaw && docker compose down && docker compose up -d');
  console.log('Gateway config patched with trustedProxies and restarted');
@@ -12458,7 +12470,7 @@ app.post('/callback/result', async (req, res) => {
 // ── OpenClaw Config (read/write openclaw.json) ──────────────────────
 app.get('/config/openclaw', (req, res) => {
  try {
- res.json(readOpenClawConfig());
+ res.json(attachConfigFileMetadata(readOpenClawConfig(), 'openclaw.json'));
  } catch (err) {
  if (err.code === 'ENOENT') return res.json({});
  res.status(500).json({ error: err.message });
@@ -12470,17 +12482,24 @@ app.put('/config/openclaw', (req, res) => {
 	 const data = req.body;
 	 if (!data || typeof data !== 'object') return res.status(400).json({ error: 'Invalid JSON body' });
 	 const restart = req.query.restart === 'true' || req.query.restart === '1' || req.body?.restart === true;
+	 const current = readOpenClawConfig();
+	 const submittedHash = getSubmittedConfigHash(data);
+	 const currentHash = jsonFileHash(current);
+	 if (submittedHash && submittedHash !== currentHash && !isForcedConfigWrite(data)) {
+	  return res.status(409).json(buildConfigConflict({ file: 'openclaw.json', current, submitted: data }));
+	 }
 	 // Backup existing
 	 try {
 	 const existing = readFileSync(OPENCLAW_CONFIG_PATH, 'utf8');
 	 writeFileSync(OPENCLAW_CONFIG_PATH + '.bak', existing);
+	 writeTimestampedBackup(OPENCLAW_CONFIG_PATH, existing, 'pre-write');
 	 } catch {}
 		 const changed = writeOpenClawConfig(normalizeOpenClawConfigForWrite(data));
 		 if (changed && restart) {
 		  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
 		  gateway.forceReconnect(30000, 'config-openclaw-update');
 		 }
-	 res.json({ success: true, changed, reload: changed && restart ? 'restart' : 'deferred' });
+	 res.json({ success: true, changed, reload: changed && restart ? 'restart' : 'deferred', hash: jsonFileHash(readOpenClawConfig()) });
 	 } catch (err) {
 	 res.status(500).json({ error: err.message });
 	 }
@@ -12490,7 +12509,7 @@ app.put('/config/openclaw', (req, res) => {
 app.get('/config/auth-profiles', (req, res) => {
  try {
  const data = readFileSync(AUTH_PROFILES_PATH, 'utf8');
- res.json(JSON.parse(data));
+ res.json(attachConfigFileMetadata(JSON.parse(data), 'auth-profiles.json'));
  } catch (err) {
  if (err.code === 'ENOENT') return res.json({ version: 1, profiles: {} });
  res.status(500).json({ error: err.message });
@@ -12503,6 +12522,11 @@ app.put('/config/auth-profiles', (req, res) => {
  if (!data || typeof data !== 'object') return res.status(400).json({ error: 'Invalid JSON body' });
  let existing = null;
  try { existing = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8')); } catch {}
+ const submittedHash = getSubmittedConfigHash(data);
+ const currentHash = existing ? jsonFileHash(existing) : '';
+ if (submittedHash && currentHash && submittedHash !== currentHash && !isForcedConfigWrite(data)) {
+  return res.status(409).json(buildConfigConflict({ file: 'auth-profiles.json', current: existing, submitted: data }));
+ }
  if (data.profiles && typeof data.profiles === 'object') {
   for (const [profileId, profile] of Object.entries(data.profiles)) {
    if (!profile || typeof profile !== 'object' || profile.provider !== 'openai-codex' || !profile.access) continue;
@@ -12514,10 +12538,14 @@ app.put('/config/auth-profiles', (req, res) => {
    if (oauthRef) writeCodexOAuthSidecar(profileId, profile);
   }
  }
- writeMirroredAuthProfiles(data, { backup: true });
+ writeMirroredAuthProfiles(stripTrooperFileMetadata(data), { backup: true });
+ try {
+  const existingText = readFileSync(AUTH_PROFILES_PATH + '.bak', 'utf8');
+  writeTimestampedBackup(AUTH_PROFILES_PATH, existingText, 'pre-write');
+ } catch {}
  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
  gateway.forceReconnect(30000, 'auth-profiles-update');
- res.json({ success: true });
+ res.json({ success: true, hash: jsonFileHash(JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'))) });
  } catch (err) {
  res.status(500).json({ error: err.message });
  }
