@@ -9659,13 +9659,71 @@ app.get('/stats', async (req, res) => {
  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+function shaMatches(current, target) {
+ const a = String(current || '').trim().toLowerCase();
+ const b = String(target || '').trim().toLowerCase();
+ if (!a || !b) return null;
+ return a.startsWith(b) || b.startsWith(a);
+}
+
+function buildLocalUpgradeSummary(current = {}, target = {}) {
+ const targetBridge = target.openclawBridgeCommit || target.bridgeCommit || target.bridgeSha || null;
+ const targetGateway = target.gatewayImage || target.gatewayImageDigest || target.gatewayImageId || null;
+ const bridgeAtTarget = shaMatches(current.bridgeFullSha || current.bridgeSha, targetBridge);
+ let gatewayAtTarget = null;
+ if (targetGateway) {
+  const targetText = String(targetGateway).trim();
+  if (targetText.includes('@sha256:')) {
+   gatewayAtTarget = (current.gatewayImageDigests || []).some((digest) => String(digest).trim() === targetText);
+  } else if (/^sha256:/i.test(targetText)) {
+   gatewayAtTarget = String(current.gatewayImageFullId || '').trim() === targetText;
+  } else if (targetText && !targetText.endsWith(':latest')) {
+   gatewayAtTarget = (current.gatewayImageTags || []).some((tag) => String(tag).trim() === targetText);
+  }
+ }
+ const checked = Boolean(targetBridge || targetGateway);
+ const available = bridgeAtTarget === false || gatewayAtTarget === false;
+ const components = {
+  bridge: { current: current.bridgeFullSha || current.bridgeSha || null, target: targetBridge, atTarget: bridgeAtTarget },
+  gateway: {
+   current: current.gatewayImageDigest || current.gatewayImageTag || current.gatewayImageId || null,
+   target: targetGateway,
+   atTarget: gatewayAtTarget,
+  },
+ };
+ return {
+  checked,
+  available: checked ? available : false,
+  current,
+  target,
+  components,
+  reason: checked
+   ? available
+    ? 'One or more runtime components are behind the supplied target version.'
+    : Object.values(components).some((component) => component.atTarget === null)
+     ? 'Some target fields could not be compared exactly, but no known component is behind.'
+     : 'Runtime matches the supplied target version.'
+   : 'No target version was supplied to the bridge.',
+ };
+}
+
+function targetFromRequest(req) {
+ return {
+  openclawBridgeCommit: req.query.targetBridgeCommit || req.query.openclawBridgeCommit || null,
+  gatewayImage: req.query.targetGatewayImage || req.query.gatewayImage || null,
+  gatewayImageId: req.query.targetGatewayImageId || req.query.gatewayImageId || null,
+ };
+}
+
 app.get('/version', (req, res) => {
  try {
- const gitHash = execSync('git -C /opt/openclaw rev-parse --short HEAD 2>/dev/null').toString().trim();
- const gitDate = execSync('git -C /opt/openclaw log -1 --format=%ci 2>/dev/null').toString().trim();
- const dockerImage = execSync("docker inspect openclaw:local --format='{{.Id}}' 2>/dev/null").toString().trim().slice(7, 19);
- res.json({ gitHash, gitDate, dockerImage, ...readBridgeVersion() });
- } catch (err) { res.json({ error: err.message }); }
+ const current = readBridgeVersion({ force: req.query.force === '1' || req.query.force === 'true' });
+ const gitHash = current.gatewaySha || execSync('git -C /opt/openclaw rev-parse --short HEAD 2>/dev/null').toString().trim();
+ const gitDate = current.gatewayCommittedAt || execSync('git -C /opt/openclaw log -1 --format=%ci 2>/dev/null').toString().trim();
+ const dockerImage = current.gatewayImageId || execSync("docker inspect openclaw:local --format='{{.Id}}' 2>/dev/null").toString().trim().slice(7, 19);
+ const target = targetFromRequest(req);
+ res.json({ gitHash, gitDate, dockerImage, ...current, upgrade: buildLocalUpgradeSummary(current, target) });
+ } catch (err) { res.json({ error: err.message, ...readBridgeVersion() }); }
 });
 
 // ── Upgrade — pull latest Docker image + bridge code, restart services ──
@@ -9769,6 +9827,8 @@ app.post('/upgrade', async (req, res) => {
 // GET /upgrade/status — check current versions
 app.get('/upgrade/status', (req, res) => {
  try {
+   const current = readBridgeVersion({ force: req.query.force === '1' || req.query.force === 'true' });
+   const target = targetFromRequest(req);
    const versions = {};
    try { versions.gatewayImage = execSync("docker inspect openclaw:local --format='{{.Id}}' 2>/dev/null").toString().trim().slice(7, 19); } catch {}
    try { versions.gatewayCreated = execSync("docker inspect openclaw:local --format='{{.Created}}' 2>/dev/null").toString().trim(); } catch {}
@@ -9778,7 +9838,13 @@ app.get('/upgrade/status', (req, res) => {
      const containerStatus = execSync("docker inspect openclaw-openclaw-gateway-1 --format='{{.State.Status}}' 2>/dev/null").toString().trim();
      versions.gatewayStatus = containerStatus;
    } catch { versions.gatewayStatus = 'unknown'; }
-   res.json(versions);
+   res.json({
+    ...versions,
+    updateInProgress,
+    current,
+    target,
+    upgrade: buildLocalUpgradeSummary(current, target),
+   });
  } catch (err) {
    res.status(500).json({ error: err.message });
  }
