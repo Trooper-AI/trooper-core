@@ -7544,15 +7544,20 @@ app.post('/admin/upgrade', async (req, res) => {
      steps,
      newVersion: newOpenclawVersion,
      message: allOk
-       ? `Upgrade complete. OpenClaw: ${newOpenclawVersion || 'unknown'}. Bridge will restart momentarily.`
+       ? `Upgrade complete. OpenClaw: ${newOpenclawVersion || 'unknown'}. Bridge services will restart momentarily.`
        : 'Upgrade completed with some errors. Check steps for details.',
      restartRequired: true,
    });
 
-   // 6. Restart bridge (after response is sent)
+   // 6. Restart bridge services (after response is sent)
    setTimeout(() => {
-     captureLog('info', 'Bridge restarting after upgrade...');
-     try { execSync('pm2 restart openclaw-bridge 2>/dev/null || systemctl restart openclaw-bridge 2>/dev/null', { timeout: 5000 }); } catch {}
+     captureLog('info', 'Bridge services restarting after upgrade...');
+     try {
+       execSync(
+         'pm2 restart openclaw-bridge 2>/dev/null || systemctl restart openclaw-bridge 2>/dev/null; systemctl restart trooper-shared-node-manager 2>/dev/null || true',
+         { timeout: 8000 },
+       );
+     } catch {}
    }, 2000);
 
  } catch (err) {
