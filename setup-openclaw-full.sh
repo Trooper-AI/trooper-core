@@ -2030,7 +2030,7 @@ dlog "Setting up Bridge..."
 dlog "Cloning bridge from GitHub..."
 rm -rf /opt/openclaw-bridge 2>/dev/null || true
 for _dl_attempt in 1 2 3; do
- if git clone --depth 1 https://github.com/absurdfounder/openclawbridge.git /opt/openclaw-bridge; then
+ if git clone --depth 1 https://github.com/absurdfounder/trooper-bridge.git /opt/openclaw-bridge; then
  dlog "Bridge cloned ($(wc -c < /opt/openclaw-bridge/index.mjs) bytes)"
  break
  fi
