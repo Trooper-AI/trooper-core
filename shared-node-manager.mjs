@@ -4,6 +4,7 @@ import {
   DEFAULT_SHARED_STATE_DIR,
   DEFAULT_SHARED_WORKSPACES_ROOT,
   ensureWorkspaceSlot,
+  normalizeWorkspaceSlotId,
   readSlotRegistry,
   updateWorkspaceSlotStatus,
 } from './lib/shared-workspace-slots.mjs';
@@ -122,8 +123,9 @@ app.get('/runtime/workspaces', requireManagerAuth, (_req, res) => {
 
 app.get('/runtime/workspaces/:slotId/status', requireManagerAuth, (req, res) => {
   const registry = readSlotRegistry(REGISTRY_PATH);
-  const slot = registry.slots?.[req.params.slotId];
-  if (!slot) return res.status(404).json({ error: 'workspace_slot_not_found' });
+  const slotId = normalizeWorkspaceSlotId(req.params.slotId);
+  const slot = registry.slots?.[slotId];
+  if (!slot) return res.status(404).json({ error: 'workspace_slot_not_found', slotId });
   res.json(buildSlotResponse(slot));
 });
 
@@ -156,7 +158,7 @@ app.post('/runtime/workspaces/:slotId/start', requireManagerAuth, async (req, re
   } catch (error) {
     try {
       updateWorkspaceSlotStatus({
-        slotId: req.params.slotId,
+        slotId: normalizeWorkspaceSlotId(req.params.slotId),
         status: 'failed',
         registryPath: REGISTRY_PATH,
         patch: { error: error.message },
@@ -169,11 +171,12 @@ app.post('/runtime/workspaces/:slotId/start', requireManagerAuth, async (req, re
 app.post('/runtime/workspaces/:slotId/pause', requireManagerAuth, async (req, res) => {
   try {
     const registry = readSlotRegistry(REGISTRY_PATH);
-    const existing = registry.slots?.[req.params.slotId];
-    if (!existing) return res.status(404).json({ error: 'workspace_slot_not_found' });
+    const slotId = normalizeWorkspaceSlotId(req.params.slotId);
+    const existing = registry.slots?.[slotId];
+    if (!existing) return res.status(404).json({ error: 'workspace_slot_not_found', slotId });
     await stopSlotRuntime(existing);
     const slot = updateWorkspaceSlotStatus({
-      slotId: req.params.slotId,
+      slotId,
       status: 'paused',
       registryPath: REGISTRY_PATH,
     });
@@ -185,8 +188,9 @@ app.post('/runtime/workspaces/:slotId/pause', requireManagerAuth, async (req, re
 
 app.all('/runtime/workspaces/:slotId/proxy/*', requireManagerAuth, async (req, res) => {
   const registry = readSlotRegistry(REGISTRY_PATH);
-  const slot = registry.slots?.[req.params.slotId];
-  if (!slot) return res.status(404).json({ error: 'workspace_slot_not_found' });
+  const slotId = normalizeWorkspaceSlotId(req.params.slotId);
+  const slot = registry.slots?.[slotId];
+  if (!slot) return res.status(404).json({ error: 'workspace_slot_not_found', slotId });
   if (slot.status !== 'ready') {
     return res.status(503).json({
       error: 'workspace_slot_not_ready',
