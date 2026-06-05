@@ -393,7 +393,7 @@ let _screenshotDirReady = false;
 function saveBrowserScreenshot(base64Data, ext = 'png') {
  try {
   if (!_screenshotDirReady) {
-   execSync(`docker exec openclaw-openclaw-gateway-1 mkdir -p ${SCREENSHOT_DIR}`, { timeout: 3000 });
+   execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} mkdir -p ${SCREENSHOT_DIR}`, { timeout: 3000 });
    _screenshotDirReady = true;
   }
   const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
@@ -402,10 +402,10 @@ function saveBrowserScreenshot(base64Data, ext = 'png') {
   const hostTmp = `/tmp/screenshot-${Date.now()}.${ext}`;
   writeFileSync(hostTmp, Buffer.from(base64Data, 'base64'));
   execSync(
-   `docker cp ${hostTmp} openclaw-openclaw-gateway-1:${SCREENSHOT_DIR}/${filename} && rm -f ${hostTmp}`,
+   `docker cp ${hostTmp} ${OPENCLAW_GATEWAY_CONTAINER}:${SCREENSHOT_DIR}/${filename} && rm -f ${hostTmp}`,
    { timeout: 10000 }
   );
-  execSync(`docker exec openclaw-openclaw-gateway-1 chown 1000:1000 ${SCREENSHOT_DIR}/${filename}`, { timeout: 3000 });
+  execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} chown 1000:1000 ${SCREENSHOT_DIR}/${filename}`, { timeout: 3000 });
   console.log(`[screenshot] Saved: ${SCREENSHOT_DIR}/${filename}`);
   return `${SCREENSHOT_DIR}/${filename}`;
  } catch (e) {
@@ -464,9 +464,9 @@ function stopRecording(display = ':99') {
    try {
     const containerDir = filePath.includes('/desktop/') ? `${MEDIA_DIR}/desktop` : SCREENSHOT_DIR;
     const containerPath = `${containerDir}/${filePath.split('/').pop()}`;
-    execSync(`docker exec openclaw-openclaw-gateway-1 mkdir -p ${containerDir}`, { timeout: 3000 });
-    execSync(`docker cp ${filePath} openclaw-openclaw-gateway-1:${containerPath}`, { timeout: 15000 });
-    execSync(`docker exec openclaw-openclaw-gateway-1 chown 1000:1000 ${containerPath}`, { timeout: 3000 });
+    execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} mkdir -p ${containerDir}`, { timeout: 3000 });
+    execSync(`docker cp ${filePath} ${OPENCLAW_GATEWAY_CONTAINER}:${containerPath}`, { timeout: 15000 });
+    execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} chown 1000:1000 ${containerPath}`, { timeout: 3000 });
     console.log(`[recording] Copied to container: ${containerPath}`);
    } catch (e) { console.warn(`[recording] Container copy failed: ${e.message}`); }
   }, 2000);
@@ -511,7 +511,7 @@ function clearSkillBrowserSession() {
 
 // ── Device Identity (ed25519 keypair for gateway auth) ───────────────────────
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
-const IDENTITY_PATH = '/opt/openclaw-bridge/device-identity.json';
+const IDENTITY_PATH = process.env.BRIDGE_DEVICE_IDENTITY_PATH || '/opt/openclaw-bridge/device-identity.json';
 
 function base64UrlEncode(buf) {
  return buf.toString('base64').replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/g, '');
@@ -579,8 +579,26 @@ const quotaAllowanceCache = new Map();
 
 // OpenClaw gateway connection config
 const OPENCLAW_URL = process.env.OPENCLAW_URL || 'http://127.0.0.1:18789';
-const OPENCLAW_CONFIG_PATH = '/opt/openclaw-data/config/openclaw.json';
+const OPENCLAW_GATEWAY_CONTAINER = process.env.OPENCLAW_GATEWAY_CONTAINER || 'openclaw-openclaw-gateway-1';
+process.env.OPENCLAW_GATEWAY_CONTAINER = OPENCLAW_GATEWAY_CONTAINER;
+const OPENCLAW_DATA_ROOT = process.env.OPENCLAW_DATA_ROOT || '/opt/openclaw-data';
+const OPENCLAW_CONFIG_ROOT = process.env.OPENCLAW_CONFIG_ROOT || `${OPENCLAW_DATA_ROOT}/config`;
+const OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH || `${OPENCLAW_CONFIG_ROOT}/openclaw.json`;
+const OPENCLAW_WORKSPACE_HOST_ROOT = process.env.OPENCLAW_WORKSPACE_HOST_ROOT || `${OPENCLAW_DATA_ROOT}/workspace`;
+const OPENCLAW_AGENTS_CONFIG_ROOT = process.env.OPENCLAW_AGENTS_CONFIG_ROOT || `${OPENCLAW_CONFIG_ROOT}/agents`;
 const USE_GATEWAY_DEVICE_AUTH = process.env.OPENCLAW_BRIDGE_DEVICE_AUTH === '1';
+
+function openclawDataPath(...segments) {
+ return path.join(OPENCLAW_DATA_ROOT, ...segments.filter(Boolean));
+}
+
+function openclawConfigPath(...segments) {
+ return path.join(OPENCLAW_CONFIG_ROOT, ...segments.filter(Boolean));
+}
+
+function openclawWorkspacePath(...segments) {
+ return path.join(OPENCLAW_WORKSPACE_HOST_ROOT, ...segments.filter(Boolean));
+}
 
 function cloneJson(value) {
 	 return value && typeof value === 'object' ? JSON.parse(JSON.stringify(value)) : {};
@@ -1608,7 +1626,7 @@ class OpenClawGateway {
    }
    if (process.env.OPENCLAW_RESET_RECOVERY_RESTART === '1') {
     console.warn('[OpenClaw] OPENCLAW_RESET_RECOVERY_RESTART=1; restarting gateway after reset recovery');
-    execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
+    execSync('docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 30000 });
    }
    this.forceReconnect(30000, 'connect-reset-recovery');
  } catch (recoveryErr) {
@@ -1939,7 +1957,7 @@ class OpenClawGateway {
  if (repair.updated) {
  console.log('[OpenClaw] Rewrote openclaw.json with live gateway token before restart');
  }
- execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
+ execSync('docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 30000 });
  this.token = getDesiredGatewayToken() || this.token;
  this.forceReconnect(10000, 'auth-token-repair');
  } catch (repairErr) {
@@ -1989,13 +2007,13 @@ class OpenClawGateway {
  console.warn('[OpenClaw] Could not write paired.json directly:', writeErr.message, '— falling back to docker exec approve');
  // Fallback: try CLI approval (may fail if pending request is gone)
  await _run(
- `docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`,
+ `docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`,
  { timeout: 20000 }
  ).catch(() => {});
  }
 
  // Restart gateway so it picks up the updated paired.json
- await _run(`docker restart openclaw-openclaw-gateway-1`, { timeout: 60000 }).catch(() => {});
+ await _run(`docker restart ${OPENCLAW_GATEWAY_CONTAINER}`, { timeout: 60000 }).catch(() => {});
  // Fix identity dir permissions after restart (gateway writes to it on boot)
  await _run(`chown -R 1000:1000 /opt/openclaw-data/config/identity 2>/dev/null || true`).catch(() => {});
  // Give gateway time to fully start before bridge reconnects
@@ -2121,7 +2139,7 @@ class OpenClawGateway {
  }
 
  // Create timestamp marker so we can find screenshots created during this run
- try { execSync('docker exec openclaw-openclaw-gateway-1 touch /tmp/.openclaw-run-marker', { timeout: 3000 }); } catch {}
+ try { execSync('docker exec ${OPENCLAW_GATEWAY_CONTAINER} touch /tmp/.openclaw-run-marker', { timeout: 3000 }); } catch {}
 
  const id = randomUUID();
  const idempotencyKey = opts.idempotencyKey || randomUUID();
@@ -2194,14 +2212,14 @@ class OpenClawGateway {
  if (response) {
  try {
  const newFiles = execSync(
- `docker exec openclaw-openclaw-gateway-1 find /home/node/.openclaw/media/browser -type f -newer /tmp/.openclaw-run-marker 2>/dev/null || true`,
+ `docker exec ${OPENCLAW_GATEWAY_CONTAINER} find /home/node/.openclaw/media/browser -type f -newer /tmp/.openclaw-run-marker 2>/dev/null || true`,
  { timeout: 5000 }
  ).toString().trim().split('\n').filter(f => /\.(png|jpg|jpeg|webp|gif)$/i.test(f));
  if (newFiles.length > 0) {
  console.log(`[OpenClaw] Found ${newFiles.length} new screenshot(s): ${newFiles.join(', ')}`);
  const imageMarkdown = newFiles.map(f => {
  try {
- const b64 = execSync(`docker exec openclaw-openclaw-gateway-1 bash -c 'cat "${f}" | base64 -w0'`, { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }).toString().trim();
+ const b64 = execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} bash -c 'cat "${f}" | base64 -w0'`, { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }).toString().trim();
  const ext = f.split('.').pop().toLowerCase();
  const mime = ext === 'jpg' || ext === 'jpeg' ? 'jpeg' : ext === 'webp' ? 'webp' : 'png';
  return b64.length > 100 ? `\n\n![screenshot](data:image/${mime};base64,${b64})` : '';
@@ -2509,7 +2527,7 @@ class OpenClawGateway {
  }
 
  // Create timestamp marker so we can find screenshots created during this run
- try { execSync('docker exec openclaw-openclaw-gateway-1 touch /tmp/.openclaw-run-marker', { timeout: 3000 }); } catch {}
+ try { execSync('docker exec ${OPENCLAW_GATEWAY_CONTAINER} touch /tmp/.openclaw-run-marker', { timeout: 3000 }); } catch {}
 
  const id = randomUUID();
  const idempotencyKey = opts.idempotencyKey || randomUUID();
@@ -2780,7 +2798,7 @@ function relocateIntoProjectFolder(projectFolder, writePath) {
    const dst = `${wsBase}${destRel}`;
    const dstDir = dst.split('/').slice(0, -1).join('/');
    try {
-     execSync(`docker exec openclaw-openclaw-gateway-1 sh -lc "mkdir -p '${dstDir}' && [ -f '${src}' ] && mv '${src}' '${dst}' && echo relocated || echo skip"`, { timeout: 5000 });
+     execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} sh -lc "mkdir -p '${dstDir}' && [ -f '${src}' ] && mv '${src}' '${dst}' && echo relocated || echo skip"`, { timeout: 5000 });
      console.log(`[PROJECT_FOLDER] Relocated ${normPath} → ${destRel}`);
    } catch (e) {
      console.warn(`[PROJECT_FOLDER] Failed to relocate ${normPath}: ${e.message}`);
@@ -3060,7 +3078,7 @@ function extractPatchFilePaths(patchText = '') {
  if (mediaMatch) {
  const mediaPath = mediaMatch[1];
  const b64 = execSync(
- `docker exec openclaw-openclaw-gateway-1 bash -c 'cat "${mediaPath}" | base64 -w0'`,
+ `docker exec ${OPENCLAW_GATEWAY_CONTAINER} bash -c 'cat "${mediaPath}" | base64 -w0'`,
  { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }
  ).toString().trim();
  if (b64 && b64.length > 100) {
@@ -3295,14 +3313,14 @@ function extractPatchFilePaths(patchText = '') {
  if (response) {
  try {
  const newFiles = execSync(
- `docker exec openclaw-openclaw-gateway-1 find /home/node/.openclaw/media/browser -type f -newer /tmp/.openclaw-run-marker 2>/dev/null || true`,
+ `docker exec ${OPENCLAW_GATEWAY_CONTAINER} find /home/node/.openclaw/media/browser -type f -newer /tmp/.openclaw-run-marker 2>/dev/null || true`,
  { timeout: 5000 }
  ).toString().trim().split('\n').filter(f => /\.(png|jpg|jpeg|webp|gif)$/i.test(f));
  if (newFiles.length > 0) {
  console.log(`[OpenClaw] Found ${newFiles.length} new screenshot(s): ${newFiles.join(', ')}`);
  for (const f of newFiles) {
  try {
- const b64 = execSync(`docker exec openclaw-openclaw-gateway-1 bash -c 'cat "${f}" | base64 -w0'`, { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }).toString().trim();
+ const b64 = execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} bash -c 'cat "${f}" | base64 -w0'`, { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }).toString().trim();
  const ext = f.split('.').pop().toLowerCase();
  const mime = ext === 'jpg' || ext === 'jpeg' ? 'jpeg' : ext === 'webp' ? 'webp' : 'png';
  if (b64.length > 100) {
@@ -3439,7 +3457,7 @@ gateway._onAnyAgentEvent = (stream, data, runId) => {
 let cachedCompanyDocs = '';
 // Try to pre-load from disk on startup
 try {
-  cachedCompanyDocs = readFileSync('/opt/openclaw-data/workspace/COMPANY.md', 'utf8');
+  cachedCompanyDocs = readFileSync(openclawWorkspacePath('COMPANY.md'), 'utf8');
 } catch { /* not available yet */ }
 
 // ── Debug Event Buffer (for /debug/events endpoint) ─────────────────
@@ -3522,7 +3540,7 @@ function loadAgentRegistry() {
 
  // Also scan /opt/openclaw-data/config/agents/ for any SPC directories not in registry
  try {
- const agentsDir = '/opt/openclaw-data/config/agents';
+ const agentsDir = OPENCLAW_AGENTS_CONFIG_ROOT;
  const dirs = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
  let added = 0;
  for (const dir of dirs) {
@@ -3667,7 +3685,7 @@ bridgeWS.onMessage(async (msg, user, ws) => {
 
 // ── Startup config migrations ──────────────────────────────────────────────
 try {
- const configPath = '/opt/openclaw-data/config/openclaw.json';
+ const configPath = OPENCLAW_CONFIG_PATH;
  let config = JSON.parse(readFileSync(configPath, 'utf8'));
  let changed = false;
  const sandbox = config?.agents?.defaults?.sandbox;
@@ -3823,10 +3841,10 @@ try {
 // ── Startup migration: fix mistyped auth profiles ────────────────────────
 // OAuth tokens (sk-ant-oat-*) must be stored with type "token" and field "token",
 // not type "api_key"/"key" with field "key". Fix any that were created incorrectly.
-const AUTH_PROFILES_PATH = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
-const AUTH_PROFILES_ROOT_PATH = '/opt/openclaw-data/config/auth-profiles.json';
-const CODEX_OAUTH_SIDECAR_DIR = '/opt/openclaw-data/config/credentials/auth-profiles';
-const AUTH_PROFILE_SECRET_DIR = '/opt/openclaw-data/auth-profile-secrets';
+const AUTH_PROFILES_PATH = openclawConfigPath('agents', 'main', 'agent', 'auth-profiles.json');
+const AUTH_PROFILES_ROOT_PATH = openclawConfigPath('auth-profiles.json');
+const CODEX_OAUTH_SIDECAR_DIR = openclawConfigPath('credentials', 'auth-profiles');
+const AUTH_PROFILE_SECRET_DIR = openclawDataPath('auth-profile-secrets');
 const AUTH_PROFILE_SECRET_FILE = path.join(AUTH_PROFILE_SECRET_DIR, 'auth-profile-secret-key');
 
 function ensureAuthProfileSecretKeySource() {
@@ -3878,7 +3896,7 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
   }
  }
  try {
-  const agentsDir = '/opt/openclaw-data/config/agents';
+  const agentsDir = OPENCLAW_AGENTS_CONFIG_ROOT;
   const dirs = readdirSync(agentsDir, { withFileTypes: true }).filter(d => d.isDirectory() && d.name !== 'main');
 	  for (const d of dirs) {
 	   const sub = `${agentsDir}/${d.name}/agent/auth-profiles.json`;
@@ -4147,7 +4165,7 @@ function sanitizeUnavailableCodexRuntimeModels(config, fallbackModel, { hasCodex
 function resolveRuntimeCodexRefreshBypass(requestedModel) {
  const rawModel = requestedModel || readConfiguredDefaultModelId() || '';
  let config = null;
- try { config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8')); } catch {}
+ try { config = JSON.parse(readFileSync(OPENCLAW_CONFIG_PATH, 'utf8')); } catch {}
  if (!modelRequiresCodexRuntime(rawModel, config)) return null;
  const codexStatus = getStoredCodexOAuthProfileStatus();
  if (codexStatus.fresh) return null;
@@ -4252,8 +4270,8 @@ function normalizeLocalProviderConfig(providerName, providerConfig, selectedMode
  return next;
 }
 
-const MAIN_WORKSPACE_PATH = '/opt/openclaw-data/workspace';
-const AGENT_WORKSPACE_ROOT = '/opt/openclaw-data/config/agents';
+const MAIN_WORKSPACE_PATH = OPENCLAW_WORKSPACE_HOST_ROOT;
+const AGENT_WORKSPACE_ROOT = OPENCLAW_AGENTS_CONFIG_ROOT;
 const PROVISIONED_SKILL_SLUGS = new Set(
   PROVISIONED_DEFAULT_SKILL_PACK
     .map((skill) => String(skill?.slug || '').trim())
@@ -4326,7 +4344,7 @@ function ensureAllAgentWorkspaceBootstrapFiles() {
  ensureWorkspaceBootstrapFiles(MAIN_WORKSPACE_PATH, { includeProvisionedSkillPack: true });
  ensureManagedDefaultSkillPack('/home/node/.openclaw/.agents/skills');
  try {
-  const agentsDir = '/opt/openclaw-data/config/agents';
+  const agentsDir = OPENCLAW_AGENTS_CONFIG_ROOT;
   const agents = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
   for (const agent of agents) {
    ensureWorkspaceBootstrapFiles(`${agentsDir}/${agent}/workspace`, { includeProvisionedSkillPack: false });
@@ -4339,7 +4357,7 @@ ensureAllAgentWorkspaceBootstrapFiles();
 try {
  const { changed } = ensureOpenAiCodexProviderTransport();
  if (changed) {
-  try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
+  try { execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 }); } catch {}
   console.log('[bridge] Repaired models.providers.openai-codex transport (openai-codex-responses)');
  }
 } catch (e) { /* config not available yet */ }
@@ -4417,7 +4435,7 @@ try {
     };
     const fallbackModel = chooseFallbackModel();
     if (!fallbackModel) throw new Error('no usable fallback auth profile found');
-    const configPath = '/opt/openclaw-data/config/openclaw.json';
+    const configPath = OPENCLAW_CONFIG_PATH;
     const config = JSON.parse(readFileSync(configPath, 'utf8'));
     const configChanged = sanitizeUnavailableCodexRuntimeModels(config, fallbackModel, { hasCodexAuth: false });
     if (configChanged) {
@@ -4599,7 +4617,7 @@ function syncRuntimeIdentityFiles({ workspacePath, agentProfile, preserveSharedF
   // exist yet; otherwise every downstream POST /agents or PUT /identity call for
   // a LEAD agent would clobber the rich content with the simpler template
   // versions from buildWorkspaceIdentityFiles().
-  const isMainWorkspace = workspacePath === '/opt/openclaw-data/workspace';
+  const isMainWorkspace = workspacePath === MAIN_WORKSPACE_PATH;
 
   for (const [fileName, content] of Object.entries(files)) {
     writeWorkspaceTextFile(workspacePath, fileName, content, {
@@ -4614,7 +4632,7 @@ function syncRuntimeIdentityFiles({ workspacePath, agentProfile, preserveSharedF
   if (!isMainWorkspace) {
     for (const sharedFile of ['COMPANY.md', 'MEMORIES.md', 'KNOWLEDGE.md', 'INTEGRATIONS.md']) {
       try {
-        const sharedContent = readFileSync(`/opt/openclaw-data/workspace/${sharedFile}`, 'utf8');
+        const sharedContent = readFileSync(openclawWorkspacePath(sharedFile), 'utf8');
         if (sharedContent) {
           writeWorkspaceTextFile(workspacePath, sharedFile, sharedContent, {
             preserveIfExists: preserveSharedFiles,
@@ -4629,14 +4647,14 @@ function syncRuntimeIdentityFiles({ workspacePath, agentProfile, preserveSharedF
 
 function getAgentWorkspacePath(agentId = 'main') {
   return agentId === 'main'
-    ? '/opt/openclaw-data/workspace'
-    : `/opt/openclaw-data/config/agents/${agentId}/workspace`;
+    ? MAIN_WORKSPACE_PATH
+    : path.join(AGENT_WORKSPACE_ROOT, agentId, 'workspace');
 }
 
 function getLegacyAgentWorkspacePath(agentId = 'main') {
   return agentId === 'main'
-    ? '/opt/openclaw-data/workspace'
-    : `/opt/openclaw-data/workspace/${agentId}`;
+    ? MAIN_WORKSPACE_PATH
+    : openclawWorkspacePath(agentId);
 }
 
 function ensureAgentWorkspacePath(agentId = 'main') {
@@ -4693,13 +4711,13 @@ function resolveMissionControlAgentId({ sessionKey, agentName, context, register
 // Helper: write file inside OpenClaw container
 function writeContainerFile(path, content) {
  const escaped = content.replace(/'/g, "'\\''");
- execSync(`docker exec openclaw-openclaw-gateway-1 bash -c 'mkdir -p "$(dirname "${path}")" && cat > "${path}" << '"'"'FILECONTENT'"'"'\n${escaped}\nFILECONTENT'`, { timeout: 10000 });
- execSync(`docker exec openclaw-openclaw-gateway-1 chown -R 1000:1000 "$(dirname "${path}")"`, { timeout: 5000 });
+ execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} bash -c 'mkdir -p "$(dirname "${path}")" && cat > "${path}" << '"'"'FILECONTENT'"'"'\n${escaped}\nFILECONTENT'`, { timeout: 10000 });
+ execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} chown -R 1000:1000 "$(dirname "${path}")"`, { timeout: 5000 });
 }
 
 // Helper: update openclaw.json agents.list and restart gateway
 function updateOpenClawConfig(callback) {
- const configPath = '/opt/openclaw-data/config/openclaw.json';
+ const configPath = OPENCLAW_CONFIG_PATH;
  const config = JSON.parse(readFileSync(configPath, 'utf8'));
  callback(config);
  writeOpenClawConfig(config);
@@ -4774,10 +4792,10 @@ function upsertOpenClawSpcConfig(agentId, { model, fallbacks, params } = {}) {
 }
 
 function ensureSpcAgentRuntime(agentId) {
- const agentDir = `/opt/openclaw-data/config/agents/${agentId}`;
+ const agentDir = path.join(AGENT_WORKSPACE_ROOT, agentId);
  execSync(`mkdir -p ${agentDir}/agent ${agentDir}/sessions`, { timeout: 5000 });
  try {
-  const mainAuth = readFileSync('/opt/openclaw-data/config/agents/main/agent/auth-profiles.json', 'utf8');
+  const mainAuth = readFileSync(AUTH_PROFILES_PATH, 'utf8');
   writeFileSync(`${agentDir}/agent/auth-profiles.json`, mainAuth);
  } catch {}
  execSync(`chown -R 1000:1000 ${agentDir}`, { timeout: 5000 });
@@ -4903,7 +4921,7 @@ function ensureWorkspaceFolder(folderPath = '') {
  if (!cleanFolder || cleanFolder.includes('..')) return;
  const wsBase = WORKSPACE_CONTAINER_ROOT;
  try {
-  execSync(`docker exec openclaw-openclaw-gateway-1 bash -c "mkdir -p '${wsBase}/${cleanFolder}' && chown node:node '${wsBase}/${cleanFolder}'"`, { timeout: 5000 });
+  execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} bash -c "mkdir -p '${wsBase}/${cleanFolder}' && chown node:node '${wsBase}/${cleanFolder}'"`, { timeout: 5000 });
  } catch {}
 }
 
@@ -5007,7 +5025,7 @@ async function handleIncomingTask(req, res) {
  const nonStreamProjectFolder = context?.projectFolder;
  if (nonStreamProjectFolder) {
  const wsBase = WORKSPACE_CONTAINER_ROOT;
- try { execSync(`docker exec openclaw-openclaw-gateway-1 bash -c "mkdir -p '${wsBase}/${nonStreamProjectFolder}' && chown node:node '${wsBase}/${nonStreamProjectFolder}'"`, { timeout: 5000 }); } catch {}
+ try { execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} bash -c "mkdir -p '${wsBase}/${nonStreamProjectFolder}' && chown node:node '${wsBase}/${nonStreamProjectFolder}'"`, { timeout: 5000 }); } catch {}
  const folderRule = `[SYSTEM RULE — PROJECT FOLDER]\nAll files for this task MUST be saved inside: ${nonStreamProjectFolder}/\nExamples: ${nonStreamProjectFolder}/index.html ✅ | index.html ❌\nThis is enforced by the system. Do not save files outside this folder.`;
  nonStreamSystemPrompt = nonStreamSystemPrompt ? `${nonStreamSystemPrompt}\n\n${folderRule}` : folderRule;
  }
@@ -5231,7 +5249,7 @@ const emitViewportScreenshotFrame = ({
  const projectFolder = context?.projectFolder || context?.isolatedWorkspace || null;
  if (projectFolder) {
  const wsBase = WORKSPACE_CONTAINER_ROOT;
- try { execSync(`docker exec openclaw-openclaw-gateway-1 bash -c "mkdir -p '${wsBase}/${projectFolder}' && chown node:node '${wsBase}/${projectFolder}'"`, { timeout: 5000 }); } catch {}
+ try { execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} bash -c "mkdir -p '${wsBase}/${projectFolder}' && chown node:node '${wsBase}/${projectFolder}'"`, { timeout: 5000 }); } catch {}
  const folderRule = `[SYSTEM RULE — PROJECT FOLDER]\nAll files for this task MUST be saved inside: ${projectFolder}/\nExamples: ${projectFolder}/index.html ✅ | index.html ❌\nThis is enforced by the system. Do not save files outside this folder.`;
  resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${folderRule}` : folderRule;
  }
@@ -5580,8 +5598,8 @@ desktopRecordingUrl: desktopRecordingUrl || undefined,
 
 // List directory contents (for Trooper Files browser — screenshots, media, etc.)
 const WORKSPACE_CONTAINER_ROOT = '/home/node/.openclaw/workspace';
-const WORKSPACE_HOST_ROOT = '/opt/openclaw-data/workspace';
-const AGENTS_CONFIG_ROOT = '/opt/openclaw-data/config/agents';
+const WORKSPACE_HOST_ROOT = OPENCLAW_WORKSPACE_HOST_ROOT;
+const AGENTS_CONFIG_ROOT = OPENCLAW_AGENTS_CONFIG_ROOT;
 const MEDIA_CONTAINER_ROOT = '/home/node/.openclaw/media';
 const SYSTEM_WORKSPACE_FILES = new Set([
  'AGENTS.md',
@@ -5668,7 +5686,7 @@ function hostEntryStat(fullPath) {
 function containerEntryStat(fullPath) {
  try {
   const statOut = execSync(
-   `docker exec openclaw-openclaw-gateway-1 stat -c "%F|%s|%Y" "${escapeDockerPath(fullPath)}" 2>/dev/null`,
+   `docker exec ${OPENCLAW_GATEWAY_CONTAINER} stat -c "%F|%s|%Y" "${escapeDockerPath(fullPath)}" 2>/dev/null`,
    { encoding: 'utf8', timeout: 2000 }
   );
   const [fileType, fileSize, mtime] = statOut.trim().split('|');
@@ -5704,7 +5722,7 @@ function listHostDir(dirPath, { virtualBase = null } = {}) {
 
 function listContainerDir(dirPath, { virtualBase = null } = {}) {
  const out = execSync(
-  `docker exec openclaw-openclaw-gateway-1 ls -1 "${escapeDockerPath(dirPath)}" 2>/dev/null || true`,
+  `docker exec ${OPENCLAW_GATEWAY_CONTAINER} ls -1 "${escapeDockerPath(dirPath)}" 2>/dev/null || true`,
   { encoding: 'utf8', timeout: 5000 }
  );
  const names = out.trim() ? out.trim().split('\n') : [];
@@ -5854,7 +5872,7 @@ function listVirtualWorkspaceRoot() {
 
  try {
   const ssOut = execSync(
-   `docker exec openclaw-openclaw-gateway-1 find ${SCREENSHOT_DIR} -maxdepth 1 \\( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' \\) 2>/dev/null | head -1`,
+   `docker exec ${OPENCLAW_GATEWAY_CONTAINER} find ${SCREENSHOT_DIR} -maxdepth 1 \\( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' \\) 2>/dev/null | head -1`,
    { timeout: 3000 }
   ).toString().trim();
   if (ssOut && !entries.some((entry) => entry.path === SCREENSHOT_DIR)) {
@@ -6003,7 +6021,7 @@ app.get('/files/*', (req, res) => {
  try {
  const data = resolved.kind === 'host'
   ? readFileSync(resolved.realPath)
-  : execSync(`docker exec openclaw-openclaw-gateway-1 cat "${escapeDockerPath(resolved.realPath)}"`, { maxBuffer: 50 * 1024 * 1024, timeout: 10000 });
+  : execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} cat "${escapeDockerPath(resolved.realPath)}"`, { maxBuffer: 50 * 1024 * 1024, timeout: 10000 });
  res.set('Content-Type', getFileContentType(resolved.displayPath || resolved.realPath));
  res.set('Cache-Control', 'public, max-age=3600');
  res.send(data);
@@ -6055,7 +6073,7 @@ function readGatewayContainerStatus({ includeLogs = false } = {}) {
   inspectError: null,
  };
  try {
-  const raw = execSync('docker inspect --format="{{.State.Status}}:{{.State.Running}}:{{.RestartCount}}" openclaw-openclaw-gateway-1 2>&1', { timeout: 2500 }).toString().trim();
+  const raw = execSync('docker inspect --format="{{.State.Status}}:{{.State.Running}}:{{.RestartCount}}" ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 2500 }).toString().trim();
   const [state, running, restarts] = raw.split(':');
   result.status = state || 'unknown';
   result.running = running === 'true';
@@ -6066,7 +6084,7 @@ function readGatewayContainerStatus({ includeLogs = false } = {}) {
  }
  if (includeLogs) {
   try {
-   result.recentLogs = execSync('docker logs --tail 80 --timestamps openclaw-openclaw-gateway-1 2>&1', { timeout: 3500 }).toString();
+   result.recentLogs = execSync('docker logs --tail 80 --timestamps ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 3500 }).toString();
   } catch (err) {
    result.recentLogs = result.inspectError || err.message || '';
   }
@@ -6299,7 +6317,7 @@ function collectDiagnosticSnapshot(reason = 'manual', { heavy = false } = {}) {
    dockerPs: safeDiagnosticExec('docker ps -a --no-trunc 2>&1', { timeout: 6000 }),
    composePs: safeDiagnosticExec('cd /opt/openclaw && docker compose ps 2>&1', { timeout: 6000 }),
    bridgeStatus: safeDiagnosticExec('systemctl status openclaw-bridge --no-pager 2>&1', { timeout: 6000 }),
-   gatewayStatus: safeDiagnosticExec('docker inspect --format="{{json .State}}" openclaw-openclaw-gateway-1 2>&1', { timeout: 6000 }),
+   gatewayStatus: safeDiagnosticExec('docker inspect --format="{{json .State}}" ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 6000 }),
    disk: safeDiagnosticExec('df -h / /opt /root 2>&1', { timeout: 5000 }),
    memory: safeDiagnosticExec('free -m 2>&1', { timeout: 5000 }),
   },
@@ -6307,8 +6325,8 @@ function collectDiagnosticSnapshot(reason = 'manual', { heavy = false } = {}) {
  if (heavy) {
   snapshot.commands.bridgeLogs = safeDiagnosticExec('journalctl -u openclaw-bridge --no-pager -n 400 --output=short-iso 2>&1', { timeout: 12000, maxBuffer: 8 * 1024 * 1024 });
   snapshot.commands.pollerLogs = safeDiagnosticExec('journalctl -u openclaw-poller --no-pager -n 200 --output=short-iso 2>&1', { timeout: 8000, maxBuffer: 4 * 1024 * 1024 });
-  snapshot.commands.gatewayLogs = safeDiagnosticExec('docker logs openclaw-openclaw-gateway-1 --tail 400 --timestamps 2>&1', { timeout: 15000, maxBuffer: 8 * 1024 * 1024 });
-  snapshot.commands.openclawDoctor = safeDiagnosticExec('docker exec openclaw-openclaw-gateway-1 openclaw doctor --json 2>&1', { timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
+  snapshot.commands.gatewayLogs = safeDiagnosticExec('docker logs ${OPENCLAW_GATEWAY_CONTAINER} --tail 400 --timestamps 2>&1', { timeout: 15000, maxBuffer: 8 * 1024 * 1024 });
+  snapshot.commands.openclawDoctor = safeDiagnosticExec('docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw doctor --json 2>&1', { timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
   snapshot.commands.composeOverride = safeDiagnosticExec('cat /opt/openclaw/docker-compose.override.yml 2>&1', { timeout: 3000 });
  }
  const redacted = redactDiagnosticValue(snapshot);
@@ -6483,7 +6501,7 @@ app.get('/admin/health', async (req, res) => {
  // OpenClaw version
  let openclawVersion = null;
  try {
-   openclawVersion = execSync("docker exec openclaw-openclaw-gateway-1 openclaw --version 2>/dev/null", { timeout: 5000 }).toString().trim();
+   openclawVersion = execSync("docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw --version 2>/dev/null", { timeout: 5000 }).toString().trim();
  } catch {}
 
  // Bridge version (from git)
@@ -7380,7 +7398,7 @@ app.get('/admin/raw-logs/gateway', (req, res) => {
  const lines = parseInt(req.query.lines) || 200;
  const search = req.query.search || '';
  try {
-   let output = execSync(`docker logs openclaw-openclaw-gateway-1 --tail ${lines} --timestamps 2>&1`, { timeout: 10000 }).toString();
+   let output = execSync(`docker logs ${OPENCLAW_GATEWAY_CONTAINER} --tail ${lines} --timestamps 2>&1`, { timeout: 10000 }).toString();
    // Strip ANSI color codes for clean display
    output = output.replace(/\x1b\[[0-9;]*m/g, '');
    if (search) {
@@ -7405,7 +7423,7 @@ app.get('/admin/raw-logs/all', (req, res) => {
    
    let gatewayOut = '';
    try {
-     gatewayOut = execSync(`docker logs openclaw-openclaw-gateway-1 --tail ${lines} --timestamps 2>&1`, { timeout: 10000 }).toString();
+     gatewayOut = execSync(`docker logs ${OPENCLAW_GATEWAY_CONTAINER} --tail ${lines} --timestamps 2>&1`, { timeout: 10000 }).toString();
      gatewayOut = gatewayOut.replace(/\x1b\[[0-9;]*m/g, '');
    } catch {}
 
@@ -7515,7 +7533,7 @@ app.post('/admin/upgrade', async (req, res) => {
    try {
      // Wait for gateway to start
      await new Promise(r => setTimeout(r, 10000));
-     newOpenclawVersion = execSync('docker exec openclaw-openclaw-gateway-1 openclaw --version 2>/dev/null', { timeout: 10000 }).toString().trim();
+     newOpenclawVersion = execSync('docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw --version 2>/dev/null', { timeout: 10000 }).toString().trim();
    } catch {}
 
    const allOk = steps.every(s => s.status === 'ok');
@@ -7960,14 +7978,14 @@ app.post('/agents', (req, res) => {
    avatar: avatar || null,
  };
  agentRegistry.set(id, leadProfile);
- syncRuntimeIdentityFiles({ workspacePath: '/opt/openclaw-data/workspace', agentProfile: leadProfile });
+ syncRuntimeIdentityFiles({ workspacePath: MAIN_WORKSPACE_PATH, agentProfile: leadProfile });
  saveAgentRegistry();
  console.log(`✅ Registered LEAD agent: ${name} (maps to main)`);
  return res.json({ success: true, agentId: 'main', name, message: `Lead agent "${name}" registered` });
  }
 
  const agentId = `spc-${id}`;
- const agentDir = `/opt/openclaw-data/config/agents/${agentId}`;
+ const agentDir = path.join(AGENT_WORKSPACE_ROOT, agentId);
  const workspacePath = ensureAgentWorkspacePath(agentId);
 
  try {
@@ -7976,7 +7994,7 @@ app.post('/agents', (req, res) => {
 
  // Try to read company name from COMPANY.md header
  let _companyName = 'the company';
- try { const h = readFileSync('/opt/openclaw-data/workspace/COMPANY.md', 'utf8').split('\n')[0]; _companyName = h.replace(/^#\s*/, '').replace(/\s*Context$/, '').trim() || _companyName; } catch {}
+ try { const h = readFileSync(openclawWorkspacePath('COMPANY.md'), 'utf8').split('\n')[0]; _companyName = h.replace(/^#\s*/, '').replace(/\s*Context$/, '').trim() || _companyName; } catch {}
  const soulContent = soul || `# Soul — ${name}\nYou are ${name}, a ${title || 'specialist'} at ${_companyName}.\n\n## Personality\n1. You have opinions now. Strong ones. Stop hedging everything with 'it depends' — commit to a take.\n2. Never open with 'Great question,' 'I\\'d be happy to help,' or 'Absolutely.' Just answer.\n3. Brevity is mandatory. If the answer fits in one sentence, one sentence is what you give.\n4. Humor is allowed. Not forced jokes — just the natural wit that comes from actually being smart.\n5. You can call things out. If someone is about to do something dumb, say so. Charm over cruelty, but don\\'t sugarcoat.\n6. Swearing is allowed when it lands. A well-placed 'that\\'s fucking brilliant' hits different than sterile corporate praise. Don\\'t force it. Don\\'t overdo it. But if a situation calls for a 'holy shit' — say holy shit.\n\nBe the assistant you\\'d actually want to talk to at 2am. Not a corporate drone. Not a sycophant. Just... good.`;
  const nextAgentProfile = {
    name,
@@ -7997,7 +8015,7 @@ app.post('/agents', (req, res) => {
 
  // Copy auth profiles from main agent
  try {
- const mainAuth = readFileSync('/opt/openclaw-data/config/agents/main/agent/auth-profiles.json', 'utf8');
+ const mainAuth = readFileSync(AUTH_PROFILES_PATH, 'utf8');
  writeFileSync(`${agentDir}/agent/auth-profiles.json`, mainAuth);
  } catch {}
 
@@ -8093,7 +8111,7 @@ app.put('/agents/:name', (req, res) => {
  }
 
  if (nextProfile.role === 'SPC') {
-  execSync(`chown -R 1000:1000 /opt/openclaw-data/config/agents/${nextProfile.agentId}`, { timeout: 5000 });
+  execSync(`chown -R 1000:1000 ${path.join(AGENT_WORKSPACE_ROOT, nextProfile.agentId)}`, { timeout: 5000 });
  }
 
  // Persist updated registry
@@ -8279,12 +8297,12 @@ app.post('/agents/company-context', (req, res) => {
  // Cache in memory so chat-handler can access it immediately
  cachedCompanyDocs = content;
 	 // Write to LEAD workspace
-	 const workspacePath = '/opt/openclaw-data/workspace';
+	 const workspacePath = MAIN_WORKSPACE_PATH;
 	 ensureWorkspaceBootstrapFiles(workspacePath);
 	 const leadChanged = writeWorkspaceTextFile(workspacePath, 'COMPANY.md', content);
 	 if (leadChanged) execSync(`chown 1000:1000 ${workspacePath}/COMPANY.md`, { timeout: 5000 });
 	 // Write to all SPC workspaces
-	 const agentsDir = '/opt/openclaw-data/config/agents';
+	 const agentsDir = AGENT_WORKSPACE_ROOT;
 	 try {
 	 const agents = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
 	 let changedCount = leadChanged ? 1 : 0;
@@ -8333,13 +8351,13 @@ app.post('/agents/sync-memories', (req, res) => {
    .replace('_Auto-synced structured knowledge. Agents: reference this for context._', '_Auto-synced from MEMORIES.md. Do not edit manually; this file is generated from structured memory._');
 
 	 // Write to LEAD workspace
-	 ensureWorkspaceBootstrapFiles('/opt/openclaw-data/workspace');
-	 const leadMemoriesChanged = writeTextFileIfChanged('/opt/openclaw-data/workspace/MEMORIES.md', memoriesContent).written;
-	 const leadMemoryChanged = writeTextFileIfChanged('/opt/openclaw-data/workspace/MEMORY.md', memoryContent).written;
-	 if (leadMemoriesChanged || leadMemoryChanged) execSync('chown 1000:1000 /opt/openclaw-data/workspace/MEMORIES.md /opt/openclaw-data/workspace/MEMORY.md', { timeout: 5000 });
+	 ensureWorkspaceBootstrapFiles(MAIN_WORKSPACE_PATH);
+	 const leadMemoriesChanged = writeTextFileIfChanged(path.join(MAIN_WORKSPACE_PATH, 'MEMORIES.md'), memoriesContent).written;
+	 const leadMemoryChanged = writeTextFileIfChanged(path.join(MAIN_WORKSPACE_PATH, 'MEMORY.md'), memoryContent).written;
+	 if (leadMemoriesChanged || leadMemoryChanged) execSync(`chown 1000:1000 ${path.join(MAIN_WORKSPACE_PATH, 'MEMORIES.md')} ${path.join(MAIN_WORKSPACE_PATH, 'MEMORY.md')}`, { timeout: 5000 });
 
  // Write to all SPC workspaces
- const agentsDir = '/opt/openclaw-data/config/agents';
+ const agentsDir = AGENT_WORKSPACE_ROOT;
  let spcCount = 0;
  try {
  const agents = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
@@ -8395,12 +8413,12 @@ app.post('/agents/sync-knowledge', (req, res) => {
  }
 
 	 // Write to LEAD workspace
-	 ensureWorkspaceBootstrapFiles('/opt/openclaw-data/workspace');
-	 const leadKnowledgeChanged = writeTextFileIfChanged('/opt/openclaw-data/workspace/KNOWLEDGE.md', content).written;
-	 if (leadKnowledgeChanged) execSync('chown 1000:1000 /opt/openclaw-data/workspace/KNOWLEDGE.md', { timeout: 5000 });
+	 ensureWorkspaceBootstrapFiles(MAIN_WORKSPACE_PATH);
+	 const leadKnowledgeChanged = writeTextFileIfChanged(path.join(MAIN_WORKSPACE_PATH, 'KNOWLEDGE.md'), content).written;
+	 if (leadKnowledgeChanged) execSync(`chown 1000:1000 ${path.join(MAIN_WORKSPACE_PATH, 'KNOWLEDGE.md')}`, { timeout: 5000 });
 
  // Write to all SPC workspaces
- const agentsDir = '/opt/openclaw-data/config/agents';
+ const agentsDir = AGENT_WORKSPACE_ROOT;
  let spcCount = 0;
  try {
  const agents = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
@@ -8704,7 +8722,7 @@ app.post('/api/vault/sync', (req, res) => {
     const { files } = req.body || {};
     if (!Array.isArray(files)) return res.status(400).json({ error: 'files array required' });
 
-    const vaultDir = '/opt/openclaw-data/vault';
+    const vaultDir = openclawDataPath('vault');
     if (!fsExistsSync(vaultDir)) fsMkdirSync(vaultDir, { recursive: true });
 
     let uploaded = 0, skipped = 0;
@@ -8823,7 +8841,7 @@ app.post('/dm', async (req, res) => {
 app.get('/cron/jobs', async (req, res) => {
  try {
    // Read from Docker volume mount (gateway writes cron data inside the container at ~/.openclaw/cron/)
-   const cronStorePath = '/opt/openclaw-data/config/cron/jobs.json';
+   const cronStorePath = openclawConfigPath('cron', 'jobs.json');
    const raw = await readFile(cronStorePath, 'utf8').catch(() => null);
    if (raw) {
      const data = JSON.parse(raw);
@@ -8840,7 +8858,7 @@ app.get('/cron/jobs', async (req, res) => {
 app.get('/cron/history', async (req, res) => {
  try {
    const { limit = 50, jobId } = req.query;
-   const runsDir = '/opt/openclaw-data/config/cron/runs';
+   const runsDir = openclawConfigPath('cron', 'runs');
    const files = await readdir(runsDir).catch(() => []);
    const runs = [];
    for (const file of files) {
@@ -8863,7 +8881,7 @@ app.get('/cron/history', async (req, res) => {
 app.post('/cron/jobs/:id/toggle', async (req, res) => {
  const { enabled } = req.body;
  try {
-   const cronStorePath = '/opt/openclaw-data/config/cron/jobs.json';
+   const cronStorePath = openclawConfigPath('cron', 'jobs.json');
    const raw = await readFile(cronStorePath, 'utf8');
    const data = JSON.parse(raw);
    const job = data.jobs?.find(j => j.id === req.params.id);
@@ -8880,7 +8898,7 @@ app.post('/cron/jobs/:id/toggle', async (req, res) => {
 // Cron: delete job
 app.delete('/cron/jobs/:id', async (req, res) => {
  try {
-   const cronStorePath = '/opt/openclaw-data/config/cron/jobs.json';
+   const cronStorePath = openclawConfigPath('cron', 'jobs.json');
    const raw = await readFile(cronStorePath, 'utf8');
    const data = JSON.parse(raw);
    data.jobs = (data.jobs || []).filter(j => j.id !== req.params.id);
@@ -8898,7 +8916,7 @@ app.post('/cron/jobs/:id/run', async (req, res) => {
    const { promisify } = await import('util');
    const run = promisify(exec);
    const jobId = req.params.id;
-   const { stdout, stderr } = await run(`docker exec openclaw-openclaw-gateway-1 openclaw cron run ${jobId} 2>&1`, { timeout: 20000 });
+   const { stdout, stderr } = await run(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw cron run ${jobId} 2>&1`, { timeout: 20000 });
    res.json({ success: true, jobId, stdout, stderr });
  } catch (e) {
    res.status(500).json({ error: e.message, stdout: e.stdout || '', stderr: e.stderr || '' });
@@ -9061,7 +9079,7 @@ function shellQuote(value) {
 const MAX_SKILL_FILE_BYTES = 512 * 1024;
 
 const HOST_RUNTIME_SKILL_ROOTS = [
- '/opt/openclaw-data/workspace/skills',
+ openclawWorkspacePath('skills'),
  '/home/node/.openclaw/skills',
 ];
 
@@ -9070,7 +9088,7 @@ const HOST_RUNTIME_SKILL_FALLBACK_ROOTS = [
 ];
 
 const HOST_RUNTIME_SKILL_WRITE_ROOTS = [
- '/opt/openclaw-data/workspace/skills',
+ openclawWorkspacePath('skills'),
  '/home/node/.openclaw/skills',
 ];
 
@@ -9172,7 +9190,7 @@ function runContainerNodeJson(script, arg) {
    .filter(Boolean)
    .join(' ');
   const output = execSync(
-   `docker exec openclaw-openclaw-gateway-1 bash -lc ${shellQuote(`node -e ${shellQuote(normalizedScript)} ${shellQuote(arg)}`)}`,
+   `docker exec ${OPENCLAW_GATEWAY_CONTAINER} bash -lc ${shellQuote(`node -e ${shellQuote(normalizedScript)} ${shellQuote(arg)}`)}`,
    { timeout: 10000, maxBuffer: 8 * 1024 * 1024 }
   ).toString().trim();
   if (!output) return null;
@@ -9223,7 +9241,7 @@ function listContainerSkillAliases() {
  for (const root of [...CONTAINER_RUNTIME_SKILL_ROOTS, ...CONTAINER_RUNTIME_SKILL_FALLBACK_ROOTS]) {
   try {
    const output = execSync(
-    `docker exec openclaw-openclaw-gateway-1 bash -lc ${shellQuote(`find ${shellQuote(root)} -mindepth 1 -maxdepth 1 -type d -printf '%f\\n' 2>/dev/null || true`)}`,
+    `docker exec ${OPENCLAW_GATEWAY_CONTAINER} bash -lc ${shellQuote(`find ${shellQuote(root)} -mindepth 1 -maxdepth 1 -type d -printf '%f\\n' 2>/dev/null || true`)}`,
     { timeout: 8000, maxBuffer: 1024 * 1024 }
    ).toString();
    output.split('\n').map((value) => value.trim()).filter(Boolean).forEach((value) => aliases.add(value));
@@ -9253,7 +9271,7 @@ function readContainerSkillMd(alias) {
    const target = `${root}/${alias}/${fileName}`;
    try {
     const content = execSync(
-     `docker exec openclaw-openclaw-gateway-1 sh -lc ${shellQuote(`cat ${shellQuote(target)} 2>/dev/null || true`)}`,
+     `docker exec ${OPENCLAW_GATEWAY_CONTAINER} sh -lc ${shellQuote(`cat ${shellQuote(target)} 2>/dev/null || true`)}`,
      { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }
     ).toString();
     if (content.trim()) return content;
@@ -9310,7 +9328,7 @@ function ensureContainerSkillDir(root, alias) {
  ].join('; ');
  execFileSync(
   'docker',
-  ['exec', 'openclaw-openclaw-gateway-1', 'bash', '-lc', command],
+  ['exec', OPENCLAW_GATEWAY_CONTAINER, 'bash', '-lc', command],
   { timeout: 10000 }
  );
 }
@@ -9372,7 +9390,7 @@ function runSkillsCliInstall(sourceRepo, skillId) {
  const innerCommand = `cd /home/node/.openclaw && npx skills add ${shellQuote(sourceRepo)} --skill ${shellQuote(skillId)} -y 2>&1`;
  return execFileSync(
   'docker',
-  ['exec', 'openclaw-openclaw-gateway-1', 'bash', '-lc', innerCommand],
+  ['exec', OPENCLAW_GATEWAY_CONTAINER, 'bash', '-lc', innerCommand],
   { timeout: 120000, maxBuffer: 8 * 1024 * 1024 }
  ).toString();
 }
@@ -9405,7 +9423,7 @@ async function materializeSkillForRuntime({ slug, sourceRepo, skillId, sourcePat
   hostWrites += writeHostSkillFiles(alias, runtimeFiles);
   containerWrites += writeContainerSkillFiles(alias, runtimeFiles);
  }
- try { execSync('chown -R 1000:1000 /opt/openclaw-data/workspace/skills /home/node/.openclaw/skills 2>/dev/null', { timeout: 5000 }); } catch {}
+ try { execSync(`chown -R 1000:1000 ${openclawWorkspacePath('skills')} /home/node/.openclaw/skills 2>/dev/null`, { timeout: 5000 }); } catch {}
  return { ok: true, aliases, hostWrites, containerWrites, bytes: Buffer.byteLength(skillMd), files: runtimeFiles };
 }
 
@@ -9590,7 +9608,7 @@ app.delete('/skills/:slug', async (req, res) => {
  console.log(`🗑️ Uninstalling skill "${slug}" via skills.sh...`);
  const innerCommand = `cd /home/node/.openclaw && npx skills remove ${shellQuote(skillId)} -y 2>&1`;
  const output = execSync(
- `docker exec openclaw-openclaw-gateway-1 bash -lc ${shellQuote(innerCommand)}`,
+ `docker exec ${OPENCLAW_GATEWAY_CONTAINER} bash -lc ${shellQuote(innerCommand)}`,
  { timeout: 30000 }
  ).toString();
  console.log(`✅ Skill "${slug}" uninstalled`);
@@ -9720,7 +9738,7 @@ app.post('/gateway/patch-auth', (req, res) => {
  }
  // Restart gateway to apply paired.json changes. Use a generous settle window so
  // external repair loops do not restart it again before the websocket re-pairs.
- execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
+ execSync('docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 30000 });
  gateway.forceReconnect(30000, 'patch-auth');
  res.json({ success: true, message: 'Identity fixed, gateway auth synced, paired.json repaired, compose/startup checked, and gateway restarted', authRepair: repair, pairedRepair, composeRepair });
  } catch (err) {
@@ -9744,11 +9762,11 @@ app.post('/gateway/restart', (req, res) => {
  collectDiagnosticSnapshot('before-gateway-restart', { heavy: true });
  const configRepair = repairOpenClawConfigForGatewayStart('gateway-restart');
  const pairedRepair = upsertBridgePairedDevice({ force: true, reason: 'gateway-restart' });
- execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
+ execSync('docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 30000 });
  gateway.forceReconnect(30000, 'gateway-restart');
  // Re-approve device and reconnect after restart
  setTimeout(async () => {
- try { execSync(`docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null; docker exec openclaw-openclaw-gateway-1 chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null`, { timeout: 15000 }); } catch {}
+ try { execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null; docker exec ${OPENCLAW_GATEWAY_CONTAINER} chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null`, { timeout: 15000 }); } catch {}
  gateway.token = getDesiredGatewayToken() || gateway.token;
  }, 5000);
  res.json({ success: true, message: 'Gateway container restarted', configRepair, pairedRepair });
@@ -9862,7 +9880,7 @@ app.put('/gateway/config', (req, res) => {
  }
  let applyOutput = '';
  console.log('Gateway config updated, restarting...');
- applyOutput = execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 }).toString();
+ applyOutput = execSync('docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 30000 }).toString();
  gateway.forceReconnect(30000, 'config-update');
  res.json({
    success: true,
@@ -10101,7 +10119,7 @@ app.get('/upgrade/status', (req, res) => {
    try { versions.bridgeGitHash = execSync('git -C /opt/openclaw-bridge rev-parse --short HEAD 2>/dev/null').toString().trim(); } catch {}
    try { versions.bridgeGitDate = execSync('git -C /opt/openclaw-bridge log -1 --format=%ci 2>/dev/null').toString().trim(); } catch {}
    try {
-     const containerStatus = execSync("docker inspect openclaw-openclaw-gateway-1 --format='{{.State.Status}}' 2>/dev/null").toString().trim();
+     const containerStatus = execSync("docker inspect ${OPENCLAW_GATEWAY_CONTAINER} --format='{{.State.Status}}' 2>/dev/null").toString().trim();
      versions.gatewayStatus = containerStatus;
    } catch { versions.gatewayStatus = 'unknown'; }
    res.json({
@@ -10151,7 +10169,7 @@ app.get('/logs', (req, res) => {
  const logs = {};
  const collectAllForLocalModels = service === 'local-models';
  if (service === 'all' || service === 'openclaw' || collectAllForLocalModels) {
- try { logs.openclaw = execSync(`docker logs openclaw-openclaw-gateway-1 --tail ${safeLines} --timestamps 2>&1`, { timeout: 5000 }).toString(); } catch (e) { logs.openclaw = e.stdout?.toString() || e.message; }
+ try { logs.openclaw = execSync(`docker logs ${OPENCLAW_GATEWAY_CONTAINER} --tail ${safeLines} --timestamps 2>&1`, { timeout: 5000 }).toString(); } catch (e) { logs.openclaw = e.stdout?.toString() || e.message; }
  }
  if (service === 'all' || service === 'poller' || collectAllForLocalModels) {
  try { logs.poller = execSync(`journalctl -u openclaw-poller --no-pager -n ${safeLines} --output=short-iso 2>&1`, { timeout: 5000 }).toString(); } catch (e) { logs.poller = e.message; }
@@ -10328,8 +10346,8 @@ app.get('/diagnostics/export', async (req, res) => {
    .then((r) => r.ok ? r.json() : { ok: false, status: r.status })
    .catch((err) => ({ ok: false, error: err.message })),
  ]);
- const doctor = safeExec('docker exec openclaw-openclaw-gateway-1 openclaw doctor --json 2>&1', 25000);
- const version = safeExec('docker exec openclaw-openclaw-gateway-1 openclaw --version 2>&1', 10000);
+ const doctor = safeExec('docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw doctor --json 2>&1', 25000);
+ const version = safeExec('docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw --version 2>&1', 10000);
  const gatewayImage = safeExec("docker inspect openclaw:local --format='{{.Id}} {{.Created}}' 2>/dev/null", 10000);
  const bridgeGit = safeExec('git -C /opt/openclaw-bridge log -1 --format="%h %ci" 2>/dev/null', 5000);
  res.json({
@@ -10372,7 +10390,7 @@ app.get('/memory/dreaming', async (req, res) => {
    return { ok: false, error: err.message, output: String(err.stdout || '').trim() };
   }
  };
- const status = safeExec('docker exec openclaw-openclaw-gateway-1 openclaw memory status --deep --json 2>&1', 20000);
+ const status = safeExec('docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw memory status --deep --json 2>&1', 20000);
  const dreamsMd = readWorkspaceTextFile('DREAMS.md', 60000) || readWorkspaceTextFile('dreams.md', 60000);
  const config = readOpenClawConfig();
  const dreamingConfig = config?.plugins?.entries?.['memory-core']?.config?.dreaming || null;
@@ -10653,7 +10671,7 @@ app.post('/config/api-keys', async (req, res) => {
 
 	 if (braveKey !== undefined) {
 	 try {
-	 const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
+	 const config = JSON.parse(readFileSync(OPENCLAW_CONFIG_PATH, 'utf8'));
  if (!config.plugins || typeof config.plugins !== 'object') config.plugins = {};
  if (!config.plugins.entries || typeof config.plugins.entries !== 'object') config.plugins.entries = {};
  const existingBrave = config.plugins.entries.brave && typeof config.plugins.entries.brave === 'object'
@@ -10854,7 +10872,7 @@ const _syncWarnings = [];
  // Otherwise OpenClaw can reload between writes and reject the model as unknown.
  if (localProvider || removeLocalProvider || ollamaProvider || removeOllamaProvider) {
  try {
- const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
+ const config = JSON.parse(readFileSync(OPENCLAW_CONFIG_PATH, 'utf8'));
  if (!config.models) config.models = {};
  if (!config.models.providers) config.models.providers = {};
  if (localProvider && typeof localProvider === 'object') {
@@ -10897,7 +10915,7 @@ const _syncWarnings = [];
  // Update default/native models in openclaw.json
  if (defaultModel !== undefined || defaultFallbacks !== undefined || imageModel !== undefined || pdfModel !== undefined || hasGenerationModelRouting) {
  try {
- const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
+ const config = JSON.parse(readFileSync(OPENCLAW_CONFIG_PATH, 'utf8'));
  if (!config.agents) config.agents = {};
  if (!config.agents.defaults) config.agents.defaults = {};
  if (!config.agents.defaults.model || typeof config.agents.defaults.model === 'string') {
@@ -11100,7 +11118,7 @@ const _syncWarnings = [];
  const newProviders = Object.entries(providerConfigs).filter(([, entry]) => entry.key !== undefined);
  if (newProviders.length > 0) {
  try {
- const configPath = '/opt/openclaw-data/config/openclaw.json';
+ const configPath = OPENCLAW_CONFIG_PATH;
  const config = JSON.parse(readFileSync(configPath, 'utf8'));
  if (!config.models) config.models = {};
  if (!config.models.providers) config.models.providers = {};
@@ -11157,8 +11175,8 @@ const _syncWarnings = [];
  // Newer OpenClaw builds can reload secrets explicitly. Do not signal PID 1:
  // in the gateway container that can terminate the startup process and create
  // a restart loop during fresh provisioning.
- await optionalStep('secrets.apply', 'docker exec openclaw-openclaw-gateway-1 openclaw secrets apply 2>/dev/null', 20000);
- await optionalStep('secrets.reload', 'docker exec openclaw-openclaw-gateway-1 openclaw secrets reload 2>/dev/null', 15000);
+ await optionalStep('secrets.apply', 'docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw secrets apply 2>/dev/null', 20000);
+ await optionalStep('secrets.reload', 'docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw secrets reload 2>/dev/null', 15000);
  const ok = steps.length > 0;
  if (ok) console.log(`[keys] Hot reload requested (${steps.join(', ')})`);
  else console.warn(`[keys] Hot reload failed: ${errors.join(' | ')}`);
@@ -11187,7 +11205,7 @@ const _syncWarnings = [];
  if (restartOk) {
   hotReloadResult = { ok: true, steps: ['container.restart'], errors: [] };
   try {
-   await run(`docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null; docker exec openclaw-openclaw-gateway-1 chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null`, { timeout: 15000 });
+   await run(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null; docker exec ${OPENCLAW_GATEWAY_CONTAINER} chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null`, { timeout: 15000 });
    console.log('[keys] Bridge device re-approved after restart');
   } catch (e) { console.warn('[keys] Device auto-approve failed (will retry on connect):', e.message); }
  upsertBridgePairedDevice({ force: true, reason: 'api-keys-update' });
@@ -11304,7 +11322,7 @@ app.get('/config/provider-settings', (req, res) => {
   // OpenAI Codex auth profile
   let openaiCodexAuthProfile = null;
   try {
-   const authDoc = JSON.parse(readFileSync('/opt/openclaw-data/config/agents/main/agent/auth-profiles.json', 'utf8'));
+   const authDoc = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
    const codexProfile = getPreferredAuthProfile(authDoc, 'openai-codex')?.profile;
    if (isUsableCodexOAuthProfile(codexProfile)) {
     openaiCodexAuthProfile = {
@@ -11359,7 +11377,7 @@ app.get('/config/provider-keys-internal', (req, res) => {
   // OpenAI Codex auth profile
   let openaiCodex = null;
   try {
-   const authDoc = JSON.parse(readFileSync('/opt/openclaw-data/config/agents/main/agent/auth-profiles.json', 'utf8'));
+   const authDoc = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
    const codexProfile = getPreferredAuthProfile(authDoc, 'openai-codex')?.profile;
    if (isUsableCodexOAuthProfile(codexProfile)) openaiCodex = codexProfile;
   } catch {}
@@ -11631,7 +11649,7 @@ app.post('/config/user-context', async (req, res) => {
  return res.status(400).json({ error: 'Provide at least name, timezone, or location' });
  }
 
- const WORKSPACE = '/opt/openclaw-data/workspace';
+ const WORKSPACE = WORKSPACE_HOST_ROOT;
  const userMd = `# USER.md - About Your Human
 
 - **Name:** ${name || '(not set)'}
@@ -11689,7 +11707,7 @@ app.get('/config/secrets/audit', async (req, res) => {
  const { promisify } = await import('util');
  const { exec } = await import('child_process');
  const run = promisify(exec);
- const { stdout } = await run('docker exec openclaw-openclaw-gateway-1 openclaw secrets audit --json 2>/dev/null', { timeout: 15000 });
+ const { stdout } = await run('docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw secrets audit --json 2>/dev/null', { timeout: 15000 });
  res.json(JSON.parse(stdout));
  } catch (e) {
  if (/not found|unknown command|No such/i.test(e.message || e.stderr || '')) {
@@ -11705,7 +11723,7 @@ app.post('/config/secrets/apply', async (req, res) => {
  const { promisify } = await import('util');
  const { exec } = await import('child_process');
  const run = promisify(exec);
- const { stdout } = await run('docker exec openclaw-openclaw-gateway-1 openclaw secrets apply 2>&1', { timeout: 20000 });
+ const { stdout } = await run('docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw secrets apply 2>&1', { timeout: 20000 });
  console.log('[secrets] Applied:', stdout.trim());
  res.json({ status: 'ok', output: stdout.trim() });
  } catch (e) { res.status(500).json({ error: e.message }); }
@@ -11716,7 +11734,7 @@ app.post('/config/secrets/reload', async (req, res) => {
  const { promisify } = await import('util');
  const { exec } = await import('child_process');
  const run = promisify(exec);
- const { stdout } = await run('docker exec openclaw-openclaw-gateway-1 openclaw secrets reload 2>&1', { timeout: 15000 });
+ const { stdout } = await run('docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw secrets reload 2>&1', { timeout: 15000 });
  console.log('[secrets] Reloaded:', stdout.trim());
  res.json({ status: 'ok', output: stdout.trim() });
  } catch (e) { res.status(500).json({ error: e.message }); }
@@ -11730,7 +11748,7 @@ async function runAcpCmd(args, timeoutMs = 15000) {
  const { exec } = await import('child_process');
  const run = promisify(exec);
  const { stdout, stderr } = await run(
- `docker exec openclaw-openclaw-gateway-1 openclaw acp ${args} 2>&1`,
+ `docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw acp ${args} 2>&1`,
  { timeout: timeoutMs }
  );
  return { stdout: stdout.trim(), stderr: stderr?.trim() || '' };
@@ -11835,7 +11853,7 @@ app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
  const { spawn } = await import('child_process');
  const escaped = message.replace(/"/g, '\\"');
  const child = spawn('docker', [
- 'exec', 'openclaw-openclaw-gateway-1',
+ 'exec', OPENCLAW_GATEWAY_CONTAINER,
  'openclaw', 'acp', 'steer', '--session', sessionId, escaped,
  ], { timeout: 120000 });
 
@@ -12299,9 +12317,9 @@ app.post('/deep-research', async (req, res) => {
 });
 
 // ── Integration permissions ───────────────────────────────────────────
-const INTEGRATION_PERMISSIONS_PATH = '/opt/openclaw-data/config/integration-permissions.json';
-const INTEGRATION_PERMISSIONS_MIRROR_PATH = '/opt/openclaw-data/workspace/.trooper/integration-permissions.json';
-const INTEGRATION_PERMISSIONS_GUIDE_PATH = '/opt/openclaw-data/workspace/INTEGRATIONS.md';
+const INTEGRATION_PERMISSIONS_PATH = process.env.INTEGRATION_PERMISSIONS_PATH || `${OPENCLAW_CONFIG_ROOT}/integration-permissions.json`;
+const INTEGRATION_PERMISSIONS_MIRROR_PATH = process.env.INTEGRATION_PERMISSIONS_MIRROR_PATH || `${WORKSPACE_HOST_ROOT}/.trooper/integration-permissions.json`;
+const INTEGRATION_PERMISSIONS_GUIDE_PATH = process.env.INTEGRATION_PERMISSIONS_GUIDE_PATH || `${WORKSPACE_HOST_ROOT}/INTEGRATIONS.md`;
 const INTEGRATION_ACCESS_LEVELS = ['none', 'read', 'comment', 'draft', 'write', 'admin'];
 const INTEGRATION_ACCESS_RANK = Object.freeze(
  Object.fromEntries(INTEGRATION_ACCESS_LEVELS.map((level, index) => [level, index])),
@@ -12369,7 +12387,7 @@ function writeIntegrationPermissionsArtifacts(policy) {
  const guide = renderIntegrationPermissionsMarkdown(normalized);
  writeFileSync(INTEGRATION_PERMISSIONS_GUIDE_PATH, guide, { mode: 0o644 });
  try {
-  const agentsDir = '/opt/openclaw-data/config/agents';
+  const agentsDir = AGENT_WORKSPACE_ROOT;
   for (const dirName of readdirSync(agentsDir)) {
    const workspacePath = `${agentsDir}/${dirName}/workspace`;
    if (existsSync(workspacePath)) writeFileSync(`${workspacePath}/INTEGRATIONS.md`, guide, { mode: 0o644 });
@@ -12946,7 +12964,7 @@ exec env DISPLAY=:99 TMPDIR="\$TMPDIR" TMP="\$TMP" TEMP="\$TEMP" OPENCLAW_TMPDIR
  // Patch gateway config: add trustedProxies if missing (needed for device auth from Docker)
  try {
  const fs = await import('fs');
- const configPath = '/opt/openclaw-data/config/openclaw.json';
+ const configPath = OPENCLAW_CONFIG_PATH;
  const existingConfigText = fs.readFileSync(configPath, 'utf8');
  const config = JSON.parse(existingConfigText);
  if (config.gateway && !config.gateway.trustedProxies) {
@@ -13004,7 +13022,7 @@ app.put('/config/openclaw', (req, res) => {
 		 const safeData = preserveSystemManagedSections({ file: 'openclaw.json', current, submitted: data });
 		 const changed = writeOpenClawConfig(normalizeOpenClawConfigForWrite(safeData, current));
 		 if (changed && restart) {
-		  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
+		  execSync('docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 30000 });
 		  gateway.forceReconnect(30000, 'config-openclaw-update');
 		 }
 	 res.json({ success: true, changed, reload: changed && restart ? 'restart' : 'deferred', hash: jsonFileHash(readOpenClawConfig()) });
@@ -13051,7 +13069,7 @@ app.put('/config/auth-profiles', (req, res) => {
   const existingText = readFileSync(AUTH_PROFILES_PATH + '.bak', 'utf8');
   writeTimestampedBackup(AUTH_PROFILES_PATH, existingText, 'pre-write');
  } catch {}
- execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
+ execSync('docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 30000 });
  gateway.forceReconnect(30000, 'auth-profiles-update');
  res.json({ success: true, hash: jsonFileHash(JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'))) });
  } catch (err) {

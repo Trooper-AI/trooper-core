@@ -60,6 +60,7 @@ fi
 if [ -z "$BRIDGE_PORT" ] || echo "$BRIDGE_PORT" | grep -q '{{.*}}'; then
   BRIDGE_PORT="3002"
 fi
+SHARED_NODE_MANAGER_PORT="${SHARED_NODE_MANAGER_PORT:-3100}"
 
 # Input validation — fail fast if critical vars are missing or still have template placeholders
 _validate_var() {
@@ -429,6 +430,9 @@ ${HTTPS_DOMAIN} {
  handle /healthz {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
+ handle /runtime/workspaces* {
+ reverse_proxy 127.0.0.1:${SHARED_NODE_MANAGER_PORT}
+ }
  handle /webhook/* {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
@@ -509,6 +513,9 @@ ${SSLIP_DOMAIN} {
  }
  handle /healthz {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /runtime/workspaces* {
+ reverse_proxy 127.0.0.1:${SHARED_NODE_MANAGER_PORT}
  }
  handle /webhook/* {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
@@ -2458,6 +2465,7 @@ set -e
 echo "Restarting Trooper services..."
 systemctl restart openclaw-docker 2>/dev/null || (cd /opt/openclaw && docker compose down && docker compose up -d)
 systemctl restart openclaw-bridge 2>/dev/null || true
+systemctl restart trooper-shared-node-manager 2>/dev/null || true
 systemctl restart trooper-org-runtime 2>/dev/null || true
 systemctl restart caddy 2>/dev/null || true
 echo "Restart complete. Checking health..."
@@ -2474,7 +2482,7 @@ cat > /usr/local/bin/trooper-status << 'CSTATUS'
 #!/bin/bash
 echo "=== Trooper Service Status ==="
 echo ""
-for svc in openclaw-docker openclaw-bridge trooper-org-runtime caddy openclaw-vnc openclaw-poller; do
+for svc in openclaw-docker openclaw-bridge trooper-shared-node-manager trooper-org-runtime caddy openclaw-vnc openclaw-poller; do
   STATUS=$(systemctl is-active "$svc" 2>/dev/null || echo "not-found")
   printf "  %-25s %s\n" "$svc" "$STATUS"
 done
@@ -2834,6 +2842,41 @@ Environment=BROWSERBASE_PROJECT_ID=${BROWSERBASE_PROJECT_ID}
 WantedBy=multi-user.target
 BSVC
 
+# Shared workspace manager for this user's private VPS. The first org uses the
+# primary bridge above; later orgs for the same owner are provisioned as slots
+# through this manager on the same VPS.
+cat > /etc/systemd/system/trooper-shared-node-manager.service << MSNVC
+[Unit]
+Description=Trooper Shared Workspace Manager
+After=network-online.target docker.service openclaw-bridge.service
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/openclaw-bridge
+ExecStart=/usr/bin/node /opt/openclaw-bridge/shared-node-manager.mjs
+Restart=always
+RestartSec=5
+Environment=SHARED_NODE_MANAGER_PORT=${SHARED_NODE_MANAGER_PORT}
+Environment=BRIDGE_AUTH_TOKEN=${BRIDGE_AUTH_TOKEN}
+Environment=RUNTIME_AUTH_SECRET=${RUNTIME_AUTH_SECRET}
+Environment=MISSION_CONTROL_URL=https://trooper-production.up.railway.app
+Environment=TROOPER_SHARED_NODE_PUBLIC_URL=https://${HTTPS_DOMAIN}
+Environment=TROOPER_SHARED_WORKSPACES_ROOT=/opt/trooper-workspaces
+Environment=TROOPER_SHARED_STATE_DIR=/opt/trooper-workspaces/state
+Environment=TROOPER_BRIDGE_DIR=/opt/openclaw-bridge
+Environment=OPENCLAW_DOCKER_IMAGE=openclaw:local
+Environment=NODE_ENV=production
+StandardOutput=append:/root/trooper-diagnostics/logs/trooper-shared-node-manager.service.log
+StandardError=append:/root/trooper-diagnostics/logs/trooper-shared-node-manager.service.log
+
+[Install]
+WantedBy=multi-user.target
+MSNVC
+
 # Trooper org runtime service
 cat > /etc/systemd/system/trooper-org-runtime.service << CRUNTIME
 [Unit]
@@ -3102,7 +3145,7 @@ if [ ! -f /opt/trooper-org-runtime/server/org-runtime/index.js ]; then
 fi
 
 run_cmd systemctl daemon-reload
-run_cmd systemctl enable openclaw-docker openclaw-bridge trooper-org-runtime trooper-server openclaw-poller openclaw-vnc trooper-desktop trooper-desktop-api trooper-playwright
+run_cmd systemctl enable openclaw-docker openclaw-bridge trooper-shared-node-manager trooper-org-runtime trooper-server openclaw-poller openclaw-vnc trooper-desktop trooper-desktop-api trooper-playwright
 if [ -f /etc/systemd/system/openclaw-updater.timer ]; then
  run_cmd systemctl enable openclaw-updater.timer
 fi
@@ -3115,6 +3158,7 @@ sleep 1
 
 # Start bridge immediately — binds in ~5s, minimizes log gap (provision.js polls port 3002)
 run_cmd systemctl restart openclaw-bridge
+run_cmd systemctl restart trooper-shared-node-manager
 sleep 2
 if systemctl is-active --quiet openclaw-bridge; then
  echo "Bridge Service: RUNNING"
@@ -3226,6 +3270,13 @@ if curl -s http://127.0.0.1:${BRIDGE_PORT}/health | grep -q ok; then
  echo "Bridge: HEALTHY"
 else
  echo "Bridge: NOT HEALTHY (may need a few more seconds)"
+fi
+
+if curl -s http://127.0.0.1:${SHARED_NODE_MANAGER_PORT}/health | grep -q trooper-shared-user-node-manager; then
+ echo "Shared workspace manager: HEALTHY"
+else
+ echo "Shared workspace manager: NOT HEALTHY (later workspaces may wait for service restart)"
+ journalctl -u trooper-shared-node-manager --no-pager -n 10 || true
 fi
 
 if systemctl is-active --quiet openclaw-poller; then

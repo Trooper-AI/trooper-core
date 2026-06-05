@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "start:shared-node-manager": "node shared-node-manager.mjs",
     "test": "node --test lib/*.test.mjs"
   },
   "dependencies": {
