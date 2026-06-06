@@ -2,6 +2,7 @@
 import express from 'express';
 import http from 'http';
 import net from 'net';
+import { pathToFileURL } from 'url';
 import {
   DEFAULT_SHARED_STATE_DIR,
   DEFAULT_SHARED_WORKSPACES_ROOT,
@@ -11,6 +12,11 @@ import {
   updateWorkspaceSlotStatus,
 } from './lib/shared-workspace-slots.mjs';
 import { startSlotRuntime, stopSlotRuntime } from './lib/shared-slot-runtime.mjs';
+import {
+  hasManagerAuthHeaders,
+  isBridgeCandidatePath,
+  resolveProxyTarget,
+} from './lib/shared-node-routing.mjs';
 import path from 'path';
 
 const app = express();
@@ -43,12 +49,7 @@ function proxyBaseFor(slotId) {
 }
 
 function hasManagerAuth(req) {
-  return hasManagerAuthHeaders(req.headers);
-}
-
-function hasManagerAuthHeaders(headers = {}) {
-  if (!AUTH_TOKEN) return true;
-  return String(headers.authorization || headers.Authorization || '') === `Bearer ${AUTH_TOKEN}`;
+  return hasManagerAuthHeaders(req.headers, AUTH_TOKEN);
 }
 
 function shouldRouteToBridge(suffix = '') {
@@ -58,50 +59,6 @@ function shouldRouteToBridge(suffix = '') {
 function getProxySuffix(rawUrl = '') {
   const value = String(rawUrl || '');
   return value.replace(/^\/runtime\/workspaces\/[^/]+\/proxy/, '') || '/';
-}
-
-function parsePathname(suffix = '') {
-  const pathname = (() => {
-    try {
-      return new URL(suffix || '/', 'http://slot.local').pathname || '/';
-    } catch {
-      return String(suffix || '/').split('?')[0] || '/';
-    }
-  })();
-  return pathname;
-}
-
-function isBridgeCandidatePath(suffix = '') {
-  const pathname = parsePathname(suffix);
-  if (pathname === '/health' || pathname === '/healthz' || pathname === '/readyz') return true;
-  if (pathname === '/stats' || pathname === '/system-stats' || pathname === '/ws') return true;
-  if (/^\/(admin|webhook|agents|recording|llm|debug|files|skills|gateway|config|cron|logs|version|upgrade)(\/|$)/.test(pathname)) return true;
-  if (pathname === '/api/memories' || pathname.startsWith('/api/memories/')) return true;
-  if (/^\/api\/organizations\/[^/]+\/memory(\/|$)/.test(pathname)) return true;
-  return false;
-}
-
-function isBridgeOnlyPath(suffix = '') {
-  const pathname = parsePathname(suffix);
-  if (pathname === '/health' || pathname === '/healthz' || pathname === '/readyz') return true;
-  if (pathname === '/stats' || pathname === '/system-stats' || pathname === '/ws') return true;
-  if (/^\/(admin|webhook|agents|recording|llm|debug|files|skills|config|cron|logs|version|upgrade)(\/|$)/.test(pathname)) return true;
-  if (pathname === '/api/memories' || pathname.startsWith('/api/memories/')) return true;
-  if (/^\/api\/organizations\/[^/]+\/memory(\/|$)/.test(pathname)) return true;
-  return false;
-}
-
-function resolveProxyTarget({ slot, suffix, headers = {} }) {
-  const bridgeCandidate = isBridgeCandidatePath(suffix);
-  const authed = hasManagerAuthHeaders(headers);
-  if (bridgeCandidate && !authed && isBridgeOnlyPath(suffix)) {
-    return { error: 'unauthorized' };
-  }
-  const routeToBridge = bridgeCandidate && authed;
-  return {
-    routeToBridge,
-    targetPort: routeToBridge ? slot.ports.bridge : slot.ports.gateway,
-  };
 }
 
 function buildSlotResponse(slot) {
@@ -266,7 +223,7 @@ app.all('/runtime/workspaces/:slotId/proxy/*', async (req, res) => {
   }
 
   const suffix = getProxySuffix(req.originalUrl);
-  const targetInfo = resolveProxyTarget({ slot, suffix, headers: req.headers });
+  const targetInfo = resolveProxyTarget({ slot, suffix, headers: req.headers, authToken: AUTH_TOKEN });
   if (targetInfo.error === 'unauthorized') {
     return res.status(401).json({ error: 'unauthorized', message: 'Bridge workspace routes require manager authorization' });
   }
@@ -311,7 +268,7 @@ server.on('upgrade', (req, socket, head) => {
     if (slot.status !== 'ready') return writeUpgradeError(socket, 503, `Workspace slot ${slot.slotId} is ${slot.status || 'cold'}`);
 
     const suffix = getProxySuffix(req.url);
-    const targetInfo = resolveProxyTarget({ slot, suffix, headers: req.headers });
+    const targetInfo = resolveProxyTarget({ slot, suffix, headers: req.headers, authToken: AUTH_TOKEN });
     if (targetInfo.error === 'unauthorized') return writeUpgradeError(socket, 401, 'unauthorized');
 
     const upstream = net.connect(targetInfo.targetPort, '127.0.0.1');
@@ -341,6 +298,8 @@ server.on('upgrade', (req, socket, head) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`[shared-node-manager] listening on ${PORT}; root=${WORKSPACES_ROOT}`);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  server.listen(PORT, () => {
+    console.log(`[shared-node-manager] listening on ${PORT}; root=${WORKSPACES_ROOT}`);
+  });
+}
