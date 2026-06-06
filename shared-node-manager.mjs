@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import express from 'express';
+import http from 'http';
+import net from 'net';
 import {
   DEFAULT_SHARED_STATE_DIR,
   DEFAULT_SHARED_WORKSPACES_ROOT,
@@ -12,6 +14,7 @@ import { startSlotRuntime, stopSlotRuntime } from './lib/shared-slot-runtime.mjs
 import path from 'path';
 
 const app = express();
+const server = http.createServer(app);
 const PORT = Number(process.env.SHARED_NODE_MANAGER_PORT || process.env.PORT || 3100);
 const AUTH_TOKEN = String(process.env.SHARED_NODE_MANAGER_AUTH_TOKEN || process.env.BRIDGE_AUTH_TOKEN || '').trim();
 const WORKSPACES_ROOT = process.env.TROOPER_SHARED_WORKSPACES_ROOT || DEFAULT_SHARED_WORKSPACES_ROOT;
@@ -40,11 +43,24 @@ function proxyBaseFor(slotId) {
 }
 
 function hasManagerAuth(req) {
+  return hasManagerAuthHeaders(req.headers);
+}
+
+function hasManagerAuthHeaders(headers = {}) {
   if (!AUTH_TOKEN) return true;
-  return String(req.headers.authorization || '') === `Bearer ${AUTH_TOKEN}`;
+  return String(headers.authorization || headers.Authorization || '') === `Bearer ${AUTH_TOKEN}`;
 }
 
 function shouldRouteToBridge(suffix = '') {
+  return isBridgeCandidatePath(suffix);
+}
+
+function getProxySuffix(rawUrl = '') {
+  const value = String(rawUrl || '');
+  return value.replace(/^\/runtime\/workspaces\/[^/]+\/proxy/, '') || '/';
+}
+
+function parsePathname(suffix = '') {
   const pathname = (() => {
     try {
       return new URL(suffix || '/', 'http://slot.local').pathname || '/';
@@ -52,12 +68,40 @@ function shouldRouteToBridge(suffix = '') {
       return String(suffix || '/').split('?')[0] || '/';
     }
   })();
+  return pathname;
+}
+
+function isBridgeCandidatePath(suffix = '') {
+  const pathname = parsePathname(suffix);
   if (pathname === '/health' || pathname === '/healthz' || pathname === '/readyz') return true;
   if (pathname === '/stats' || pathname === '/system-stats' || pathname === '/ws') return true;
-  if (/^\/(admin|webhook|agents|recording|llm|debug|files|skills|gateway|config|cron)(\/|$)/.test(pathname)) return true;
+  if (/^\/(admin|webhook|agents|recording|llm|debug|files|skills|gateway|config|cron|logs|version|upgrade)(\/|$)/.test(pathname)) return true;
   if (pathname === '/api/memories' || pathname.startsWith('/api/memories/')) return true;
   if (/^\/api\/organizations\/[^/]+\/memory(\/|$)/.test(pathname)) return true;
   return false;
+}
+
+function isBridgeOnlyPath(suffix = '') {
+  const pathname = parsePathname(suffix);
+  if (pathname === '/health' || pathname === '/healthz' || pathname === '/readyz') return true;
+  if (pathname === '/stats' || pathname === '/system-stats' || pathname === '/ws') return true;
+  if (/^\/(admin|webhook|agents|recording|llm|debug|files|skills|config|cron|logs|version|upgrade)(\/|$)/.test(pathname)) return true;
+  if (pathname === '/api/memories' || pathname.startsWith('/api/memories/')) return true;
+  if (/^\/api\/organizations\/[^/]+\/memory(\/|$)/.test(pathname)) return true;
+  return false;
+}
+
+function resolveProxyTarget({ slot, suffix, headers = {} }) {
+  const bridgeCandidate = isBridgeCandidatePath(suffix);
+  const authed = hasManagerAuthHeaders(headers);
+  if (bridgeCandidate && !authed && isBridgeOnlyPath(suffix)) {
+    return { error: 'unauthorized' };
+  }
+  const routeToBridge = bridgeCandidate && authed;
+  return {
+    routeToBridge,
+    targetPort: routeToBridge ? slot.ports.bridge : slot.ports.gateway,
+  };
 }
 
 function buildSlotResponse(slot) {
@@ -221,13 +265,12 @@ app.all('/runtime/workspaces/:slotId/proxy/*', async (req, res) => {
     });
   }
 
-  const suffix = req.originalUrl.replace(/^\/runtime\/workspaces\/[^/]+\/proxy/, '') || '/';
-  const routeToBridge = shouldRouteToBridge(suffix);
-  const authed = hasManagerAuth(req);
-  if (routeToBridge && !authed) {
+  const suffix = getProxySuffix(req.originalUrl);
+  const targetInfo = resolveProxyTarget({ slot, suffix, headers: req.headers });
+  if (targetInfo.error === 'unauthorized') {
     return res.status(401).json({ error: 'unauthorized', message: 'Bridge workspace routes require manager authorization' });
   }
-  const targetPort = routeToBridge ? slot.ports.bridge : slot.ports.gateway;
+  const { routeToBridge, targetPort } = targetInfo;
   const target = `http://127.0.0.1:${targetPort}${suffix}`;
   try {
     const headers = Object.fromEntries(Object.entries(req.headers).filter(([key]) => !['host', 'authorization'].includes(key.toLowerCase())));
@@ -249,6 +292,55 @@ app.all('/runtime/workspaces/:slotId/proxy/*', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+function writeUpgradeError(socket, statusCode, message) {
+  const statusText = statusCode === 401 ? 'Unauthorized' : statusCode === 404 ? 'Not Found' : statusCode === 503 ? 'Service Unavailable' : 'Bad Gateway';
+  const body = JSON.stringify({ error: message });
+  socket.write(`HTTP/1.1 ${statusCode} ${statusText}\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
+  socket.destroy();
+}
+
+server.on('upgrade', (req, socket, head) => {
+  try {
+    const url = new URL(req.url || '/', 'http://shared-node.local');
+    const match = url.pathname.match(/^\/runtime\/workspaces\/([^/]+)\/proxy(?:\/.*)?$/);
+    if (!match) return writeUpgradeError(socket, 404, 'not_found');
+    const registry = readSlotRegistry(REGISTRY_PATH);
+    const slotId = normalizeWorkspaceSlotId(match[1]);
+    const slot = registry.slots?.[slotId];
+    if (!slot) return writeUpgradeError(socket, 404, 'workspace_slot_not_found');
+    if (slot.status !== 'ready') return writeUpgradeError(socket, 503, `Workspace slot ${slot.slotId} is ${slot.status || 'cold'}`);
+
+    const suffix = getProxySuffix(req.url);
+    const targetInfo = resolveProxyTarget({ slot, suffix, headers: req.headers });
+    if (targetInfo.error === 'unauthorized') return writeUpgradeError(socket, 401, 'unauthorized');
+
+    const upstream = net.connect(targetInfo.targetPort, '127.0.0.1');
+    upstream.on('connect', () => {
+      const headers = {
+        ...req.headers,
+        host: `127.0.0.1:${targetInfo.targetPort}`,
+      };
+      if (targetInfo.routeToBridge && slot.bridgeAuthToken) headers.authorization = `Bearer ${slot.bridgeAuthToken}`;
+      const requestLine = `${req.method} ${suffix} HTTP/${req.httpVersion}\r\n`;
+      const headerLines = Object.entries(headers)
+        .filter(([key, value]) => value !== undefined && value !== null && String(key).toLowerCase() !== 'upgrade-insecure-requests')
+        .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(', ') : value}`)
+        .join('\r\n');
+      upstream.write(`${requestLine}${headerLines}\r\n\r\n`);
+      if (head?.length) upstream.write(head);
+      socket.pipe(upstream).pipe(socket);
+    });
+    upstream.on('error', (error) => {
+      console.error(`[shared-node-manager] websocket proxy failed for ${slotId}: ${error.message}`);
+      if (!socket.destroyed) writeUpgradeError(socket, 502, 'workspace_slot_websocket_proxy_failed');
+    });
+    socket.on('error', () => upstream.destroy());
+  } catch (error) {
+    console.error(`[shared-node-manager] websocket upgrade error: ${error.message}`);
+    if (!socket.destroyed) writeUpgradeError(socket, 502, 'workspace_slot_websocket_proxy_failed');
+  }
+});
+
+server.listen(PORT, () => {
   console.log(`[shared-node-manager] listening on ${PORT}; root=${WORKSPACES_ROOT}`);
 });
