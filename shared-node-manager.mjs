@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import express from 'express';
+import crypto from 'crypto';
 import http from 'http';
 import net from 'net';
 import { pathToFileURL } from 'url';
@@ -86,18 +87,29 @@ function buildSlotResponse(slot) {
   };
 }
 
+function prepareSlotRuntimeTokens(slot) {
+  const gatewayToken = String(slot.gatewayToken || '').trim() || `oc-${crypto.randomBytes(16).toString('hex')}`;
+  const bridgeAuthToken = String(slot.bridgeAuthToken || '').trim() || crypto.createHash('sha256').update(`${gatewayToken}:bridge`).digest('hex');
+  return { gatewayToken, bridgeAuthToken };
+}
+
 async function runWorkspaceSlotStart(slot) {
+  const tokens = prepareSlotRuntimeTokens(slot);
   const starting = updateWorkspaceSlotStatus({
     slotId: slot.slotId,
     status: 'starting',
     registryPath: REGISTRY_PATH,
     patch: {
       error: null,
+      gatewayToken: tokens.gatewayToken,
+      bridgeAuthToken: tokens.bridgeAuthToken,
       startRequestedAt: Date.now(),
     },
   });
   try {
     const runtime = await startSlotRuntime(starting, {
+      gatewayToken: tokens.gatewayToken,
+      bridgeAuthToken: tokens.bridgeAuthToken,
       bridgeDir: BRIDGE_DIR,
       runtimeAuthSecret: RUNTIME_AUTH_SECRET,
       missionControlUrl: MISSION_CONTROL_URL,
