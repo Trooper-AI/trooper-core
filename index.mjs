@@ -13094,7 +13094,19 @@ app.get('/config/auth-profiles', (req, res) => {
 
 app.put('/config/auth-profiles', (req, res) => {
  try {
- const data = req.body;
+ const rawData = req.body;
+ const restartGateway = req.query.restart !== 'false'
+  && req.query.restart !== '0'
+  && rawData?.restartGateway !== false
+  && rawData?.restart !== false;
+ const data = rawData && typeof rawData === 'object' && !Array.isArray(rawData)
+  ? { ...rawData }
+  : rawData;
+ if (data && typeof data === 'object') {
+  delete data.restartGateway;
+  delete data.restart;
+  delete data.restartContainers;
+ }
  if (!data || typeof data !== 'object') return res.status(400).json({ error: 'Invalid JSON body' });
  let existing = null;
  try { existing = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8')); } catch {}
@@ -13116,12 +13128,29 @@ app.put('/config/auth-profiles', (req, res) => {
  }
  writeMirroredAuthProfiles(stripTrooperFileMetadata(data), { backup: true });
  try {
-  const existingText = readFileSync(AUTH_PROFILES_PATH + '.bak', 'utf8');
-  writeTimestampedBackup(AUTH_PROFILES_PATH, existingText, 'pre-write');
+ const existingText = readFileSync(AUTH_PROFILES_PATH + '.bak', 'utf8');
+ writeTimestampedBackup(AUTH_PROFILES_PATH, existingText, 'pre-write');
  } catch {}
- execSync(`docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 30000 });
- gateway.forceReconnect(30000, 'auth-profiles-update');
- res.json({ success: true, hash: jsonFileHash(JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'))) });
+ let reload = 'deferred';
+ let restartError = null;
+ if (restartGateway) {
+  try {
+   execSync(`docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 30000 });
+   gateway.forceReconnect(30000, 'auth-profiles-update');
+   reload = 'restart';
+  } catch (restartErr) {
+   restartError = restartErr.stderr?.toString() || restartErr.stdout?.toString() || restartErr.message;
+   reload = 'manual_restart_required';
+   console.warn(`[config] auth-profiles saved, but gateway restart failed: ${restartError}`);
+  }
+ }
+ const response = {
+  success: true,
+  reload,
+  hash: jsonFileHash(JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'))),
+ };
+ if (restartError) response.warning = `Gateway restart failed after auth profile save: ${restartError}`;
+ res.json(response);
  } catch (err) {
  res.status(500).json({ error: err.message });
  }
