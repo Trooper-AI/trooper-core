@@ -573,6 +573,7 @@ initFirebaseAuth();
 const MISSION_CONTROL_URL = process.env.MISSION_CONTROL_URL || process.env.TROOPER_CALLBACK_URL || '';
 const RUNTIME_AUTH_SECRET = process.env.RUNTIME_AUTH_SECRET || '';
 const ORG_ID = process.env.ORG_ID || process.env.DEFAULT_ORG_ID || process.env.ORG_RUNTIME_ORG_ID || '';
+const ORG_RUNTIME_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || process.env.GATEWAY_TOKEN || '';
 const OPENCLAW_QUOTA_ENFORCEMENT = process.env.OPENCLAW_QUOTA_ENFORCEMENT !== '0';
 const OPENCLAW_COMPANY_PROVIDER_KEYS = process.env.OPENCLAW_COMPANY_PROVIDER_KEYS !== '0';
 const quotaAllowanceCache = new Map();
@@ -728,6 +729,7 @@ async function postRuntimeQuota(path, body = {}, { timeoutMs = 5000 } = {}) {
    headers: {
     'content-type': 'application/json',
     'x-runtime-secret': RUNTIME_AUTH_SECRET,
+    'x-org-runtime-token': ORG_RUNTIME_TOKEN,
    },
    body: JSON.stringify(body),
    signal: controller.signal,
@@ -3495,7 +3497,12 @@ async function forwardToMissionControl(taskId, agentName, result, requestId) {
  console.log(`Forwarding response to Trooper for task ${taskId}`);
  const res = await fetch(`${MISSION_CONTROL_URL}/api/agent-response`, {
  method: 'POST',
- headers: { 'Content-Type': 'application/json' },
+ headers: {
+  'Content-Type': 'application/json',
+  'x-runtime-secret': RUNTIME_AUTH_SECRET,
+  'x-org-id': ORG_ID,
+  'x-org-runtime-token': ORG_RUNTIME_TOKEN,
+ },
  body: JSON.stringify({ taskId, agentName: agentName || 'openclaw', response: result, requestId, timestamp: Date.now() }),
  });
  if (!res.ok) console.error(`Trooper callback failed: ${res.status}`);
