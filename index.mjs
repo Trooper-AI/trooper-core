@@ -3896,16 +3896,16 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
  for (const target of [AUTH_PROFILES_PATH, AUTH_PROFILES_ROOT_PATH]) {
   try {
    mkdirSync(dirname(target), { recursive: true });
-   if (backup) {
-    try {
-     const existing = readFileSync(target, 'utf8');
-     writeFileSync(target + '.bak', existing);
-    } catch {}
-   }
-   const result = writeJsonFileIfChanged(target, authDoc);
-   if (result.written) {
-    try { execSync(`chown 1000:1000 ${target} 2>/dev/null; chmod 664 ${target} 2>/dev/null`, { timeout: 3000 }); } catch {}
-   }
+	   if (backup) {
+	    try {
+	     const existing = readFileSync(target, 'utf8');
+	     writeFileSync(target + '.bak', existing, { mode: 0o600 });
+	     chmodSync(target + '.bak', 0o600);
+	     try { execSync(`chown 1000:1000 ${target}.bak 2>/dev/null`, { timeout: 3000 }); } catch {}
+	    } catch {}
+	   }
+	   writeJsonFileIfChanged(target, authDoc);
+	   try { execSync(`chown 1000:1000 ${target} 2>/dev/null; chmod 600 ${target} 2>/dev/null`, { timeout: 3000 }); } catch {}
   } catch (err) {
    console.warn(`[bridge] Failed to mirror auth profiles to ${target}: ${err.message}`);
   }
@@ -3917,10 +3917,8 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
 	   const sub = `${agentsDir}/${d.name}/agent/auth-profiles.json`;
 	   try {
 	    mkdirSync(dirname(sub), { recursive: true });
-	    const result = writeJsonFileIfChanged(sub, authDoc);
-	    if (result.written) {
-	     try { execSync(`chown 1000:1000 ${sub} 2>/dev/null; chmod 664 ${sub} 2>/dev/null`, { timeout: 3000 }); } catch {}
-	    }
+		    writeJsonFileIfChanged(sub, authDoc);
+		    try { execSync(`chown 1000:1000 ${sub} 2>/dev/null; chmod 600 ${sub} 2>/dev/null`, { timeout: 3000 }); } catch {}
 	   } catch (err) {
 	    console.warn(`[bridge] Failed to mirror auth profiles to ${sub}: ${err.message}`);
 	   }

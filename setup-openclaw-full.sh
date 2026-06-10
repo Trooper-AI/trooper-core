@@ -1395,13 +1395,12 @@ if command -v Xvnc &>/dev/null && ! pgrep -f "Xvnc :99" >/dev/null 2>&1; then
   echo "[startup] Xvnc started on :99"
 fi
 
-# Fix permissions: ensure node user can read config files
-# NOTE: Do NOT chmod 700 or chmod 600 — the bridge runs as a different UID on the host
-# and needs to traverse dirs (755) and read config files (664)
+# Fix permissions: gateway owns state as uid 1000. The host bridge runs as
+# root, so state can remain private without blocking bridge maintenance.
 chown -R 1000:1000 /home/node/.openclaw 2>/dev/null || true
 chown -R 1000:1000 /home/node/.npm 2>/dev/null || true
-find /home/node/.openclaw -type d -exec chmod 755 {} \; 2>/dev/null || true
-find /home/node/.openclaw -name '*.json' -exec chmod 664 {} \; 2>/dev/null || true
+find /home/node/.openclaw -type d -exec chmod 700 {} \; 2>/dev/null || true
+find /home/node/.openclaw -name '*.json' -exec chmod 600 {} \; 2>/dev/null || true
 
 # Fix jiti cache permissions — files in /tmp/jiti get created as root during startup
 # because the gateway bootstraps plugins before su fully takes effect.
@@ -1420,9 +1419,9 @@ mkdir -p "$JITI_CACHE_DIR" "$OPENCLAW_TMPDIR" "$OPENCLAW_NATIVE_HOOK_RELAY_DIR"
 chown -R 1000:1000 "$JITI_CACHE_DIR" /home/node/.cache/openclaw 2>/dev/null || true
 chmod 755 "$JITI_CACHE_DIR" "$OPENCLAW_TMPDIR" "$OPENCLAW_NATIVE_HOOK_RELAY_DIR" 2>/dev/null || true
 
-# Fix devices dir permissions so bridge (host process) can write paired.json
-chmod 777 /home/node/.openclaw/devices 2>/dev/null || true
-chmod 666 /home/node/.openclaw/devices/*.json 2>/dev/null || true
+# Device state contains operator credentials and must remain private.
+chmod 700 /home/node/.openclaw/devices 2>/dev/null || true
+chmod 600 /home/node/.openclaw/devices/*.json 2>/dev/null || true
 
 # Drop back to node user for the gateway process when running as root.
 if [ "$(id -u)" = "0" ]; then
@@ -1960,43 +1959,21 @@ sed -i 's|/usr/bin/google-chrome-stable|/opt/chrome-wrapper.sh|g' /opt/openclaw-
 
 
 
-# Fix permissions: container runs as uid 1000, bridge runs as host node user
-# Config dir MUST be traversable (755) so both UIDs can access files inside
+# Fix permissions: container runs as uid 1000 and host bridge runs as root.
 chown -R 1000:1000 /opt/openclaw-data
-chmod 755 /opt/openclaw-data/config
-find /opt/openclaw-data/config -type d -exec chmod 755 {} \;
-# Config files: readable by both container (uid 1000) and host node user
-chmod 664 /opt/openclaw-data/config/openclaw.json
-chmod 664 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json
-chmod 664 /opt/openclaw-data/config/auth-profiles.json
+chmod 700 /opt/openclaw-data/config
+find /opt/openclaw-data/config -type d -exec chmod 700 {} \;
+chmod 600 /opt/openclaw-data/config/openclaw.json
+chmod 600 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json
+chmod 600 /opt/openclaw-data/config/auth-profiles.json
 
-# Devices dir and cron dir must be writable by BOTH container (uid 1000) and host bridge process.
-# Use 777 so any UID can read/write device approval and cron state.
+# Device and cron state contain credentials and execution metadata.
 mkdir -p /opt/openclaw-data/config/devices /opt/openclaw-data/config/cron/runs
-chmod 777 /opt/openclaw-data/config/devices
-chmod 666 /opt/openclaw-data/config/devices/*.json 2>/dev/null || true
-chmod 777 /opt/openclaw-data/config/cron
-chmod 666 /opt/openclaw-data/config/cron/*.json 2>/dev/null || true
-chmod 777 /opt/openclaw-data/config/cron/runs
-
-# Bridge runs on HOST as node (uid may differ from container's 1000).
-# It needs write access to config files for API key sync, model updates, and device approval.
-HOST_NODE_UID=$(id -u node 2>/dev/null || echo 1000)
-if [ "$HOST_NODE_UID" != "1000" ]; then
-  echo "Host node UID ($HOST_NODE_UID) differs from container (1000), setting ACLs for bridge..."
-  # Make bridge-writable paths accessible to host node user
-  chown "$HOST_NODE_UID" /opt/openclaw/.env 2>/dev/null || true
-  chown "$HOST_NODE_UID" /opt/openclaw-data/config/openclaw.json 2>/dev/null || true
-  chown "$HOST_NODE_UID" /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
-  chown "$HOST_NODE_UID" /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
-  mkdir -p /opt/openclaw-data/config/devices
-  chown -R "$HOST_NODE_UID" /opt/openclaw-data/config/devices 2>/dev/null || true
-  # Container still needs read access — both UIDs can read via group or mode
-  chmod 666 /opt/openclaw/.env 2>/dev/null || true
-  chmod 660 /opt/openclaw-data/config/openclaw.json 2>/dev/null || true
-  chmod 660 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
-  chmod 660 /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
-fi
+chmod 700 /opt/openclaw-data/config/devices
+chmod 600 /opt/openclaw-data/config/devices/*.json 2>/dev/null || true
+chmod 700 /opt/openclaw-data/config/cron
+chmod 600 /opt/openclaw-data/config/cron/*.json 2>/dev/null || true
+chmod 700 /opt/openclaw-data/config/cron/runs
 
 cd /opt/openclaw
 
@@ -3190,17 +3167,8 @@ console.log('Pre-approved 2 devices: bridge + gateway internal');
 
 # Fix ownership — Docker runs as uid 1000, files were created by root
 chown -R 1000:1000 /opt/openclaw-data
-# ALL directories under config MUST be traversable (755) so both container (uid 1000)
-# and host bridge (uid varies) can access files. chown -R resets dir perms to 700.
-find /opt/openclaw-data/config -type d -exec chmod 755 {} \;
-# Config files need to be readable by both UIDs
-chmod 664 /opt/openclaw-data/config/openclaw.json /opt/openclaw-data/config/agents/main/agent/auth-profiles.json /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
-HOST_NODE_UID=$(id -u node 2>/dev/null || echo 1000)
-if [ "$HOST_NODE_UID" != "1000" ]; then
-  # Host node user needs write access for bridge API key sync, model updates
-  chown "$HOST_NODE_UID" /opt/openclaw/.env /opt/openclaw-data/config/openclaw.json /opt/openclaw-data/config/agents/main/agent/auth-profiles.json /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
-  mkdir -p /opt/openclaw-data/config/devices && chown -R "$HOST_NODE_UID" /opt/openclaw-data/config/devices 2>/dev/null || true
-fi
+find /opt/openclaw-data/config -type d -exec chmod 700 {} \;
+find /opt/openclaw-data/config -name '*.json' -exec chmod 600 {} \; 2>/dev/null || true
 
 # CRITICAL: chown bridge identity AFTER creation (was written by root above, node user must be able to read it)
 # Without this the bridge can't read its own identity and generates a NEW random one that doesn't match paired.json
@@ -3365,21 +3333,12 @@ else
   echo "Firewall: installed and enabled"
 fi
 
-# Fix file permissions. Keep them consistent with the runtime bootstrap and the
-# host bridge access model: config dirs must stay traversable, config JSON must
-# stay readable, and devices/cron state must remain writable for temp-file
-# replacement flows used by the gateway.
+# Fix file permissions. Gateway state can remain private because the gateway
+# owns it as uid 1000 and the host bridge runs as root.
 chmod 600 /opt/openclaw/.env 2>/dev/null || true
-find /opt/openclaw-data/config -type d -exec chmod 755 {} \; 2>/dev/null || true
-chmod 664 /opt/openclaw-data/config/openclaw.json 2>/dev/null || true
-chmod 664 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
-chmod 664 /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
-chmod 777 /opt/openclaw-data/config/devices 2>/dev/null || true
-chmod 666 /opt/openclaw-data/config/devices/*.json 2>/dev/null || true
-chmod 777 /opt/openclaw-data/config/cron 2>/dev/null || true
-chmod 666 /opt/openclaw-data/config/cron/*.json 2>/dev/null || true
-chmod 777 /opt/openclaw-data/config/cron/runs 2>/dev/null || true
-echo "File permissions: aligned for runtime + bridge access"
+find /opt/openclaw-data/config -type d -exec chmod 700 {} \; 2>/dev/null || true
+find /opt/openclaw-data/config -name '*.json' -exec chmod 600 {} \; 2>/dev/null || true
+echo "File permissions: private runtime state with root bridge access"
 
 # Configure unattended-upgrades for automatic security updates
 cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'UUCFG'
