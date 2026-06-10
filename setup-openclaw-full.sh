@@ -234,6 +234,13 @@ fi
 python3 -c "
 import http.server, json, os, re, sys
 class H(http.server.BaseHTTPRequestHandler):
+  def authorized(self):
+    expected = 'Bearer $BRIDGE_AUTH_TOKEN'
+    if expected == 'Bearer ' or self.headers.get('Authorization') == expected:
+      return True
+    self.send_response(401)
+    self.end_headers()
+    return False
   def send_cors(self):
     origin = self.headers.get('Origin', '')
     allowed = (
@@ -248,10 +255,12 @@ class H(http.server.BaseHTTPRequestHandler):
       self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
       self.wfile.write(b'{\"status\":\"installing\"}')
     elif self.path=='/deploy-logs':
+      if not self.authorized(): return
       self.send_response(200); self.send_header('Content-Type','application/json')
       self.send_cors(); self.end_headers()
       with open('$DEPLOY_LOG') as f: self.wfile.write(f.read().encode())
     elif self.path=='/deploy-logs-raw':
+      if not self.authorized(): return
       self.send_response(200); self.send_header('Content-Type','text/plain; charset=utf-8')
       self.send_cors(); self.end_headers()
       try:

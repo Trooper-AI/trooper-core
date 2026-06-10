@@ -1481,9 +1481,9 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '5mb' }));
 
-// Auth middleware — exempt only health/deploy-logs (needed during provisioning before auth is configured)
+// Auth middleware — exempt only bounded health/status endpoints needed before auth is configured.
 app.use((req, res, next) => {
- if (req.path === '/health' || req.path === '/healthz' || req.path === '/readyz' || req.path === '/system-stats' || req.path === '/deploy-logs' || req.path === '/deploy-logs-raw') return next();
+ if (req.path === '/health' || req.path === '/healthz' || req.path === '/readyz' || req.path === '/system-stats') return next();
  // /api/* routes have their own Firebase auth middleware (applied below)
  if (req.path.startsWith('/api/')) return next();
  // Desktop API is localhost-only (bound to 127.0.0.1), safe to skip here
