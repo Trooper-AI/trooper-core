@@ -7652,6 +7652,7 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
     throw error;
   }
   performManagedRuntimeUpgrade.inProgress = true;
+  let bridgeActivated = false;
   try {
   const { scope, target } = validateRuntimeUpgradeRequest(request);
   const log = [];
@@ -7697,22 +7698,14 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
     const beforeSha = runUpgradeCommand('git', ['-C', '/opt/openclaw-bridge', 'rev-parse', 'HEAD'], {
       timeout: 10000,
     });
-    step(`Fetching promoted bridge commit ${target.openclawBridgeCommit}`);
-    runUpgradeCommand('git', [
-      '-C',
-      '/opt/openclaw-bridge',
-      'fetch',
-      '--depth=1',
-      'origin',
-      target.openclawBridgeCommit,
-    ], { timeout: 60000 });
-    runUpgradeCommand('git', [
-      '-C',
-      '/opt/openclaw-bridge',
-      'reset',
-      '--hard',
-      target.openclawBridgeCommit,
-    ], { timeout: 30000 });
+    step(`Staging promoted bridge commit ${target.openclawBridgeCommit}`);
+    runUpgradeCommand('bash', ['/opt/openclaw-bridge/scripts/update-bridge.sh', 'activate'], {
+      env: {
+        ...process.env,
+        TROOPER_BRIDGE_COMMIT: target.openclawBridgeCommit,
+      },
+      timeout: 240000,
+    });
     const afterSha = runUpgradeCommand('git', ['-C', '/opt/openclaw-bridge', 'rev-parse', 'HEAD'], {
       timeout: 10000,
     });
@@ -7722,12 +7715,7 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
     step(beforeSha === afterSha
       ? `Bridge already at ${afterSha.slice(0, 7)}`
       : `Bridge updated ${beforeSha.slice(0, 7)} -> ${afterSha.slice(0, 7)}`);
-
-    step('Installing locked bridge dependencies...');
-    runUpgradeCommand('npm', ['ci', '--omit=dev'], {
-      cwd: '/opt/openclaw-bridge',
-      timeout: 180000,
-    });
+    bridgeActivated = beforeSha !== afterSha;
 
     step('Staging promoted Trooper runtime bundle...');
     runUpgradeCommand('bash', ['/opt/openclaw-bridge/scripts/update-org-runtime.sh'], {
@@ -7766,6 +7754,19 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
     log,
     restartRequired: ['all', 'bridge'].includes(scope),
   };
+  } catch (error) {
+    if (bridgeActivated) {
+      try {
+        runUpgradeCommand('bash', ['/opt/openclaw-bridge/scripts/update-bridge.sh', 'rollback'], {
+          timeout: 30000,
+        });
+        console.warn('[upgrade] Restored previous bridge checkout after upgrade failure');
+      } catch (rollbackError) {
+        console.error('[upgrade] Failed to restore previous bridge checkout:', rollbackError.message);
+        error.message = `${error.message}; bridge rollback also failed: ${rollbackError.message}`;
+      }
+    }
+    throw error;
   } finally {
     performManagedRuntimeUpgrade.inProgress = false;
   }
