@@ -262,7 +262,7 @@ app.all('/runtime/workspaces/:slotId/proxy/*', async (req, res) => {
   const suffix = getProxySuffix(req.originalUrl);
   const targetInfo = resolveProxyTarget({ slot, suffix, headers: req.headers, authToken: AUTH_TOKEN });
   if (targetInfo.error === 'unauthorized') {
-    return res.status(401).json({ error: 'unauthorized', message: 'Bridge workspace routes require manager authorization' });
+    return res.status(401).json({ error: 'unauthorized', message: 'Shared workspace bridge routes require manager authorization' });
   }
   const { routeToBridge, targetPort } = targetInfo;
 
