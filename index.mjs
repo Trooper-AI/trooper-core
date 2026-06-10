@@ -68,6 +68,13 @@ import {
   stripGatewayErrorPrefix,
 } from './lib/provider-runtime.mjs';
 import { startFleetHeartbeat } from './lib/fleet-heartbeat.mjs';
+import { validateRuntimeUpgradeRequest } from './lib/runtime-upgrade-target.mjs';
+import { startSlotRuntime } from './lib/shared-slot-runtime.mjs';
+import {
+  DEFAULT_SHARED_STATE_DIR,
+  readSlotRegistry,
+  updateWorkspaceSlotStatus,
+} from './lib/shared-workspace-slots.mjs';
 import { readBridgeVersion } from './lib/version-info.mjs';
 import { applyTelegramTokenToOpenClawConfig, buildTelegramEnvUpdates } from './lib/channel-config.mjs';
 import { hardenActiveMemoryConfigForBridge } from './lib/active-memory-config.mjs';
@@ -7527,93 +7534,206 @@ app.post('/admin/diagnostics/snapshot', (req, res) => {
  }
 });
 
-// POST /admin/upgrade — trigger OpenClaw gateway + bridge upgrade
+function runUpgradeCommand(command, args, options = {}) {
+  return execFileSync(command, args, {
+    encoding: 'utf8',
+    maxBuffer: 16 * 1024 * 1024,
+    ...options,
+  }).trim();
+}
+
+async function waitForGatewayUpgradeHealth({ timeoutMs = 90000 } = {}) {
+  const startedAt = Date.now();
+  let lastError = 'gateway health check did not complete';
+  let healthUrl = 'http://127.0.0.1:18789/health';
+  try {
+    healthUrl = new URL('/health', process.env.OPENCLAW_URL || healthUrl).toString();
+  } catch {}
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const response = await fetch(healthUrl, {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (response.ok) return;
+      lastError = `gateway health returned HTTP ${response.status}`;
+    } catch (error) {
+      lastError = error.message;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  throw new Error(`Gateway did not become healthy after upgrade: ${lastError}`);
+}
+
+function scheduleManagedRuntimeServiceRestart(scope) {
+  if (!['all', 'bridge'].includes(scope)) return;
+  setTimeout(() => {
+    try {
+      runUpgradeCommand('systemctl', [
+        'restart',
+        'trooper-org-runtime',
+        'trooper-server',
+        'openclaw-bridge',
+        'trooper-shared-node-manager',
+      ], { timeout: 30000 });
+    } catch (error) {
+      console.error('[upgrade] Managed service restart failed:', error.message);
+    }
+  }, 1000).unref?.();
+}
+
+async function restartReadySharedWorkspaceSlots({ scope, target, step }) {
+  const stateDir = process.env.TROOPER_SHARED_STATE_DIR || DEFAULT_SHARED_STATE_DIR;
+  const registryPath = process.env.TROOPER_SHARED_SLOT_REGISTRY || path.join(stateDir, 'slots.json');
+  const registry = readSlotRegistry(registryPath);
+  const slots = Object.values(registry.slots || {}).filter((slot) => slot.status === 'ready');
+  if (slots.length === 0) {
+    step('No active shared workspace slots require restart');
+    return [];
+  }
+
+  step(`Restarting ${slots.length} active shared workspace slot(s) on the promoted runtime...`);
+  return Promise.all(slots.map(async (slot) => {
+    try {
+      const runtime = await startSlotRuntime(slot, {
+        image: ['all', 'gateway'].includes(scope) ? target.gatewayImage : undefined,
+        forceGatewayRestart: ['all', 'gateway'].includes(scope),
+        forceBridgeRestart: ['all', 'bridge'].includes(scope),
+        bridgeDir: '/opt/openclaw-bridge',
+        runtimeAuthSecret: process.env.RUNTIME_AUTH_SECRET || '',
+        missionControlUrl: process.env.MISSION_CONTROL_URL || '',
+      });
+      updateWorkspaceSlotStatus({
+        slotId: slot.slotId,
+        status: 'ready',
+        registryPath,
+        patch: {
+          error: null,
+          verifiedAt: Date.now(),
+          verification: runtime.verification,
+          containerName: runtime.gateway.containerName,
+          bridgePid: runtime.bridge.pid || slot.bridgePid || null,
+        },
+      });
+      step(`Shared workspace ${slot.slotId} restarted and verified`);
+      return { slotId: slot.slotId, ok: true };
+    } catch (error) {
+      updateWorkspaceSlotStatus({
+        slotId: slot.slotId,
+        status: 'failed',
+        registryPath,
+        patch: { error: error.message, failedAt: Date.now() },
+      });
+      throw new Error(`Shared workspace ${slot.slotId} failed after upgrade: ${error.message}`);
+    }
+  }));
+}
+
+async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots = false } = {}) {
+  const { scope, target } = validateRuntimeUpgradeRequest(request);
+  const log = [];
+  const step = (msg) => {
+    log.push({ t: Date.now(), msg });
+    console.log(`[upgrade] ${msg}`);
+  };
+
+  step(`Starting immutable ${scope} upgrade...`);
+
+  if (['all', 'gateway'].includes(scope)) {
+    step(`Pulling promoted gateway image ${target.gatewayImage}`);
+    runUpgradeCommand('docker', ['pull', target.gatewayImage], { timeout: 180000 });
+    runUpgradeCommand('docker', ['tag', target.gatewayImage, 'openclaw:local'], { timeout: 15000 });
+    runUpgradeCommand('docker', ['compose', 'up', '-d', '--force-recreate'], {
+      cwd: '/opt/openclaw',
+      timeout: 90000,
+    });
+    await waitForGatewayUpgradeHealth();
+    step('Promoted gateway image is healthy');
+  }
+
+  if (['all', 'bridge'].includes(scope)) {
+    const beforeSha = runUpgradeCommand('git', ['-C', '/opt/openclaw-bridge', 'rev-parse', 'HEAD'], {
+      timeout: 10000,
+    });
+    step(`Fetching promoted bridge commit ${target.openclawBridgeCommit}`);
+    runUpgradeCommand('git', [
+      '-C',
+      '/opt/openclaw-bridge',
+      'fetch',
+      '--depth=1',
+      'origin',
+      target.openclawBridgeCommit,
+    ], { timeout: 60000 });
+    runUpgradeCommand('git', [
+      '-C',
+      '/opt/openclaw-bridge',
+      'reset',
+      '--hard',
+      target.openclawBridgeCommit,
+    ], { timeout: 30000 });
+    const afterSha = runUpgradeCommand('git', ['-C', '/opt/openclaw-bridge', 'rev-parse', 'HEAD'], {
+      timeout: 10000,
+    });
+    if (afterSha !== target.openclawBridgeCommit) {
+      throw new Error(`Bridge checkout mismatch: expected ${target.openclawBridgeCommit}, got ${afterSha}`);
+    }
+    step(beforeSha === afterSha
+      ? `Bridge already at ${afterSha.slice(0, 7)}`
+      : `Bridge updated ${beforeSha.slice(0, 7)} -> ${afterSha.slice(0, 7)}`);
+
+    step('Installing locked bridge dependencies...');
+    runUpgradeCommand('npm', ['ci', '--omit=dev'], {
+      cwd: '/opt/openclaw-bridge',
+      timeout: 180000,
+    });
+
+    step('Staging promoted Trooper runtime bundle...');
+    runUpgradeCommand('bash', ['/opt/openclaw-bridge/scripts/update-org-runtime.sh'], {
+      env: {
+        ...process.env,
+        TROOPER_RUNTIME_TARBALL_URL: target.runtimeTarballUrl,
+        TROOPER_RUNTIME_SKIP_RESTART: '1',
+      },
+      timeout: 240000,
+    });
+    step('Promoted bridge and Trooper runtime are staged');
+  }
+
+  let sharedSlots = [];
+  if (includeSharedSlots) {
+    sharedSlots = await restartReadySharedWorkspaceSlots({ scope, target, step });
+  }
+
+  if (['all', 'gateway'].includes(scope)) {
+    try {
+      await gateway.ensureConnected();
+      step('Bridge reconnected to the promoted gateway');
+    } catch (error) {
+      step(`Gateway WebSocket reconnect will continue during verification: ${error.message}`);
+    }
+  }
+
+  step('Immutable upgrade commands completed');
+  return { success: true, scope, target, sharedSlots, log, restartRequired: ['all', 'bridge'].includes(scope) };
+}
+
+// Shared-host upgrade entry point. It upgrades the host and every ready slot.
 app.post('/admin/upgrade', async (req, res) => {
- const steps = [];
- try {
-   // 1. Pull latest Docker image
-   captureLog('info', 'Upgrade triggered: pulling Docker image...');
-   steps.push({ step: 'docker_pull', status: 'running' });
-   try {
-     const pullOut = execSync('docker pull ghcr.io/absurdfounder/trooper-gateway:latest 2>&1', { timeout: 120000 }).toString();
-     steps[steps.length - 1] = { step: 'docker_pull', status: 'ok', output: pullOut.slice(-500) };
-   } catch (e) {
-     steps[steps.length - 1] = { step: 'docker_pull', status: 'failed', error: e.message };
-   }
-
-   // 2. Recreate gateway container
-   steps.push({ step: 'gateway_restart', status: 'running' });
-   try {
-     const restartOut = execSync('cd /opt/openclaw && docker compose up -d --force-recreate 2>&1', { timeout: 60000 }).toString();
-     steps[steps.length - 1] = { step: 'gateway_restart', status: 'ok', output: restartOut.slice(-500) };
-   } catch (e) {
-     steps[steps.length - 1] = { step: 'gateway_restart', status: 'failed', error: e.message };
-   }
-
-   // 3. Sync latest bridge code
-   steps.push({ step: 'bridge_pull', status: 'running' });
-   try {
-     let beforeSha = '';
-     let afterSha = '';
-     try { beforeSha = execSync('git -C /opt/openclaw-bridge rev-parse HEAD', { timeout: 10000 }).toString().trim(); } catch {}
-     const fetchOut = execSync('git -C /opt/openclaw-bridge fetch origin main 2>&1', { timeout: 30000 }).toString();
-     const resetOut = execSync('git -C /opt/openclaw-bridge reset --hard origin/main 2>&1', { timeout: 30000 }).toString();
-     try { afterSha = execSync('git -C /opt/openclaw-bridge rev-parse HEAD', { timeout: 10000 }).toString().trim(); } catch {}
-     const output = [
-       beforeSha && afterSha && beforeSha !== afterSha ? `changed ${beforeSha.slice(0, 7)} -> ${afterSha.slice(0, 7)}` : `already at ${(afterSha || beforeSha || 'unknown').slice(0, 7)}`,
-       fetchOut.trim(),
-       resetOut.trim(),
-     ].filter(Boolean).join('\n');
-     steps[steps.length - 1] = { step: 'bridge_pull', status: 'ok', output };
-   } catch (e) {
-     steps[steps.length - 1] = { step: 'bridge_pull', status: 'failed', error: e.message };
-   }
-
-   // 4. Install bridge dependencies
-   steps.push({ step: 'bridge_install', status: 'running' });
-   try {
-     const npmOut = execSync('cd /opt/openclaw-bridge && npm install --production 2>&1 | tail -5', { timeout: 60000 }).toString();
-     steps[steps.length - 1] = { step: 'bridge_install', status: 'ok', output: npmOut.trim() };
-   } catch (e) {
-     steps[steps.length - 1] = { step: 'bridge_install', status: 'failed', error: e.message };
-   }
-
-   // 5. Get new versions
-   let newOpenclawVersion = null;
-   try {
-     // Wait for gateway to start
-     await new Promise(r => setTimeout(r, 10000));
-     newOpenclawVersion = execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw --version 2>/dev/null`, { timeout: 10000 }).toString().trim();
-   } catch {}
-
-   const allOk = steps.every(s => s.status === 'ok');
-   captureLog(allOk ? 'info' : 'warn', `Upgrade ${allOk ? 'completed' : 'completed with errors'}`, { steps: steps.map(s => `${s.step}:${s.status}`) });
-
-   res.json({
-     success: allOk,
-     steps,
-     newVersion: newOpenclawVersion,
-     message: allOk
-       ? `Upgrade complete. OpenClaw: ${newOpenclawVersion || 'unknown'}. Bridge services will restart momentarily.`
-       : 'Upgrade completed with some errors. Check steps for details.',
-     restartRequired: true,
-   });
-
-   // 6. Restart bridge services (after response is sent)
-   setTimeout(() => {
-     captureLog('info', 'Bridge services restarting after upgrade...');
-     try {
-       execSync(
-         'pm2 restart openclaw-bridge 2>/dev/null || systemctl restart openclaw-bridge 2>/dev/null; systemctl restart trooper-shared-node-manager 2>/dev/null || true',
-         { timeout: 8000 },
-       );
-     } catch {}
-   }, 2000);
-
- } catch (err) {
-   captureLog('error', `Upgrade failed: ${err.message}`, { stack: err.stack });
-   res.status(500).json({ success: false, error: err.message, steps });
- }
+  if (!requireBridgeAuth(req, res)) return;
+  try {
+    const result = await performManagedRuntimeUpgrade({
+      request: req.body || {},
+      includeSharedSlots: true,
+    });
+    captureLog('info', 'Shared runtime upgrade commands completed', {
+      scope: result.scope,
+      slots: result.sharedSlots.map((slot) => slot.slotId),
+    });
+    res.json(result);
+    scheduleManagedRuntimeServiceRestart(result.scope);
+  } catch (error) {
+    captureLog('error', `Shared runtime upgrade failed: ${error.message}`, { stack: error.stack });
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
 });
 
 // GET /admin/db — DB health check
@@ -9994,7 +10114,11 @@ function isFloatingGatewayTarget(targetGatewayImage = null) {
 function buildLocalUpgradeSummary(current = {}, target = {}) {
  const targetBridge = target.openclawBridgeCommit || target.bridgeCommit || target.bridgeSha || null;
  const targetGateway = target.gatewayImage || target.gatewayImageDigest || target.gatewayImageId || null;
+ const targetRuntime = target.runtimeTarballUrl || null;
  const bridgeAtTarget = shaMatches(current.bridgeFullSha || current.bridgeSha, targetBridge);
+ const runtimeAtTarget = targetRuntime
+  ? String(current.runtimeTarballUrl || '').trim() === String(targetRuntime).trim()
+  : null;
  const gatewayTargetIsFloating = isFloatingGatewayTarget(targetGateway);
  let gatewayAtTarget = null;
  if (targetGateway) {
@@ -10007,11 +10131,12 @@ function buildLocalUpgradeSummary(current = {}, target = {}) {
    gatewayAtTarget = (current.gatewayImageTags || []).some((tag) => String(tag).trim() === targetText);
   }
  }
- const checked = Boolean(targetBridge || targetGateway);
- const available = bridgeAtTarget === false || gatewayAtTarget === false;
+ const checked = Boolean(targetBridge || targetGateway || targetRuntime);
+ const available = bridgeAtTarget === false || gatewayAtTarget === false || runtimeAtTarget === false;
  const unknown = checked && (
   Boolean(targetBridge && bridgeAtTarget === null) ||
-  Boolean(targetGateway && gatewayAtTarget === null && !gatewayTargetIsFloating)
+  Boolean(targetGateway && gatewayAtTarget === null && !gatewayTargetIsFloating) ||
+  Boolean(targetRuntime && !current.runtimeTarballUrl)
  );
  const components = {
   bridge: { current: current.bridgeFullSha || current.bridgeSha || null, target: targetBridge, atTarget: bridgeAtTarget },
@@ -10019,6 +10144,11 @@ function buildLocalUpgradeSummary(current = {}, target = {}) {
    current: current.gatewayImageDigest || current.gatewayImageTag || current.gatewayImageId || null,
    target: targetGateway,
    atTarget: gatewayAtTarget,
+  },
+  runtime: {
+   current: current.runtimeTarballUrl || null,
+   target: targetRuntime,
+   atTarget: runtimeAtTarget,
   },
  };
  return {
@@ -10043,6 +10173,7 @@ function targetFromRequest(req) {
   openclawBridgeCommit: req.query.targetBridgeCommit || req.query.openclawBridgeCommit || null,
   gatewayImage: req.query.targetGatewayImage || req.query.gatewayImage || null,
   gatewayImageId: req.query.targetGatewayImageId || req.query.gatewayImageId || null,
+  runtimeTarballUrl: req.query.targetRuntimeTarballUrl || req.query.runtimeTarballUrl || null,
  };
 }
 
@@ -10057,109 +10188,16 @@ app.get('/version', (req, res) => {
  } catch (err) { res.json({ error: err.message, ...readBridgeVersion() }); }
 });
 
-// ── Upgrade — pull latest Docker image + bridge code, restart services ──
+// ── Upgrade — apply the exact promoted runtime target ──────────────
 app.post('/upgrade', async (req, res) => {
- const { scope = 'all' } = req.body || {}; // 'all' | 'gateway' | 'bridge'
- const log = [];
- const step = (msg) => { log.push({ t: Date.now(), msg }); console.log(`[upgrade] ${msg}`); };
- let bridgeRestartNeeded = false;
-
+ if (!requireBridgeAuth(req, res)) return;
  try {
-   step('Starting upgrade...');
-
-   // 1. Pull latest gateway Docker image
-   if (scope === 'all' || scope === 'gateway') {
-     step('Pulling latest Docker image...');
-     try {
-       const pullOutput = execSync(
-         'docker pull ghcr.io/absurdfounder/trooper-gateway:latest 2>&1',
-         { timeout: 120000, cwd: '/opt/openclaw' }
-       ).toString();
-       const alreadyUpToDate = pullOutput.includes('Image is up to date');
-       step(alreadyUpToDate ? 'Docker image already up to date' : 'Docker image pulled');
-
-       // Re-tag and recreate container
-       step('Tagging image and recreating container...');
-       execSync('docker tag ghcr.io/absurdfounder/trooper-gateway:latest openclaw:local', { timeout: 10000 });
-       execSync('docker compose up -d --force-recreate 2>&1', { timeout: 60000, cwd: '/opt/openclaw' });
-       step('Gateway container recreated');
-
-       // Wait for gateway to be healthy
-       step('Waiting for gateway health...');
-       let healthy = false;
-       for (let i = 0; i < 30; i++) {
-         await new Promise(r => setTimeout(r, 2000));
-         try {
-           const hRes = await fetch('http://127.0.0.1:18789/health', { signal: AbortSignal.timeout(3000) });
-           if (hRes.ok) { healthy = true; break; }
-         } catch {}
-       }
-       if (healthy) {
-         step('Gateway is healthy');
-       } else {
-         step('⚠️ Gateway health check timed out (may still be starting)');
-       }
-     } catch (e) {
-       step(`❌ Gateway upgrade failed: ${e.message}`);
-     }
-   }
-
-   // 2. Update bridge code from GitHub
-   if (scope === 'all' || scope === 'bridge') {
-     step('Syncing latest bridge code...');
-     try {
-       let beforeSha = '';
-       let targetSha = '';
-       let afterSha = '';
-       try { beforeSha = execSync('git -C /opt/openclaw-bridge rev-parse HEAD', { timeout: 10000 }).toString().trim(); } catch {}
-       execSync('git -C /opt/openclaw-bridge fetch origin main 2>&1', { timeout: 30000 }).toString();
-       try { targetSha = execSync('git -C /opt/openclaw-bridge rev-parse origin/main', { timeout: 10000 }).toString().trim(); } catch {}
-       execSync('git -C /opt/openclaw-bridge reset --hard origin/main 2>&1', { timeout: 30000 }).toString();
-       try { afterSha = execSync('git -C /opt/openclaw-bridge rev-parse HEAD', { timeout: 10000 }).toString().trim(); } catch {}
-       const bridgeChanged = Boolean(beforeSha && afterSha && beforeSha !== afterSha);
-       const beforeShort = beforeSha ? beforeSha.slice(0, 7) : 'unknown';
-       const afterShort = afterSha || targetSha ? (afterSha || targetSha).slice(0, 7) : 'unknown';
-       step(bridgeChanged ? `Bridge code synced ${beforeShort} -> ${afterShort}` : `Bridge code already up to date (${afterShort})`);
-
-       if (bridgeChanged) {
-         // Install any new dependencies
-         step('Installing bridge dependencies...');
-         execSync('npm install --production 2>&1', { timeout: 60000, cwd: '/opt/openclaw-bridge' });
-         step('Dependencies installed');
-
-         bridgeRestartNeeded = true;
-         step('Bridge restart scheduled after response');
-       }
-     } catch (e) {
-       step(`❌ Bridge upgrade failed: ${e.message}`);
-     }
-   }
-
-   // 3. Reconnect to gateway (if it was restarted)
-   if (scope === 'all' || scope === 'gateway') {
-     step('Reconnecting to gateway...');
-     try {
-       await gateway.ensureConnected();
-       step('Gateway connection re-established');
-     } catch (e) {
-       step(`⚠️ Gateway reconnect pending: ${e.message}`);
-     }
-   }
-
-   step('Upgrade complete');
-   res.json({ success: true, log });
-	   if (bridgeRestartNeeded) {
-	     setTimeout(() => {
-	       try {
-	        execSync('systemctl restart openclaw-bridge; systemctl restart trooper-shared-node-manager 2>/dev/null || true', { timeout: 10000 });
-	      } catch (e) {
-	        console.error('[upgrade] Bridge restart failed:', e.message);
-	      }
-	     }, 1000).unref?.();
-	   }
+   const result = await performManagedRuntimeUpgrade({ request: req.body || {} });
+   res.json(result);
+   scheduleManagedRuntimeServiceRestart(result.scope);
  } catch (err) {
-   step(`❌ Upgrade failed: ${err.message}`);
-   res.status(500).json({ success: false, error: err.message, log });
+   captureLog('error', `Runtime upgrade failed: ${err.message}`, { stack: err.stack });
+   res.status(err.statusCode || 500).json({ success: false, error: err.message });
  }
 });
 

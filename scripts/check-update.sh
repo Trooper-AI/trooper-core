@@ -42,31 +42,29 @@ fi
 
 TARGET_BRIDGE=$(echo "$TARGET" | jq -r '.openclawBridgeCommit // empty')
 TARGET_GATEWAY=$(echo "$TARGET" | jq -r '.gatewayImage // empty')
+TARGET_RUNTIME=$(echo "$TARGET" | jq -r '.runtimeTarballUrl // empty')
 
-if [ -z "$TARGET_BRIDGE" ] && [ -z "$TARGET_GATEWAY" ]; then
+if [ -z "$TARGET_BRIDGE" ] && [ -z "$TARGET_GATEWAY" ] && [ -z "$TARGET_RUNTIME" ]; then
   echo "  no target SHAs in response; nothing to do"
   exit 0
 fi
 
 LOCAL_BRIDGE=$(git -C /opt/openclaw-bridge rev-parse HEAD 2>/dev/null || echo "")
-LOCAL_GATEWAY=$(docker inspect openclaw:local --format='{{.Id}}' 2>/dev/null || echo "")
+LOCAL_GATEWAY_DIGESTS=$(docker inspect openclaw:local --format='{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null || echo "")
+LOCAL_RUNTIME=$(jq -r '.runtimeTarballUrl // empty' /opt/trooper-org-runtime/.trooper-runtime-target.json 2>/dev/null || echo "")
 
 DRIFT=0
-if [ -n "$TARGET_BRIDGE" ] && [ -n "$LOCAL_BRIDGE" ]; then
-  case "$LOCAL_BRIDGE" in
-    "$TARGET_BRIDGE"*) ;;
-    *) DRIFT=1; echo "  bridge drift: local=${LOCAL_BRIDGE:0:7} target=${TARGET_BRIDGE:0:7}";;
-  esac
+if [ -n "$TARGET_BRIDGE" ] && [ "$LOCAL_BRIDGE" != "$TARGET_BRIDGE" ]; then
+  DRIFT=1
+  echo "  bridge drift: local=${LOCAL_BRIDGE:0:7} target=${TARGET_BRIDGE:0:7}"
 fi
-# Gateway image comparison is best-effort; the docker .Id is sha256:... and
-# target is a tag like 'ghcr.io/.../trooper-gateway:latest'. Just check whether
-# docker can pull a newer version; this is cheap (no-op when up-to-date).
-if [ -n "$TARGET_GATEWAY" ]; then
-  PULL_OUT=$(docker pull "$TARGET_GATEWAY" 2>&1 || true)
-  if ! echo "$PULL_OUT" | grep -q "Image is up to date"; then
-    echo "  gateway image newer than local; flagging drift"
-    DRIFT=1
-  fi
+if [ -n "$TARGET_GATEWAY" ] && ! grep -Fxq "$TARGET_GATEWAY" <<<"$LOCAL_GATEWAY_DIGESTS"; then
+  echo "  gateway drift: promoted digest is not installed"
+  DRIFT=1
+fi
+if [ -n "$TARGET_RUNTIME" ] && [ "$LOCAL_RUNTIME" != "$TARGET_RUNTIME" ]; then
+  echo "  runtime bundle drift: promoted asset is not installed"
+  DRIFT=1
 fi
 
 if [ "$DRIFT" -eq 0 ]; then
@@ -80,12 +78,28 @@ if [ -z "${BRIDGE_AUTH_TOKEN:-}" ]; then
 fi
 
 echo "  triggering local /upgrade"
+UPGRADE_BODY=$(jq -cn \
+  --arg bridge "$TARGET_BRIDGE" \
+  --arg gateway "$TARGET_GATEWAY" \
+  --arg runtime "$TARGET_RUNTIME" \
+  '{
+    scope: "all",
+    target: {
+      openclawBridgeCommit: $bridge,
+      gatewayImage: $gateway,
+      runtimeTarballUrl: $runtime
+    }
+  }')
 RES=$(curl -fsSL --max-time 300 -X POST \
   -H "Authorization: Bearer ${BRIDGE_AUTH_TOKEN}" \
   -H 'Content-Type: application/json' \
-  -d '{"scope":"all"}' \
+  -d "$UPGRADE_BODY" \
   http://127.0.0.1:3002/upgrade 2>&1 || true)
 echo "  /upgrade response: $RES" | head -c 500
 echo
+if ! jq -e '.success == true' >/dev/null 2>&1 <<<"$RES"; then
+  echo "  upgrade request failed"
+  exit 1
+fi
 
 echo "[$(date -Iseconds)] check-update.sh complete"
