@@ -10,8 +10,10 @@
 #   2. Compare to local /opt/openclaw-bridge HEAD and /opt/openclaw HEAD.
 #   3. If drift exists, report it. Local mutation is disabled by default
 #      because it bypasses the control plane's verified rollback snapshot.
-#      Operators can explicitly set TROOPER_UNATTENDED_UPGRADE_MODE=apply
-#      for break-glass environments that accept that risk.
+#      Self-hosted operators can explicitly set
+#      TROOPER_UNATTENDED_UPGRADE_MODE=apply for break-glass environments
+#      that accept that risk. Managed Trooper servers always remain report-only
+#      because their rollback snapshot is owned by the control plane.
 #   4. Log every run to /var/log/openclaw-updater.log with timestamps.
 
 set -euo pipefail
@@ -19,11 +21,18 @@ LOG=/var/log/openclaw-updater.log
 exec >> "$LOG" 2>&1
 echo "[$(date -Iseconds)] check-update.sh starting"
 
-# Source bridge env for MISSION_CONTROL_URL + BRIDGE_AUTH_TOKEN.
+# Source legacy bridge env first, then the updater-specific file written by
+# setup-openclaw-full.sh. The latter is authoritative for managed deployments.
 if [ -f /etc/openclaw-bridge.env ]; then
   set -a
   # shellcheck disable=SC1091
   source /etc/openclaw-bridge.env
+  set +a
+fi
+if [ -f /etc/default/openclaw-updater ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source /etc/default/openclaw-updater
   set +a
 fi
 
@@ -75,6 +84,12 @@ if [ "$DRIFT" -eq 0 ]; then
 fi
 
 UNATTENDED_MODE="${TROOPER_UNATTENDED_UPGRADE_MODE:-report}"
+if [ "${TROOPER_MANAGED_DEPLOYMENT:-0}" = "1" ] && [ "$UNATTENDED_MODE" = "apply" ]; then
+  echo "  managed deployment detected; refusing local unattended mutation"
+  echo "  await a verified control-plane rollout with a provider rollback snapshot"
+  exit 1
+fi
+
 if [ "$UNATTENDED_MODE" != "apply" ]; then
   echo "  drift detected; awaiting a verified control-plane rollout"
   echo "  local unattended mutation is disabled (mode=${UNATTENDED_MODE})"

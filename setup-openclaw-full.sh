@@ -3083,6 +3083,14 @@ PSVC
 # Pull-based update backstop. Installed from the checked-out bridge repo so
 # snapshot bakes keep the exact script/unit versions for the baked commit.
 if [ -f /opt/openclaw-bridge/scripts/check-update.sh ]; then
+ install -d -m 0755 /etc/default
+ cat > /etc/default/openclaw-updater << UPDATERENV
+MISSION_CONTROL_URL=${PLATFORM_API_URL}
+BRIDGE_AUTH_TOKEN=${BRIDGE_AUTH_TOKEN}
+TROOPER_MANAGED_DEPLOYMENT=${TROOPER_MANAGED_DEPLOYMENT}
+TROOPER_UNATTENDED_UPGRADE_MODE=report
+UPDATERENV
+ chmod 0600 /etc/default/openclaw-updater
  install -m 0755 /opt/openclaw-bridge/scripts/check-update.sh /usr/local/bin/check-update.sh
  install -m 0644 /opt/openclaw-bridge/scripts/openclaw-updater.service /etc/systemd/system/openclaw-updater.service
  install -m 0644 /opt/openclaw-bridge/scripts/openclaw-updater.timer /etc/systemd/system/openclaw-updater.timer

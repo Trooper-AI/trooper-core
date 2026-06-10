@@ -12,6 +12,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+EnvironmentFile=-/etc/default/openclaw-updater
 ExecStart=/usr/local/bin/check-update.sh
 User=root
 Nice=10
