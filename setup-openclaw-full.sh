@@ -2833,7 +2833,20 @@ else
       curl -fsSL "$TROOPER_RUNTIME_TARBALL_URL" -o /tmp/trooper-org-runtime.tar.gz || { echo "ERROR: failed to download runtime bundle from ${TROOPER_RUNTIME_TARBALL_URL}" >&2; exit 1; }
     fi
     tar -xzf /tmp/trooper-org-runtime.tar.gz -C /opt/trooper-org-runtime --strip-components=1 || { echo "ERROR: failed to extract runtime bundle" >&2; exit 1; }
-    printf '{"runtimeTarballUrl":"%s"}\n' "$TROOPER_RUNTIME_TARBALL_URL" > /opt/trooper-org-runtime/.trooper-runtime-target.json
+    test -f /opt/trooper-org-runtime/server/org-runtime/runtime-manifest.json || { echo "ERROR: runtime bundle is missing its compatibility manifest" >&2; exit 1; }
+    node - /opt/trooper-org-runtime/server/org-runtime/runtime-manifest.json /opt/trooper-org-runtime/.trooper-runtime-target.json "$TROOPER_RUNTIME_TARBALL_URL" <<'NODE'
+const fs = require('fs');
+const [manifestPath, targetPath, runtimeTarballUrl] = process.argv.slice(2);
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+const runtimeSchemaVersion = Number(manifest.runtimeSchemaVersion);
+if (!Number.isInteger(runtimeSchemaVersion) || runtimeSchemaVersion < 1) {
+  throw new Error('runtime manifest schema version is invalid');
+}
+fs.writeFileSync(targetPath, `${JSON.stringify({
+  runtimeTarballUrl,
+  runtimeSchemaVersion,
+})}\n`, { mode: 0o600 });
+NODE
     dlog "Trooper org runtime installed from bundle"
   elif [ "$TROOPER_MANAGED_DEPLOYMENT" = "1" ]; then
     echo "ERROR: managed deployment is missing its immutable Trooper runtime bundle" >&2

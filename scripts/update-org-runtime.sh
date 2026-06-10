@@ -52,13 +52,65 @@ test -f "$NEXT_DIR/server/org-runtime/index.js" || {
   echo "ERROR: staged runtime is missing server/org-runtime/index.js" >&2
   exit 1
 }
+test -f "$NEXT_DIR/server/org-runtime/runtime-manifest.json" || {
+  echo "ERROR: staged runtime is missing its compatibility manifest" >&2
+  exit 1
+}
+
+node - \
+  "$NEXT_DIR/server/org-runtime/runtime-manifest.json" \
+  "$INSTALL_DIR/.trooper-runtime-target.json" \
+  "$NEXT_DIR/.trooper-runtime-target.json" \
+  "$RELEASE_URL" <<'NODE'
+const fs = require('fs');
+const [manifestPath, currentTargetPath, nextTargetPath, releaseUrl] = process.argv.slice(2);
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+const positiveInteger = (value, name) => {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
+};
+const runtimeSchemaVersion = positiveInteger(
+  manifest.runtimeSchemaVersion,
+  'runtimeSchemaVersion',
+);
+const minimumSourceRuntimeSchemaVersion = positiveInteger(
+  manifest.minimumSourceRuntimeSchemaVersion,
+  'minimumSourceRuntimeSchemaVersion',
+);
+const maximumSourceRuntimeSchemaVersion = positiveInteger(
+  manifest.maximumSourceRuntimeSchemaVersion,
+  'maximumSourceRuntimeSchemaVersion',
+);
+if (minimumSourceRuntimeSchemaVersion > maximumSourceRuntimeSchemaVersion) {
+  throw new Error('runtime source schema compatibility range is invalid');
+}
+let currentRuntimeSchemaVersion = 1;
+try {
+  const current = JSON.parse(fs.readFileSync(currentTargetPath, 'utf8'));
+  const parsed = Number(current.runtimeSchemaVersion);
+  if (Number.isInteger(parsed) && parsed > 0) currentRuntimeSchemaVersion = parsed;
+} catch {}
+if (
+  currentRuntimeSchemaVersion < minimumSourceRuntimeSchemaVersion
+  || currentRuntimeSchemaVersion > maximumSourceRuntimeSchemaVersion
+) {
+  throw new Error(
+    `runtime schema ${runtimeSchemaVersion} cannot safely upgrade installed schema `
+    + `${currentRuntimeSchemaVersion}; supported source schemas are `
+    + `${minimumSourceRuntimeSchemaVersion}-${maximumSourceRuntimeSchemaVersion}`,
+  );
+}
+fs.writeFileSync(nextTargetPath, `${JSON.stringify({
+  runtimeTarballUrl: releaseUrl,
+  runtimeSchemaVersion,
+})}\n`, { mode: 0o600 });
+NODE
 
 echo "[update-org-runtime] Installing locked production dependencies..."
 (cd "$NEXT_DIR/server" && npm ci --omit=dev)
-
-cat > "$NEXT_DIR/.trooper-runtime-target.json" <<EOF
-{"runtimeTarballUrl":"${RELEASE_URL}"}
-EOF
 
 echo "[update-org-runtime] Activating staged runtime..."
 rm -rf "$PREVIOUS_DIR"

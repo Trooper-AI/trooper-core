@@ -54,6 +54,9 @@ fi
 TARGET_BRIDGE=$(echo "$TARGET" | jq -r '.openclawBridgeCommit // empty')
 TARGET_GATEWAY=$(echo "$TARGET" | jq -r '.gatewayImage // empty')
 TARGET_RUNTIME=$(echo "$TARGET" | jq -r '.runtimeTarballUrl // empty')
+TARGET_RUNTIME_SCHEMA=$(echo "$TARGET" | jq -r '.runtimeSchemaVersion // 1')
+TARGET_RUNTIME_MIN_SOURCE=$(echo "$TARGET" | jq -r '.minimumSourceRuntimeSchemaVersion // 1')
+TARGET_RUNTIME_MAX_SOURCE=$(echo "$TARGET" | jq -r '.maximumSourceRuntimeSchemaVersion // (.runtimeSchemaVersion // 1)')
 
 if [ -z "$TARGET_BRIDGE" ] && [ -z "$TARGET_GATEWAY" ] && [ -z "$TARGET_RUNTIME" ]; then
   echo "  no target SHAs in response; nothing to do"
@@ -106,12 +109,18 @@ UPGRADE_BODY=$(jq -cn \
   --arg bridge "$TARGET_BRIDGE" \
   --arg gateway "$TARGET_GATEWAY" \
   --arg runtime "$TARGET_RUNTIME" \
+  --argjson runtimeSchema "$TARGET_RUNTIME_SCHEMA" \
+  --argjson runtimeMinSource "$TARGET_RUNTIME_MIN_SOURCE" \
+  --argjson runtimeMaxSource "$TARGET_RUNTIME_MAX_SOURCE" \
   '{
     scope: "all",
     target: {
       openclawBridgeCommit: $bridge,
       gatewayImage: $gateway,
-      runtimeTarballUrl: $runtime
+      runtimeTarballUrl: $runtime,
+      runtimeSchemaVersion: $runtimeSchema,
+      minimumSourceRuntimeSchemaVersion: $runtimeMinSource,
+      maximumSourceRuntimeSchemaVersion: $runtimeMaxSource
     }
   }')
 RES=$(curl -fsSL --max-time 300 -X POST \

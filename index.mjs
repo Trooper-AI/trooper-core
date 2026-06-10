@@ -68,7 +68,10 @@ import {
   stripGatewayErrorPrefix,
 } from './lib/provider-runtime.mjs';
 import { startFleetHeartbeat } from './lib/fleet-heartbeat.mjs';
-import { validateRuntimeUpgradeRequest } from './lib/runtime-upgrade-target.mjs';
+import {
+  assertRuntimeUpgradeCompatibility,
+  validateRuntimeUpgradeRequest,
+} from './lib/runtime-upgrade-target.mjs';
 import { isAllowedCorsOrigin } from './lib/cors-policy.mjs';
 import {
   LOCAL_BACKUP_DIR,
@@ -7650,6 +7653,19 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
 
   step(`Starting immutable ${scope} upgrade...`);
 
+  if (['all', 'bridge'].includes(scope)) {
+    const current = readBridgeVersion({ force: true });
+    const compatibility = assertRuntimeUpgradeCompatibility({
+      currentRuntimeSchemaVersion: current.runtimeSchemaVersion || 1,
+      target,
+    });
+    step(
+      `Runtime schema compatibility verified: installed `
+      + `${compatibility.currentRuntimeSchemaVersion}, target `
+      + `${compatibility.runtimeSchemaVersion}`,
+    );
+  }
+
   if (['all', 'gateway'].includes(scope)) {
     step(`Pulling promoted gateway image ${target.gatewayImage}`);
     runUpgradeCommand('docker', ['pull', target.gatewayImage], { timeout: 180000 });
@@ -10127,9 +10143,11 @@ function buildLocalUpgradeSummary(current = {}, target = {}) {
  const targetBridge = target.openclawBridgeCommit || target.bridgeCommit || target.bridgeSha || null;
  const targetGateway = target.gatewayImage || target.gatewayImageDigest || target.gatewayImageId || null;
  const targetRuntime = target.runtimeTarballUrl || null;
+ const targetRuntimeSchema = Number(target.runtimeSchemaVersion || 1);
  const bridgeAtTarget = shaMatches(current.bridgeFullSha || current.bridgeSha, targetBridge);
  const runtimeAtTarget = targetRuntime
   ? String(current.runtimeTarballUrl || '').trim() === String(targetRuntime).trim()
+    && Number(current.runtimeSchemaVersion || 1) === targetRuntimeSchema
   : null;
  const gatewayTargetIsFloating = isFloatingGatewayTarget(targetGateway);
  let gatewayAtTarget = null;
@@ -10160,6 +10178,8 @@ function buildLocalUpgradeSummary(current = {}, target = {}) {
   runtime: {
    current: current.runtimeTarballUrl || null,
    target: targetRuntime,
+   currentSchemaVersion: Number(current.runtimeSchemaVersion || 1),
+   targetSchemaVersion: targetRuntimeSchema,
    atTarget: runtimeAtTarget,
   },
  };
@@ -10186,6 +10206,17 @@ function targetFromRequest(req) {
   gatewayImage: req.query.targetGatewayImage || req.query.gatewayImage || null,
   gatewayImageId: req.query.targetGatewayImageId || req.query.gatewayImageId || null,
   runtimeTarballUrl: req.query.targetRuntimeTarballUrl || req.query.runtimeTarballUrl || null,
+  runtimeSchemaVersion: req.query.targetRuntimeSchemaVersion || req.query.runtimeSchemaVersion || 1,
+  minimumSourceRuntimeSchemaVersion:
+   req.query.targetMinimumSourceRuntimeSchemaVersion
+   || req.query.minimumSourceRuntimeSchemaVersion
+   || 1,
+  maximumSourceRuntimeSchemaVersion:
+   req.query.targetMaximumSourceRuntimeSchemaVersion
+   || req.query.maximumSourceRuntimeSchemaVersion
+   || req.query.targetRuntimeSchemaVersion
+   || req.query.runtimeSchemaVersion
+   || 1,
  };
 }
 
