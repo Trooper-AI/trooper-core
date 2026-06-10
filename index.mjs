@@ -70,6 +70,12 @@ import {
 import { startFleetHeartbeat } from './lib/fleet-heartbeat.mjs';
 import { validateRuntimeUpgradeRequest } from './lib/runtime-upgrade-target.mjs';
 import { isAllowedCorsOrigin } from './lib/cors-policy.mjs';
+import {
+  LOCAL_BACKUP_DIR,
+  isManagedBackupName,
+  resolveManagedBackupPath,
+  validateTarEntryNames,
+} from './lib/local-backup.mjs';
 import { startSlotRuntime } from './lib/shared-slot-runtime.mjs';
 import {
   DEFAULT_SHARED_STATE_DIR,
@@ -6679,12 +6685,12 @@ app.post('/admin/restart-services', async (req, res) => {
 app.post('/admin/backup', async (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
  try {
-   const backupDir = '/opt/openclaw-backup';
+   const backupDir = LOCAL_BACKUP_DIR;
    const timestamp = Date.now();
-   const backupFile = `${backupDir}/backup-${timestamp}.tar.gz`;
+   const backupFile = resolveManagedBackupPath(`backup-${timestamp}.tar.gz`, backupDir);
 
    // Ensure backup directory exists
-   execSync(`mkdir -p ${backupDir}`, { timeout: 5000 });
+   mkdirSync(backupDir, { recursive: true, mode: 0o700 });
 
    // Build list of paths to back up (only include existing ones)
    const paths = [
@@ -6705,7 +6711,10 @@ app.post('/admin/backup', async (req, res) => {
      return res.status(400).json({ error: 'No data paths found to back up' });
    }
 
-   execSync(`tar -czf ${backupFile} ${paths.join(' ')} 2>/dev/null`, { timeout: 120000 });
+   execFileSync('tar', ['-czf', backupFile, ...paths], {
+     timeout: 120000,
+     stdio: ['ignore', 'ignore', 'ignore'],
+   });
 
    const stats = statSync(backupFile);
    console.log(`[admin] Backup created: ${backupFile} (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
@@ -6717,7 +6726,7 @@ app.post('/admin/backup', async (req, res) => {
        .sort()
        .reverse();
      for (const f of files.slice(5)) {
-       execSync(`rm -f ${backupDir}/${f}`, { timeout: 5000 });
+       rmSync(resolveManagedBackupPath(f, backupDir), { force: true });
      }
    } catch {}
 
@@ -6737,7 +6746,7 @@ app.post('/admin/backup', async (req, res) => {
 app.post('/admin/restore', async (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
  try {
-   const backupDir = '/opt/openclaw-backup';
+   const backupDir = LOCAL_BACKUP_DIR;
    let backupFile = req.body?.path;
 
    // If no specific path, use latest backup
@@ -6749,17 +6758,33 @@ app.post('/admin/restore', async (req, res) => {
      if (files.length === 0) {
        return res.status(404).json({ error: 'No backups found' });
      }
-     backupFile = `${backupDir}/${files[0]}`;
+     backupFile = files[0];
+   }
+
+   try {
+     backupFile = resolveManagedBackupPath(backupFile, backupDir);
+   } catch (error) {
+     return res.status(400).json({ error: error.message });
    }
 
    if (!existsSync(backupFile)) {
-     return res.status(404).json({ error: `Backup file not found: ${backupFile}` });
+     return res.status(404).json({ error: 'Backup file not found' });
    }
 
    console.log(`[admin] Restoring from: ${backupFile}`);
 
-   // Extract backup (overwrites existing files)
-   execSync(`tar -xzf ${backupFile} -C / 2>/dev/null`, { timeout: 120000 });
+   const listing = execFileSync('tar', ['-tzf', backupFile], {
+     encoding: 'utf8',
+     timeout: 120000,
+     stdio: ['ignore', 'pipe', 'ignore'],
+   });
+   validateTarEntryNames(listing);
+
+   // Extract backup only after validating all archive paths.
+   execFileSync('tar', ['-xzf', backupFile, '-C', '/'], {
+     timeout: 120000,
+     stdio: ['ignore', 'ignore', 'ignore'],
+   });
 
    console.log(`[admin] Restore complete from: ${backupFile}`);
    res.json({ ok: true, restored: backupFile });
@@ -6772,15 +6797,16 @@ app.post('/admin/restore', async (req, res) => {
 app.get('/admin/backups', (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
  try {
-   const backupDir = '/opt/openclaw-backup';
+   const backupDir = LOCAL_BACKUP_DIR;
    if (!existsSync(backupDir)) return res.json({ backups: [] });
    const files = readdirSync(backupDir)
-     .filter(f => f.startsWith('backup-') && f.endsWith('.tar.gz'))
+     .filter(isManagedBackupName)
      .map(f => {
-       const stats = statSync(`${backupDir}/${f}`);
+       const backupPath = resolveManagedBackupPath(f, backupDir);
+       const stats = statSync(backupPath);
        return {
          name: f,
-         path: `${backupDir}/${f}`,
+         path: backupPath,
          size: stats.size,
          sizeMB: (stats.size / 1024 / 1024).toFixed(2),
          createdAt: stats.mtime.toISOString(),
