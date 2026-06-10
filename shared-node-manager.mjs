@@ -36,7 +36,12 @@ const startTasks = new Map();
 app.use(express.json({ limit: '5mb' }));
 
 function requireManagerAuth(req, res, next) {
-  if (!AUTH_TOKEN) return next();
+  if (!AUTH_TOKEN) {
+    return res.status(503).json({
+      error: 'shared_node_manager_auth_not_configured',
+      message: 'Shared node manager authorization is not configured',
+    });
+  }
   const header = String(req.headers.authorization || '');
   if (header !== `Bearer ${AUTH_TOKEN}`) {
     return res.status(401).json({ error: 'unauthorized', message: 'Missing or invalid shared node manager token' });

@@ -106,6 +106,14 @@ _validate_var TROOPER_RUNTIME_TARBALL_URL "$TROOPER_RUNTIME_TARBALL_URL" optiona
 _validate_var OPENCLAWBRIDGE_GIT_SHA "$OPENCLAWBRIDGE_GIT_SHA" optional
 
 if [ "$TROOPER_MANAGED_DEPLOYMENT" = "1" ]; then
+  if [ -z "$BRIDGE_AUTH_TOKEN" ]; then
+    echo "FATAL: managed deployments require BRIDGE_AUTH_TOKEN"
+    exit 1
+  fi
+  if [ -z "$RUNTIME_AUTH_SECRET" ]; then
+    echo "FATAL: managed deployments require RUNTIME_AUTH_SECRET"
+    exit 1
+  fi
   if ! echo "$OPENCLAW_DOCKER_IMAGE" | grep -Eq '@sha256:[a-fA-F0-9]{64}$'; then
     echo "FATAL: managed OPENCLAW_DOCKER_IMAGE must be pinned to an sha256 digest"
     exit 1
