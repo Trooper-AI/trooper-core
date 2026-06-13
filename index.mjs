@@ -113,6 +113,43 @@ import {
 
 const OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write', 'operator.pairing', 'operator.approvals', 'operator.talk.secrets'];
 
+function isLocalMacHostRuntime() {
+ return process.platform === 'darwin' || process.env.TROOPER_LOCAL_MAC_HOST === '1';
+}
+
+function buildLocalHostRuntimeMetadata() {
+ const localMac = isLocalMacHostRuntime();
+ const browserMode = String(process.env.BROWSER_MODE || 'managed').trim() || 'managed';
+ return {
+  localHost: localMac,
+  platform: localMac ? 'macOS' : os.platform(),
+  hostDeviceId: process.env.HOST_DEVICE_ID || os.hostname(),
+  browserModes: localMac ? {
+   default: browserMode,
+   managed: true,
+   existingOsBrowser: true,
+   vpsDesktop: false,
+  } : {
+   default: 'vps_desktop',
+   managed: true,
+   existingOsBrowser: false,
+   vpsDesktop: true,
+  },
+  tunnel: {
+   provider: process.env.TUNNEL_PROVIDER || null,
+   id: process.env.TUNNEL_ID || null,
+   bridgeUrl: process.env.PUBLIC_BRIDGE_URL || process.env.BRIDGE_URL || null,
+   gatewayUrl: process.env.PUBLIC_GATEWAY_URL || process.env.GATEWAY_URL || null,
+  },
+  permissions: localMac ? {
+   accessibility: process.env.TROOPER_MAC_ACCESSIBILITY === '1',
+   automation: process.env.TROOPER_MAC_AUTOMATION === '1',
+   screenRecording: process.env.TROOPER_MAC_SCREEN_RECORDING === '1',
+   existingBrowser: process.env.TROOPER_ALLOW_EXISTING_BROWSER === '1',
+  } : {},
+ };
+}
+
 function looksLikeGeneratedDeviceName(value, deviceId = '') {
  const text = String(value || '').trim();
  if (!text) return true;
@@ -6429,17 +6466,28 @@ app.get('/health', async (req, res) => {
  // and streaming raw logs. The marker file is created at the end of setup-openclaw-full.sh.
  // Fallback: if bridge has been running >5 min, assume setup is complete (handles existing VPS + reboots).
  const isSnapshotBuilder = process.env.TROOPER_SNAPSHOT_BUILD === '1' || process.env.ORG_ID === 'snapshot-builder';
+ const localHostRuntime = buildLocalHostRuntimeMetadata();
  const allowUptimeFallback = !isSnapshotBuilder && process.env.OPENCLAW_HEALTH_UPTIME_FALLBACK !== '0';
- const setupDone = existsSync('/tmp/openclaw-setup-complete')
+ const setupDone = localHostRuntime.localHost
+   || existsSync('/tmp/openclaw-setup-complete')
    || existsSync('/opt/openclaw-bridge/.setup-complete')
    || (allowUptimeFallback && process.uptime() > 300);
 
- const xvnc = ensureXvnc(':99');
- const vncRunning = xvnc.ok;
+ const xvnc = localHostRuntime.localHost
+   ? { ok: false, skipped: true, error: null }
+   : ensureXvnc(':99');
+ const vncRunning = localHostRuntime.localHost ? false : xvnc.ok;
 
  // Check browser availability + browser control responsiveness
  let browserAvailable = false;
- try { browserAvailable = existsSync('/usr/bin/google-chrome-stable') || existsSync('/opt/chrome-wrapper.sh'); } catch {}
+ try {
+   browserAvailable = localHostRuntime.localHost
+     ? existsSync('/Applications/Google Chrome.app')
+       || existsSync('/Applications/Chromium.app')
+       || existsSync(`${os.homedir()}/Applications/Google Chrome.app`)
+       || existsSync(`${os.homedir()}/Applications/Chromium.app`)
+     : existsSync('/usr/bin/google-chrome-stable') || existsSync('/opt/chrome-wrapper.sh');
+ } catch {}
  let browserResponsive = false;
  let browserError = null;
  try {
@@ -6478,6 +6526,12 @@ app.get('/health', async (req, res) => {
  gateway_available: gatewayHealthy,
  gateway_state: gatewayState,
  service: 'openclaw-bridge',
+ localHost: localHostRuntime.localHost,
+ platform: localHostRuntime.platform,
+ hostDeviceId: localHostRuntime.hostDeviceId,
+ browserModes: localHostRuntime.browserModes,
+ tunnel: localHostRuntime.tunnel,
+ permissions: localHostRuntime.permissions,
 	 reason: healthStatus === 'ok' || healthStatus === 'installing' ? null : gatewayStatus.stateReason,
 	 gateway: gatewayStatus,
  browser: {
@@ -6488,8 +6542,17 @@ app.get('/health', async (req, res) => {
  },
  vnc: {
    running: vncRunning,
+   skipped: !!xvnc.skipped,
    error: xvnc.ok ? null : xvnc.error,
    port: 5999,
+ },
+ desktop: localHostRuntime.localHost ? {
+   installed: false,
+   required: false,
+   reason: 'macOS host uses the native display and browser stack',
+ } : {
+   installed: vncRunning,
+   required: true,
  },
  agents: {
    count: pendingRequests.size,
