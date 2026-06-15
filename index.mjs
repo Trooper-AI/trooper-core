@@ -113,18 +113,27 @@ import {
 
 const OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write', 'operator.pairing', 'operator.approvals', 'operator.talk.secrets'];
 
-function isLocalMacHostRuntime() {
- return process.platform === 'darwin' || process.env.TROOPER_LOCAL_MAC_HOST === '1';
+function isLocalHostRuntime() {
+ return process.platform === 'darwin'
+  || process.platform === 'win32'
+  || process.env.TROOPER_LOCAL_HOST === '1'
+  || process.env.TROOPER_LOCAL_MAC_HOST === '1'
+  || process.env.TROOPER_LOCAL_WINDOWS_HOST === '1';
 }
 
 function buildLocalHostRuntimeMetadata() {
- const localMac = isLocalMacHostRuntime();
+ const localHost = isLocalHostRuntime();
+ const platform = process.platform === 'darwin'
+  ? 'macOS'
+  : process.platform === 'win32'
+    ? 'Windows'
+    : os.platform();
  const browserMode = String(process.env.BROWSER_MODE || 'managed').trim() || 'managed';
  return {
-  localHost: localMac,
-  platform: localMac ? 'macOS' : os.platform(),
+  localHost,
+  platform,
   hostDeviceId: process.env.HOST_DEVICE_ID || os.hostname(),
-  browserModes: localMac ? {
+  browserModes: localHost ? {
    default: browserMode,
    managed: true,
    existingOsBrowser: true,
@@ -141,10 +150,15 @@ function buildLocalHostRuntimeMetadata() {
    bridgeUrl: process.env.PUBLIC_BRIDGE_URL || process.env.BRIDGE_URL || null,
    gatewayUrl: process.env.PUBLIC_GATEWAY_URL || process.env.GATEWAY_URL || null,
   },
-  permissions: localMac ? {
-   accessibility: process.env.TROOPER_MAC_ACCESSIBILITY === '1',
-   automation: process.env.TROOPER_MAC_AUTOMATION === '1',
-   screenRecording: process.env.TROOPER_MAC_SCREEN_RECORDING === '1',
+  permissions: localHost ? {
+   accessibility: process.platform === 'win32' || process.env.TROOPER_MAC_ACCESSIBILITY === '1',
+   automation: process.platform === 'win32' || process.env.TROOPER_MAC_AUTOMATION === '1',
+   screenRecording: process.platform === 'win32'
+    ? process.env.TROOPER_WINDOWS_SCREEN_CAPTURE !== '0'
+    : process.env.TROOPER_MAC_SCREEN_RECORDING === '1',
+   camera: process.platform === 'win32' && process.env.TROOPER_WINDOWS_CAMERA === '1',
+   microphone: process.platform === 'win32' && process.env.TROOPER_WINDOWS_MICROPHONE === '1',
+   notifications: process.platform === 'win32' && process.env.TROOPER_WINDOWS_NOTIFICATIONS !== '0',
    existingBrowser: process.env.TROOPER_ALLOW_EXISTING_BROWSER === '1',
   } : {},
  };
@@ -6482,10 +6496,17 @@ app.get('/health', async (req, res) => {
  let browserAvailable = false;
  try {
    browserAvailable = localHostRuntime.localHost
-     ? existsSync('/Applications/Google Chrome.app')
-       || existsSync('/Applications/Chromium.app')
-       || existsSync(`${os.homedir()}/Applications/Google Chrome.app`)
-       || existsSync(`${os.homedir()}/Applications/Chromium.app`)
+     ? process.platform === 'win32'
+       ? [
+         process.env.PROGRAMFILES && `${process.env.PROGRAMFILES}\\Google\\Chrome\\Application\\chrome.exe`,
+         process.env['PROGRAMFILES(X86)'] && `${process.env['PROGRAMFILES(X86)']}\\Google\\Chrome\\Application\\chrome.exe`,
+         process.env.LOCALAPPDATA && `${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe`,
+         process.env.PROGRAMFILES && `${process.env.PROGRAMFILES}\\Microsoft\\Edge\\Application\\msedge.exe`,
+       ].filter(Boolean).some((candidate) => existsSync(candidate))
+       : existsSync('/Applications/Google Chrome.app')
+         || existsSync('/Applications/Chromium.app')
+         || existsSync(`${os.homedir()}/Applications/Google Chrome.app`)
+         || existsSync(`${os.homedir()}/Applications/Chromium.app`)
      : existsSync('/usr/bin/google-chrome-stable') || existsSync('/opt/chrome-wrapper.sh');
  } catch {}
  let browserResponsive = false;
