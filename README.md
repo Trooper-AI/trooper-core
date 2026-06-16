@@ -48,6 +48,41 @@ npm run dev
 | `/requests/pending` | GET | OpenClaw polls for work |
 | `/requests/:id` | GET | Get request details |
 | `/requests/:id/result` | POST | OpenClaw submits results |
+| `/api/memory/sources` | GET/POST | List or register synced memory sources |
+| `/api/memory/sources/:sourceId/entries` | GET/POST | List or upsert synced memory entries |
+| `/api/memory/search` | POST | Search synced memory entries |
+| `/api/memory/sources/github/sync` | POST | Sync configured GitHub issues/PRs into memory |
+
+## Synced Memory Sources
+
+Native integrations can expose database sync as Memory without mixing synced
+records into hand-authored long-term memories.
+
+Example GitHub sync:
+
+```bash
+export TROOPER_GITHUB_REPOS=openclaw/crawlbar
+export TROOPER_GITHUB_TOKEN=ghp_... # optional for public repos, required for private repos
+
+curl -X POST -H "Authorization: Bearer $BRIDGE_TOKEN" \
+  http://localhost:3002/api/memory/sources/github/sync
+
+curl -H "Authorization: Bearer $BRIDGE_TOKEN" \
+  http://localhost:3002/api/memory/sources
+
+curl -X POST -H "Authorization: Bearer $BRIDGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"menu bar","sources":["github"],"limit":5}' \
+  http://localhost:3002/api/memory/search
+```
+
+Trooper-compatible org-prefixed aliases are also available under:
+
+```text
+/api/organizations/:orgId/memory/sources
+/api/organizations/:orgId/memory/sources/:sourceId/entries
+/api/organizations/:orgId/memory/search
+```
 
 ## Mission Control Setup
 

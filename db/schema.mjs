@@ -177,6 +177,41 @@ export const memoryConflicts = sqliteTable('memory_conflicts', {
   resolved_at: integer('resolved_at'),
 });
 
+// ── memory_sources ───────────────────────────────────────────────────
+export const memorySources = sqliteTable('memory_sources', {
+  id: text('id').primaryKey(),
+  display_name: text('display_name').notNull(),
+  provider: text('provider').notNull(),
+  kind: text('kind').default('native'),
+  status: text('status').default('idle'),
+  ai_access: text('ai_access').default('enabled'),
+  entry_count: integer('entry_count').default(0),
+  last_sync_at: integer('last_sync_at'),
+  last_error: text('last_error'),
+  metadata: text('metadata'),
+  privacy: text('privacy'),
+  created_at: integer('created_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+  updated_at: integer('updated_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+});
+
+// ── memory_entries ───────────────────────────────────────────────────
+export const memoryEntries = sqliteTable('memory_entries', {
+  id: text('id').primaryKey(),
+  source_id: text('source_id').notNull(),
+  external_id: text('external_id').notNull(),
+  type: text('type').default('record'),
+  title: text('title').notNull(),
+  summary: text('summary'),
+  content: text('content'),
+  uri: text('uri'),
+  url: text('url'),
+  timestamp: integer('timestamp'),
+  sensitivity: text('sensitivity').default('source'),
+  metadata: text('metadata'),
+  synced_at: integer('synced_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+  updated_at: integer('updated_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+});
+
 // ── agents ────────────────────────────────────────────────────────────
 export const agents = sqliteTable("agents", {
   id: text("id").primaryKey(),

@@ -198,6 +198,48 @@ export function migrate(sqlite) {
     );
     CREATE INDEX IF NOT EXISTS idx_memory_conflicts_status ON memory_conflicts(status);
     CREATE INDEX IF NOT EXISTS idx_memory_conflicts_memory ON memory_conflicts(memory_id);
+
+    CREATE TABLE IF NOT EXISTS memory_sources (
+      id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      kind TEXT DEFAULT 'native',
+      status TEXT DEFAULT 'idle',
+      ai_access TEXT DEFAULT 'enabled',
+      entry_count INTEGER DEFAULT 0,
+      last_sync_at INTEGER,
+      last_error TEXT,
+      metadata TEXT,
+      privacy TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
+    );
+    CREATE INDEX IF NOT EXISTS idx_memory_sources_provider ON memory_sources(provider);
+    CREATE INDEX IF NOT EXISTS idx_memory_sources_status ON memory_sources(status);
+
+    CREATE TABLE IF NOT EXISTS memory_entries (
+      id TEXT PRIMARY KEY,
+      source_id TEXT NOT NULL,
+      external_id TEXT NOT NULL,
+      type TEXT DEFAULT 'record',
+      title TEXT NOT NULL,
+      summary TEXT,
+      content TEXT,
+      uri TEXT,
+      url TEXT,
+      timestamp INTEGER,
+      sensitivity TEXT DEFAULT 'source',
+      metadata TEXT,
+      synced_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+      UNIQUE(source_id, external_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_memory_entries_source ON memory_entries(source_id, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_memory_entries_external ON memory_entries(source_id, external_id);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS memory_entries_fts
+      USING fts5(title, summary, content, source_id UNINDEXED, entry_id UNINDEXED);
+
     CREATE TABLE IF NOT EXISTS agents (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
