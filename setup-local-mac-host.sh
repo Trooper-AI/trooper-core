@@ -35,6 +35,8 @@ TUNNEL_PROVIDER="${TUNNEL_PROVIDER:-cloudflare}"
 TROOPER_BRIDGE_REPO_URL="${TROOPER_BRIDGE_REPO_URL:-https://github.com/absurdfounder/trooper-bridge.git}"
 OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/absurdfounder/openclaw:latest}"
 
+export PATH="/opt/homebrew/bin:/usr/local/bin:/Applications/Docker.app/Contents/Resources/bin:$HOME/Applications/Docker.app/Contents/Resources/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
 mkdir -p "$TROOPER_HOME" "$BRIDGE_DIR" "$OPENCLAW_DATA_DIR" "$LOG_DIR" "$BIN_DIR" "$PLIST_DIR"
 
 if [[ "$EUID" -eq 0 ]]; then
@@ -69,9 +71,32 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 1
 fi
 
+install_docker_desktop() {
+  if [[ "${TROOPER_SKIP_DOCKER_INSTALL:-0}" == "1" ]]; then
+    return 1
+  fi
+
+  if [[ -d "/Applications/Docker.app" || -d "$HOME/Applications/Docker.app" ]]; then
+    return 0
+  fi
+
+  if command -v brew >/dev/null 2>&1; then
+    echo "Docker Desktop is required for the local AI gateway."
+    echo "Installing Docker Desktop with Homebrew..."
+    brew install --cask docker
+    hash -r
+    return 0
+  fi
+
+  echo "Docker Desktop is required for the local AI gateway." >&2
+  echo "Homebrew was not found, so Trooper cannot install Docker Desktop automatically." >&2
+  echo "Opening the Docker Desktop download page. Install Docker Desktop, open it once, then rerun this installer." >&2
+  open "https://www.docker.com/products/docker-desktop/" >/dev/null 2>&1 || true
+  return 1
+}
+
 if ! command -v docker >/dev/null 2>&1; then
-  echo "Docker Desktop is required for the local AI gateway. Install and open Docker Desktop, then rerun this installer." >&2
-  exit 1
+  install_docker_desktop || exit 1
 fi
 if ! docker info >/dev/null 2>&1; then
   open -a Docker >/dev/null 2>&1 || true
@@ -258,7 +283,7 @@ write_plist() {
   <dict>
     <key>HOME</key><string>$HOME</string>
     <key>TROOPER_HOME</key><string>$TROOPER_HOME</string>
-    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/Applications/Docker.app/Contents/Resources/bin:$HOME/Applications/Docker.app/Contents/Resources/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>StandardOutPath</key><string>$LOG_DIR/$label.out.log</string>
   <key>StandardErrorPath</key><string>$LOG_DIR/$label.err.log</string>
