@@ -72,43 +72,80 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 1
 fi
 
-install_docker_desktop() {
+docker_ready() {
+  command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
+}
+
+install_colima_docker_runtime() {
   if [[ "${TROOPER_SKIP_DOCKER_INSTALL:-0}" == "1" ]]; then
     return 1
   fi
 
-  if [[ -d "/Applications/Docker.app" || -d "$HOME/Applications/Docker.app" ]]; then
-    return 0
+  if ! command -v brew >/dev/null 2>&1; then
+    return 1
   fi
 
-  if command -v brew >/dev/null 2>&1; then
-    echo "Docker Desktop is required for the local AI gateway."
-    echo "Installing Docker Desktop with Homebrew..."
-    brew install --cask docker
-    hash -r
-    return 0
-  fi
+  echo "Installing Docker CLI runtime with Colima..."
+  brew install colima docker docker-compose docker-buildx
 
-  echo "Docker Desktop is required for the local AI gateway." >&2
-  echo "Homebrew was not found, so Trooper cannot install Docker Desktop automatically." >&2
-  echo "Opening the Docker Desktop download page. Install Docker Desktop, open it once, then rerun this installer." >&2
-  open "https://www.docker.com/products/docker-desktop/" >/dev/null 2>&1 || true
-  return 1
+  local brew_prefix
+  brew_prefix="$(brew --prefix)"
+  mkdir -p "$HOME/.docker/cli-plugins"
+  if [[ -x "$brew_prefix/opt/docker-compose/bin/docker-compose" ]]; then
+    ln -sfn "$brew_prefix/opt/docker-compose/bin/docker-compose" "$HOME/.docker/cli-plugins/docker-compose"
+  fi
+  if [[ -x "$brew_prefix/opt/docker-buildx/bin/docker-buildx" ]]; then
+    ln -sfn "$brew_prefix/opt/docker-buildx/bin/docker-buildx" "$HOME/.docker/cli-plugins/docker-buildx"
+  fi
+  hash -r
+
+  echo "Starting Colima..."
+  colima start
 }
 
-if ! command -v docker >/dev/null 2>&1; then
-  install_docker_desktop || exit 1
-fi
-if ! docker info >/dev/null 2>&1; then
+start_docker_desktop() {
+  if [[ "${TROOPER_SKIP_DOCKER_DESKTOP:-0}" == "1" ]]; then
+    return 1
+  fi
+
+  if [[ ! -d "/Applications/Docker.app" && ! -d "$HOME/Applications/Docker.app" ]]; then
+    return 1
+  fi
+
   open -a Docker >/dev/null 2>&1 || true
   echo "Waiting for Docker Desktop to start..."
   for _ in {1..60}; do
-    docker info >/dev/null 2>&1 && break
+    docker_ready && return 0
     sleep 2
   done
-fi
-if ! docker info >/dev/null 2>&1; then
-  echo "Docker Desktop did not become ready. Open Docker Desktop, finish its first-run setup, then rerun this installer." >&2
+  return 1
+}
+
+ensure_docker_runtime() {
+  if docker_ready; then
+    return 0
+  fi
+
+  if install_colima_docker_runtime && docker_ready; then
+    return 0
+  fi
+
+  if start_docker_desktop && docker_ready; then
+    return 0
+  fi
+
+  echo "A Docker-compatible local runtime is required for the local AI gateway." >&2
+  if command -v brew >/dev/null 2>&1; then
+    echo "Trooper tried to install/start Colima. You can retry manually with:" >&2
+    echo "  brew install colima docker docker-compose docker-buildx && colima start" >&2
+  else
+    echo "Install Homebrew, then rerun this installer so Trooper can install Colima automatically." >&2
+    open "https://brew.sh/" >/dev/null 2>&1 || true
+  fi
+  return 1
+}
+
+if ! ensure_docker_runtime; then
   exit 1
 fi
 
