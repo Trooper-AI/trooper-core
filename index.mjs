@@ -1336,7 +1336,9 @@ function syncGatewayAuthTokenInConfig() {
  return { updated: true, token: desiredToken, config: readOpenClawConfig() };
 }
 
-const OPENCLAW_DEVICES_DIR = process.env.OPENCLAW_DEVICES_DIR || openclawConfigPath('devices');
+const OPENCLAW_DEVICES_DIR = process.env.OPENCLAW_PAIRED_JSON_PATH
+ ? String(process.env.OPENCLAW_PAIRED_JSON_PATH).replace(/\/[^/]*$/, '')
+ : (process.env.OPENCLAW_CONFIG_ROOT ? `${process.env.OPENCLAW_CONFIG_ROOT}/devices` : openclawConfigPath('devices'));
 const OPENCLAW_PAIRED_JSON_PATH = process.env.OPENCLAW_PAIRED_JSON_PATH || `${OPENCLAW_DEVICES_DIR}/paired.json`;
 
 function buildBridgePairedDeviceEntry(existing = {}) {
