@@ -1943,7 +1943,7 @@ class OpenClawGateway {
  const scopes = OPERATOR_SCOPES;
  const nonce = this._connectNonce || undefined;
  const operatorDeviceToken = getBridgeOperatorDeviceToken();
- const signatureToken = operatorDeviceToken || this.token;
+ const signatureToken = this.token || operatorDeviceToken;
  const auth = {};
  if (this.token) auth.token = this.token;
  if (operatorDeviceToken) auth.deviceToken = operatorDeviceToken;
