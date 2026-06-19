@@ -389,12 +389,14 @@ if command -v docker >/dev/null 2>&1; then
     -p "127.0.0.1:${GATEWAY_PORT}:${GATEWAY_PORT}" \
     -v "${OPENCLAW_DATA_DIR}:/home/node/.openclaw" \
     -v "${TROOPER_BRIDGE_DIR}/startup.sh:/opt/startup.sh:ro" \
+    --entrypoint /bin/bash \
     -e "OPENCLAW_HOST=0.0.0.0" \
     -e "OPENCLAW_PORT=${GATEWAY_PORT}" \
     -e "GATEWAY_TOKEN=${GATEWAY_TOKEN}" \
     -e "OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}" \
     -e "TROOPER_GATEWAY_SKIP_DOCTOR=1" \
     "${OPENCLAW_DOCKER_IMAGE}" \
+    /opt/startup.sh \
     "${GATEWAY_PORT}"
 fi
 
