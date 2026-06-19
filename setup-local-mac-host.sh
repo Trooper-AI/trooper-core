@@ -26,6 +26,7 @@ LOG_DIR="$TROOPER_HOME/logs"
 BIN_DIR="$TROOPER_HOME/bin"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 ENV_FILE="$TROOPER_HOME/trooper-local-host.env"
+TROOPER_PARENT_DIR="$(dirname "$TROOPER_HOME")"
 
 HOST_DEVICE_ID="${HOST_DEVICE_ID:-mac-$(scutil --get LocalHostName 2>/dev/null || hostname | tr -cd '[:alnum:]-' | tr '[:upper:]' '[:lower:]')}"
 BRIDGE_PORT="${BRIDGE_PORT:-3002}"
@@ -37,8 +38,6 @@ OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/absurdfounder/openclaw:l
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/Applications/Docker.app/Contents/Resources/bin:$HOME/Applications/Docker.app/Contents/Resources/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
-mkdir -p "$TROOPER_HOME" "$BRIDGE_DIR" "$OPENCLAW_DATA_DIR" "$LOG_DIR" "$BIN_DIR" "$PLIST_DIR"
-
 if [[ "$EUID" -eq 0 ]]; then
   echo "Run this installer as your signed-in macOS user, not with sudo." >&2
   exit 1
@@ -46,7 +45,7 @@ fi
 
 # Repair files left by older installers that incorrectly ran the whole setup as root.
 ROOT_OWNED_PATHS=()
-for path in "$TROOPER_HOME" "$PLIST_DIR"/so.trooper.local-*.plist; do
+for path in "$TROOPER_PARENT_DIR" "$TROOPER_HOME" "$PLIST_DIR"/so.trooper.local-*.plist; do
   if [[ -e "$path" && ! -O "$path" ]]; then
     ROOT_OWNED_PATHS+=("$path")
   fi
@@ -55,6 +54,8 @@ if (( ${#ROOT_OWNED_PATHS[@]} > 0 )); then
   echo "Repairing ownership from an earlier Trooper local-host installation..."
   sudo chown -R "$(id -u):$(id -g)" "${ROOT_OWNED_PATHS[@]}"
 fi
+
+mkdir -p "$TROOPER_HOME" "$BRIDGE_DIR" "$OPENCLAW_DATA_DIR" "$LOG_DIR" "$BIN_DIR" "$PLIST_DIR"
 
 if ! command -v git >/dev/null 2>&1; then
   echo "git is required. Install Xcode Command Line Tools, then rerun this installer." >&2
