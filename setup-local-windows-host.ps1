@@ -53,12 +53,32 @@ $BridgeDir = if ($env:BRIDGE_DIR) { $env:BRIDGE_DIR } else { Join-Path $TrooperH
 $BinDir = Join-Path $TrooperHome "bin"
 $LogDir = Join-Path $TrooperHome "logs"
 $EnvFile = Join-Path $TrooperHome "trooper-local-host.env"
+$TrooperParentDir = Split-Path $TrooperHome -Parent
+$InstallationIdFile = Join-Path $TrooperParentDir "install-id"
 $BridgePort = if ($env:BRIDGE_PORT) { $env:BRIDGE_PORT } else { "3002" }
 $GatewayPort = if ($env:GATEWAY_PORT) { $env:GATEWAY_PORT } else { "18789" }
-$HostDeviceId = if ($env:HOST_DEVICE_ID) { $env:HOST_DEVICE_ID } else { "windows-$($env:COMPUTERNAME.ToLowerInvariant())" }
 $BridgeRepo = if ($env:TROOPER_BRIDGE_REPO_URL) { $env:TROOPER_BRIDGE_REPO_URL } else { "https://github.com/absurdfounder/trooper-bridge.git" }
 
 New-Item -ItemType Directory -Force -Path $TrooperHome, $BinDir, $LogDir | Out-Null
+$ExistingValues = @{}
+if (Test-Path $EnvFile) {
+  Get-Content $EnvFile | ForEach-Object {
+    if ($_ -match '^([^#=]+)=(.*)$') { $ExistingValues[$matches[1]] = $matches[2] }
+  }
+}
+$ExistingOrgId = [string]$ExistingValues["ORG_ID"]
+if ($ExistingOrgId -and $ExistingOrgId -ne "local-unpaired" -and $OrgId -ne $ExistingOrgId) {
+  throw "This computer already hosts Trooper workspace $ExistingOrgId. Trooper will not replace it with workspace $OrgId. Open the existing workspace, use another computer, or uninstall the local host first."
+}
+if (Test-Path $InstallationIdFile) {
+  $HostDeviceId = (Get-Content $InstallationIdFile -Raw).Trim()
+} elseif ($ExistingValues["HOST_DEVICE_ID"]) {
+  $HostDeviceId = [string]$ExistingValues["HOST_DEVICE_ID"]
+  [IO.File]::WriteAllText($InstallationIdFile, "$HostDeviceId`n", [Text.UTF8Encoding]::new($false))
+} else {
+  $HostDeviceId = "windows-local-$([guid]::NewGuid().ToString('N').ToLowerInvariant())"
+  [IO.File]::WriteAllText($InstallationIdFile, "$HostDeviceId`n", [Text.UTF8Encoding]::new($false))
+}
 Ensure-Command "git" "Git.Git"
 Ensure-Command "node" "OpenJS.NodeJS.LTS"
 Ensure-Command "cloudflared" "Cloudflare.cloudflared"
@@ -88,6 +108,7 @@ Write-EnvFile $EnvFile @{
   GATEWAY_TOKEN = $GatewayToken
   BRIDGE_AUTH_TOKEN = $BridgeAuthToken
   HOST_DEVICE_ID = $HostDeviceId
+  TROOPER_INSTALLATION_ID = $HostDeviceId
   BRIDGE_PORT = $BridgePort
   PORT = $BridgePort
   GATEWAY_PORT = $GatewayPort

@@ -28,8 +28,9 @@ BIN_DIR="$TROOPER_HOME/bin"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 ENV_FILE="$TROOPER_HOME/trooper-local-host.env"
 TROOPER_PARENT_DIR="$(dirname "$TROOPER_HOME")"
+INSTALLATION_ID_FILE="$TROOPER_PARENT_DIR/install-id"
 
-HOST_DEVICE_ID="${HOST_DEVICE_ID:-mac-$(scutil --get LocalHostName 2>/dev/null || hostname | tr -cd '[:alnum:]-' | tr '[:upper:]' '[:lower:]')}"
+REQUESTED_HOST_DEVICE_ID="${HOST_DEVICE_ID:-}"
 BRIDGE_PORT="${BRIDGE_PORT:-3002}"
 GATEWAY_PORT="${GATEWAY_PORT:-18789}"
 BROWSER_MODE="${BROWSER_MODE:-managed}"
@@ -87,6 +88,42 @@ mkdir -p \
   "$LOG_DIR" \
   "$BIN_DIR" \
   "$PLIST_DIR"
+
+read_env_value() {
+  local key="$1"
+  local line=""
+  [[ -f "$ENV_FILE" ]] || return 0
+  line="$(grep -E "^${key}=" "$ENV_FILE" 2>/dev/null | tail -1 || true)"
+  printf '%s' "${line#*=}"
+}
+
+EXISTING_ORG_ID="$(read_env_value ORG_ID)"
+EXISTING_HOST_DEVICE_ID="$(read_env_value HOST_DEVICE_ID)"
+if [[ -n "$EXISTING_ORG_ID" && "$EXISTING_ORG_ID" != "local-unpaired" && "$ORG_ID" != "$EXISTING_ORG_ID" ]]; then
+  echo "This computer already hosts Trooper workspace $EXISTING_ORG_ID." >&2
+  echo "Trooper will not replace it with workspace $ORG_ID." >&2
+  echo "Open the existing workspace, use another computer, or uninstall the local host before continuing." >&2
+  exit 73
+fi
+if [[ "$ORG_ID" == "local-unpaired" && -n "$EXISTING_ORG_ID" && "$EXISTING_ORG_ID" != "local-unpaired" ]]; then
+  echo "This computer already hosts Trooper workspace $EXISTING_ORG_ID." >&2
+  echo "The existing local workspace was left unchanged. Opening Trooper is enough to use it." >&2
+  exit 73
+fi
+
+if [[ -s "$INSTALLATION_ID_FILE" ]]; then
+  HOST_DEVICE_ID="$(tr -d '[:space:]' < "$INSTALLATION_ID_FILE")"
+else
+  HOST_DEVICE_ID="${EXISTING_HOST_DEVICE_ID:-}"
+  if [[ -z "$HOST_DEVICE_ID" ]]; then
+    HOST_DEVICE_ID="mac-local-$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d '-')"
+  fi
+  printf '%s\n' "$HOST_DEVICE_ID" > "$INSTALLATION_ID_FILE"
+  chmod 600 "$INSTALLATION_ID_FILE"
+fi
+if [[ -z "$HOST_DEVICE_ID" ]]; then
+  HOST_DEVICE_ID="${REQUESTED_HOST_DEVICE_ID:-mac-$(scutil --get LocalHostName 2>/dev/null || hostname | tr -cd '[:alnum:]-' | tr '[:upper:]' '[:lower:]')}"
+fi
 
 if ! command -v git >/dev/null 2>&1; then
   echo "git is required. Install Xcode Command Line Tools, then rerun this installer." >&2
@@ -315,6 +352,7 @@ write_env_line() {
   write_env_line OPENCLAW_GATEWAY_TOKEN "$GATEWAY_TOKEN"
   write_env_line BRIDGE_AUTH_TOKEN "$BRIDGE_AUTH_TOKEN"
   write_env_line HOST_DEVICE_ID "$HOST_DEVICE_ID"
+  write_env_line TROOPER_INSTALLATION_ID "$HOST_DEVICE_ID"
   write_env_line BRIDGE_PORT "$BRIDGE_PORT"
   write_env_line PORT "$BRIDGE_PORT"
   write_env_line GATEWAY_PORT "$GATEWAY_PORT"
