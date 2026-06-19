@@ -34,7 +34,7 @@ GATEWAY_PORT="${GATEWAY_PORT:-18789}"
 BROWSER_MODE="${BROWSER_MODE:-managed}"
 TUNNEL_PROVIDER="${TUNNEL_PROVIDER:-cloudflare}"
 TROOPER_BRIDGE_REPO_URL="${TROOPER_BRIDGE_REPO_URL:-https://github.com/absurdfounder/trooper-bridge.git}"
-OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/absurdfounder/openclaw:latest}"
+OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/absurdfounder/trooper-gateway:latest}"
 COLIMA_VERSION="${COLIMA_VERSION:-v0.10.3}"
 LIMA_VERSION="${LIMA_VERSION:-2.1.2}"
 DOCKER_CLI_VERSION="${DOCKER_CLI_VERSION:-29.1.3}"
@@ -73,7 +73,16 @@ if (( ${#ROOT_OWNED_PATHS[@]} > 0 )); then
   sudo chown -R "$(id -u):$(id -g)" "${ROOT_OWNED_PATHS[@]}"
 fi
 
-mkdir -p "$TROOPER_HOME" "$BRIDGE_DIR" "$OPENCLAW_DATA_DIR" "$LOG_DIR" "$BIN_DIR" "$PLIST_DIR"
+mkdir -p \
+  "$TROOPER_HOME" \
+  "$BRIDGE_DIR" \
+  "$OPENCLAW_DATA_DIR" \
+  "$OPENCLAW_DATA_DIR/config" \
+  "$OPENCLAW_DATA_DIR/workspace" \
+  "$OPENCLAW_DATA_DIR/diagnostics/logs" \
+  "$LOG_DIR" \
+  "$BIN_DIR" \
+  "$PLIST_DIR"
 
 if ! command -v git >/dev/null 2>&1; then
   echo "git is required. Install Xcode Command Line Tools, then rerun this installer." >&2
@@ -309,7 +318,12 @@ write_env_line() {
   write_env_line TROOPER_BRIDGE_DIR "$BRIDGE_DIR"
   write_env_line TROOPER_HOME "$TROOPER_HOME"
   write_env_line OPENCLAW_DATA_DIR "$OPENCLAW_DATA_DIR"
+  write_env_line OPENCLAW_DATA_ROOT "$OPENCLAW_DATA_DIR"
+  write_env_line OPENCLAW_CONFIG_ROOT "$OPENCLAW_DATA_DIR/config"
+  write_env_line OPENCLAW_WORKSPACE_HOST_ROOT "$OPENCLAW_DATA_DIR/workspace"
   write_env_line OPENCLAW_DOCKER_IMAGE "$OPENCLAW_DOCKER_IMAGE"
+  write_env_line BRIDGE_DEVICE_IDENTITY_PATH "$BRIDGE_DIR/device-identity.json"
+  write_env_line TROOPER_DIAGNOSTICS_DIR "$OPENCLAW_DATA_DIR/diagnostics"
   write_env_line CLOUDFLARE_TUNNEL_TOKEN "${CLOUDFLARE_TUNNEL_TOKEN:-}"
   write_env_line TROOPER_MAC_ACCESSIBILITY "${TROOPER_MAC_ACCESSIBILITY:-0}"
   write_env_line TROOPER_MAC_AUTOMATION "${TROOPER_MAC_AUTOMATION:-0}"
@@ -342,7 +356,7 @@ if command -v docker >/dev/null 2>&1; then
   docker rm -f trooper-local-gateway >/dev/null 2>&1 || true
   exec docker run --name trooper-local-gateway --pull=always \
     -p "127.0.0.1:${GATEWAY_PORT}:${GATEWAY_PORT}" \
-    -v "${OPENCLAW_DATA_DIR}:/data" \
+    -v "${OPENCLAW_DATA_DIR}:/home/node/.openclaw" \
     -e "OPENCLAW_HOST=0.0.0.0" \
     -e "OPENCLAW_PORT=${GATEWAY_PORT}" \
     -e "GATEWAY_TOKEN=${GATEWAY_TOKEN}" \
