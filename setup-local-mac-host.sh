@@ -309,6 +309,7 @@ write_env_line() {
   write_env_line ORG_ID "$ORG_ID"
   write_env_line API_URL "$API_URL"
   write_env_line GATEWAY_TOKEN "$GATEWAY_TOKEN"
+  write_env_line OPENCLAW_GATEWAY_TOKEN "$GATEWAY_TOKEN"
   write_env_line BRIDGE_AUTH_TOKEN "$BRIDGE_AUTH_TOKEN"
   write_env_line HOST_DEVICE_ID "$HOST_DEVICE_ID"
   write_env_line BRIDGE_PORT "$BRIDGE_PORT"
@@ -369,6 +370,7 @@ if command -v docker >/dev/null 2>&1; then
     -e "OPENCLAW_HOST=0.0.0.0" \
     -e "OPENCLAW_PORT=${GATEWAY_PORT}" \
     -e "GATEWAY_TOKEN=${GATEWAY_TOKEN}" \
+    -e "OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}" \
     -e "TROOPER_GATEWAY_SKIP_DOCTOR=1" \
     "${OPENCLAW_DOCKER_IMAGE}" \
     "${GATEWAY_PORT}"

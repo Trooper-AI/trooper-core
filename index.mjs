@@ -1282,7 +1282,8 @@ function readGatewayTokenFromConfig() {
 
 function getDesiredGatewayToken() {
  const envToken = typeof process.env.OPENCLAW_GATEWAY_TOKEN === 'string' ? process.env.OPENCLAW_GATEWAY_TOKEN.trim() : '';
- return envToken || readGatewayTokenFromConfig() || '';
+ const gatewayToken = typeof process.env.GATEWAY_TOKEN === 'string' ? process.env.GATEWAY_TOKEN.trim() : '';
+ return envToken || gatewayToken || readGatewayTokenFromConfig() || '';
 }
 
 function normalizeOpenClawConfigForWrite(nextConfig, existingConfig = readOpenClawConfig()) {
@@ -1942,7 +1943,7 @@ class OpenClawGateway {
  const scopes = OPERATOR_SCOPES;
  const nonce = this._connectNonce || undefined;
  const operatorDeviceToken = getBridgeOperatorDeviceToken();
- const signatureToken = this.token || operatorDeviceToken;
+ const signatureToken = operatorDeviceToken || this.token;
  const auth = {};
  if (this.token) auth.token = this.token;
  if (operatorDeviceToken) auth.deviceToken = operatorDeviceToken;
