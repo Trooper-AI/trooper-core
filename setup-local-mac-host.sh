@@ -22,6 +22,7 @@ need_env BRIDGE_AUTH_TOKEN
 TROOPER_HOME="${TROOPER_HOME:-$HOME/Library/Application Support/Trooper/runtime}"
 BRIDGE_DIR="${BRIDGE_DIR:-$TROOPER_HOME/bridge}"
 OPENCLAW_DATA_DIR="${OPENCLAW_DATA_DIR:-$TROOPER_HOME/openclaw-data}"
+OPENCLAW_CONFIG_ROOT="${OPENCLAW_CONFIG_ROOT:-$OPENCLAW_DATA_DIR/config}"
 LOG_DIR="$TROOPER_HOME/logs"
 BIN_DIR="$TROOPER_HOME/bin"
 PLIST_DIR="$HOME/Library/LaunchAgents"
@@ -78,7 +79,8 @@ mkdir -p \
   "$TROOPER_HOME" \
   "$BRIDGE_DIR" \
   "$OPENCLAW_DATA_DIR" \
-  "$OPENCLAW_DATA_DIR/config" \
+  "$OPENCLAW_CONFIG_ROOT" \
+  "$OPENCLAW_CONFIG_ROOT/devices" \
   "$OPENCLAW_DATA_DIR/devices" \
   "$OPENCLAW_DATA_DIR/workspace" \
   "$OPENCLAW_DATA_DIR/diagnostics/logs" \
@@ -328,7 +330,7 @@ write_env_line() {
   write_env_line TROOPER_HOME "$TROOPER_HOME"
   write_env_line OPENCLAW_DATA_DIR "$OPENCLAW_DATA_DIR"
   write_env_line OPENCLAW_DATA_ROOT "$OPENCLAW_DATA_DIR"
-  write_env_line OPENCLAW_CONFIG_ROOT "$OPENCLAW_DATA_DIR/config"
+  write_env_line OPENCLAW_CONFIG_ROOT "$OPENCLAW_CONFIG_ROOT"
   write_env_line OPENCLAW_DEVICES_DIR "$OPENCLAW_CONFIG_ROOT/devices"
   write_env_line OPENCLAW_PAIRED_JSON_PATH "$OPENCLAW_CONFIG_ROOT/devices/paired.json"
   write_env_line OPENCLAW_WORKSPACE_HOST_ROOT "$OPENCLAW_DATA_DIR/workspace"
