@@ -408,6 +408,28 @@ function buildExecApprovalRecord(payload = {}) {
   };
 }
 
+function isLoopbackRequest(req) {
+ const candidates = [
+  req.ip,
+  req.socket?.remoteAddress,
+  req.connection?.remoteAddress,
+ ].filter(Boolean).map((value) => String(value));
+ return candidates.some((address) =>
+  address === '::1'
+  || address === '127.0.0.1'
+  || address === '::ffff:127.0.0.1'
+  || address.startsWith('127.')
+  || address.startsWith('::ffff:127.'),
+ );
+}
+
+function isLocalHostLogRead(req) {
+ if (!isLocalHostRuntime()) return false;
+ if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+ if (req.path !== '/logs' && req.path !== '/admin/logs') return false;
+ return isLoopbackRequest(req);
+}
+
 // Browser tool names that trigger live screenshot streaming
 const BROWSER_TOOLS = ['browser', 'browser_navigate', 'browser_click', 'browser_type', 'browser_screenshot', 'browser_read', 'browser_search', 'browser_form'];
 function isBrowserTool(tool) {
@@ -1546,6 +1568,7 @@ app.use(express.json({ limit: '5mb' }));
 // Auth middleware — exempt only bounded health/status endpoints needed before auth is configured.
 app.use((req, res, next) => {
  if (req.path === '/health' || req.path === '/healthz' || req.path === '/readyz' || req.path === '/system-stats') return next();
+ if (isLocalHostLogRead(req)) return next();
  // /api/* routes have their own Firebase auth middleware (applied below)
  if (req.path.startsWith('/api/')) return next();
  // Desktop API is localhost-only (bound to 127.0.0.1), safe to skip here
