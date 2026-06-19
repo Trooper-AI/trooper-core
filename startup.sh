@@ -51,9 +51,6 @@ chown -R 1000:1000 /var/tmp/openclaw-compile-cache /var/tmp/jiti /home/node/.cac
 chmod 755 /var/tmp/openclaw-compile-cache /var/tmp/jiti "$OPENCLAW_TMPDIR" "$OPENCLAW_NATIVE_HOOK_RELAY_DIR" 2>/dev/null || true
 export OPENCLAW_NO_RESPAWN=1
 
-# Auto-repair config after upgrades (prevents crash loops from schema changes).
-# Newer OpenClaw releases advertise `doctor --repair`; older builds used `--fix`.
-echo "[startup] Running openclaw doctor repair (auto-heal config)..."
 run_as_node() {
   if [ "$(id -u)" = "0" ]; then
     su -s /bin/bash node -c "$1"
@@ -61,9 +58,19 @@ run_as_node() {
     bash -lc "$1"
   fi
 }
-run_as_node "node dist/index.js doctor --repair" 2>&1 \
-  || run_as_node "node dist/index.js doctor --fix" 2>&1 \
-  || echo "[startup] WARNING: doctor repair failed (non-fatal)"
+
+# Auto-repair config after upgrades (prevents crash loops from schema changes).
+# Local Mac installs can skip this foreground repair because the bridge already
+# writes a managed config, and amd64 gateway images can spend minutes here under
+# Apple Silicon emulation before the API port opens.
+if [ "${TROOPER_GATEWAY_SKIP_DOCTOR:-0}" = "1" ]; then
+  echo "[startup] Skipping openclaw doctor repair."
+else
+  echo "[startup] Running openclaw doctor repair (auto-heal config)..."
+  run_as_node "node dist/index.js doctor --repair" 2>&1 \
+    || run_as_node "node dist/index.js doctor --fix" 2>&1 \
+    || echo "[startup] WARNING: doctor repair failed (non-fatal)"
+fi
 
 # Start gateway as node user
 if [ "$(id -u)" = "0" ]; then

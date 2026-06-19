@@ -362,10 +362,13 @@ if command -v docker >/dev/null 2>&1; then
   exec docker run --name "${OPENCLAW_GATEWAY_CONTAINER}" --pull=missing \
     -p "127.0.0.1:${GATEWAY_PORT}:${GATEWAY_PORT}" \
     -v "${OPENCLAW_DATA_DIR}:/home/node/.openclaw" \
+    -v "${TROOPER_BRIDGE_DIR}/startup.sh:/opt/startup.sh:ro" \
     -e "OPENCLAW_HOST=0.0.0.0" \
     -e "OPENCLAW_PORT=${GATEWAY_PORT}" \
     -e "GATEWAY_TOKEN=${GATEWAY_TOKEN}" \
-    "${OPENCLAW_DOCKER_IMAGE}"
+    -e "TROOPER_GATEWAY_SKIP_DOCTOR=1" \
+    "${OPENCLAW_DOCKER_IMAGE}" \
+    "${GATEWAY_PORT}"
 fi
 
 echo "Docker Desktop is not installed. Install Docker Desktop or set up a direct OpenClaw gateway runner." >&2
