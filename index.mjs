@@ -1570,7 +1570,7 @@ app.use(cors({
  credentials: true,
  allowedHeaders: ['Content-Type', 'Authorization', 'X-Org-Id', 'X-API-Key', 'Access-Control-Request-Private-Network'],
 }));
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '25mb' }));
 
 // Auth middleware — exempt only bounded health/status endpoints needed before auth is configured.
 app.use((req, res, next) => {
@@ -2480,14 +2480,13 @@ class OpenClawGateway {
   const idempotencyKey = typeof opts?.idempotencyKey === 'string' && opts.idempotencyKey.trim()
    ? opts.idempotencyKey.trim()
    : randomUUID();
-  const params = {
+  const params = withGatewayAttachments({
    key: safeSessionKey,
    message: safeMessage,
    idempotencyKey,
    ...(typeof opts?.thinking === 'string' && opts.thinking.trim() ? { thinking: opts.thinking.trim() } : {}),
-   ...(Array.isArray(opts?.attachments) ? { attachments: opts.attachments } : {}),
    ...(Number.isFinite(Number(opts?.timeoutMs)) ? { timeoutMs: Number(opts.timeoutMs) } : {}),
-  };
+  }, opts?.attachments);
   const result = await this.request('sessions.steer', params, {
    timeoutMs: Number.isFinite(Number(opts?.requestTimeoutMs)) ? Number(opts.requestTimeoutMs) : 30000,
   });
@@ -3292,16 +3291,15 @@ function extractPatchFilePaths(patchText = '') {
  timeoutMs,
  }
  : method === 'chat.send'
- ? {
- message,
- sessionKey,
- idempotencyKey,
- agentId: opts.agentId || undefined,
- thinking: selectedThinking || undefined,
- deliver: false,
- timeoutMs,
- ...(Array.isArray(opts.attachments) && opts.attachments.length > 0 ? { attachments: opts.attachments } : {}),
- }
+ ? withGatewayAttachments({
+  message,
+  sessionKey,
+  idempotencyKey,
+  agentId: opts.agentId || undefined,
+  thinking: selectedThinking || undefined,
+  deliver: false,
+  timeoutMs,
+  }, opts.attachments)
  : withGatewayAttachments({
  message, sessionKey, idempotencyKey,
  agentId: opts.agentId || undefined,
