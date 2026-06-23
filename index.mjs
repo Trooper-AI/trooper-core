@@ -7406,6 +7406,57 @@ app.delete('/admin/devices', (req, res) => {
 
 // ── GDPR / Privacy: Data Export & Deletion ───────────────────────────────
 
+const VERIFIED_WORKSPACE_EXPORT_ROOT = '/home/node/.openclaw/workspace';
+const VERIFIED_WORKSPACE_EXPORT_SKIP_DIRS = new Set(['node_modules', '.git', '.openclaw', '.next', 'dist', 'build', 'coverage']);
+const VERIFIED_WORKSPACE_EXPORT_MAX_FILE_BYTES = 10 * 1024 * 1024;
+const VERIFIED_WORKSPACE_EXPORT_MAX_FILES = 4000;
+
+function isVerifiedWorkspaceTextFile(filePath = '', contentType = '', buffer = Buffer.alloc(0)) {
+ const ext = path.extname(filePath).toLowerCase();
+ if (['.txt', '.md', '.markdown', '.json', '.yaml', '.yml', '.xml', '.svg', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.css', '.html', '.py', '.sh'].includes(ext)) return true;
+ if (contentType.startsWith('text/')) return true;
+ if (/(json|javascript|typescript|xml|yaml|svg)/i.test(contentType)) return true;
+ if (buffer.includes(0)) return false;
+ if (buffer.length === 0) return true;
+ let printable = 0;
+ for (const byte of buffer) {
+  if (byte === 9 || byte === 10 || byte === 13 || (byte >= 32 && byte < 127)) printable++;
+ }
+ return printable / buffer.length > 0.85;
+}
+
+function encodeVerifiedWorkspaceFiles(rootPath = VERIFIED_WORKSPACE_EXPORT_ROOT) {
+ const files = {};
+ let exportedCount = 0;
+
+ const walk = (dirPath, prefix = '') => {
+  const entries = readdirSync(dirPath, { withFileTypes: true });
+  for (const entry of entries) {
+   if (VERIFIED_WORKSPACE_EXPORT_SKIP_DIRS.has(entry.name)) continue;
+   const fullPath = path.join(dirPath, entry.name);
+   const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+   if (entry.isDirectory()) {
+    walk(fullPath, relativePath);
+    if (exportedCount >= VERIFIED_WORKSPACE_EXPORT_MAX_FILES) return;
+    continue;
+   }
+   const stats = statSync(fullPath);
+   if (stats.size > VERIFIED_WORKSPACE_EXPORT_MAX_FILE_BYTES) continue;
+   const buffer = readFileSync(fullPath);
+   const encoding = isVerifiedWorkspaceTextFile(relativePath, getFileContentType(relativePath), buffer) ? 'utf8' : 'base64';
+   files[relativePath] = {
+    encoding,
+    content: encoding === 'utf8' ? buffer.toString('utf8') : buffer.toString('base64'),
+   };
+   exportedCount++;
+   if (exportedCount >= VERIFIED_WORKSPACE_EXPORT_MAX_FILES) return;
+  }
+ };
+
+ if (existsSync(rootPath)) walk(rootPath);
+ return files;
+}
+
 // GET /admin/data-export — export ALL user data as a JSON bundle (GDPR Article 20)
 app.get('/admin/data-export', async (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
@@ -7493,6 +7544,21 @@ app.get('/admin/data-export', async (req, res) => {
    res.json(exportData);
  } catch (err) {
    res.status(500).json({ error: err.message });
+ }
+});
+
+app.get('/admin/workspace-export', (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+  const files = encodeVerifiedWorkspaceFiles();
+  res.json({
+   ok: true,
+   root: VERIFIED_WORKSPACE_EXPORT_ROOT,
+   count: Object.keys(files).length,
+   files,
+  });
+ } catch (err) {
+  res.status(500).json({ error: err.message });
  }
 });
 
