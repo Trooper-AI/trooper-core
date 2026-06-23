@@ -9,6 +9,7 @@ process.on('unhandledRejection', (err) => {
 // Connects to OpenClaw gateway via persistent WebSocket for full agent capabilities
 // (workspace files, tools, memory, session persistence, sub-agent spawning)
 import { captureLog, recordRun, getLogs, getStats } from './lib/log-buffer.mjs';
+import { withGatewayAttachments } from './lib/gateway-attachments.mjs';
 import express from 'express';
 import {
   BRIDGE_EVENT_PAYLOAD_VERSION,
@@ -2287,15 +2288,14 @@ class OpenClawGateway {
 
  this.ws.send(JSON.stringify({
  type: 'req', id, method: 'agent',
- params: {
+ params: withGatewayAttachments({
  message, sessionKey, idempotencyKey,
  agentId: opts.agentId || undefined,
  thinking: selectedThinking || undefined,
  model: explicitModel || undefined,
  extraSystemPrompt: opts.extraSystemPrompt || undefined,
- ...(Array.isArray(opts.attachments) && opts.attachments.length > 0 ? { attachments: opts.attachments } : {}),
  deliver: false,
- },
+ }, opts.attachments),
  }));
 
  console.log(`[OpenClaw] Agent request sent (session=${sessionKey})`);
@@ -3288,15 +3288,14 @@ function extractPatchFilePaths(patchText = '') {
  thinking: selectedThinking || undefined,
  timeoutMs,
  }
- : {
+ : withGatewayAttachments({
  message, sessionKey, idempotencyKey,
  agentId: opts.agentId || undefined,
  thinking: selectedThinking || undefined,
  model: explicitModel || undefined,
  extraSystemPrompt: opts.extraSystemPrompt || undefined,
- ...(Array.isArray(opts.attachments) && opts.attachments.length > 0 ? { attachments: opts.attachments } : {}),
  deliver: false,
- };
+ }, opts.attachments);
  this.ws.send(JSON.stringify({
  type: 'req', id, method,
  params,
@@ -5187,7 +5186,7 @@ async function handleIncomingTask(req, res) {
  thinking: thinking || undefined,
  model: nonStreamModel,
  extraSystemPrompt: nonStreamSystemPrompt,
- attachments: Array.isArray(attachments) && attachments.length > 0 ? attachments : undefined,
+ attachments,
  timeoutMs: 0,
  };
  let result;
@@ -5521,7 +5520,7 @@ const emitViewportScreenshotFrame = ({
  thinking: thinking || undefined,
  model: streamingExplicitModel || undefined,
  extraSystemPrompt: resolvedSystemPrompt,
- attachments: Array.isArray(attachments) && attachments.length > 0 ? attachments : undefined,
+ attachments,
  timeoutMs: inactivityMs,
  projectFolder,
  steer: req.body?.steer === true || context?.steer === true,
