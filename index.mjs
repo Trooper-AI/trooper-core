@@ -2293,6 +2293,7 @@ class OpenClawGateway {
  thinking: selectedThinking || undefined,
  model: explicitModel || undefined,
  extraSystemPrompt: opts.extraSystemPrompt || undefined,
+ ...(Array.isArray(opts.attachments) && opts.attachments.length > 0 ? { attachments: opts.attachments } : {}),
  deliver: false,
  },
  }));
@@ -3293,6 +3294,7 @@ function extractPatchFilePaths(patchText = '') {
  thinking: selectedThinking || undefined,
  model: explicitModel || undefined,
  extraSystemPrompt: opts.extraSystemPrompt || undefined,
+ ...(Array.isArray(opts.attachments) && opts.attachments.length > 0 ? { attachments: opts.attachments } : {}),
  deliver: false,
  };
  this.ws.send(JSON.stringify({
@@ -5096,7 +5098,7 @@ function ensureSkillCredentials(skillCredentials) {
 // ── Core Task Handler (JSON — backward compatible) ───────────────────
 async function handleIncomingTask(req, res) {
  const { requestId, task, type, source, agentName, context,
- agentContext, systemPrompt, installedSkills, skillCredentials, thinking, model, timestamp,
+ agentContext, systemPrompt, installedSkills, skillCredentials, thinking, model, timestamp, attachments,
  callbackUrl } = req.body;
  if (!task) return res.status(400).json({ error: 'Missing task' });
 
@@ -5185,6 +5187,7 @@ async function handleIncomingTask(req, res) {
  thinking: thinking || undefined,
  model: nonStreamModel,
  extraSystemPrompt: nonStreamSystemPrompt,
+ attachments: Array.isArray(attachments) && attachments.length > 0 ? attachments : undefined,
  timeoutMs: 0,
  };
  let result;
@@ -5244,7 +5247,7 @@ async function handleIncomingTask(req, res) {
 // POST /webhook/mission-control/stream
 // Returns Server-Sent Events: tool_start, tool_result, text, thinking, done, error
 async function handleIncomingTaskStream(req, res) {
- const { requestId, task, agentName, context, systemPrompt, installedSkills, skillCredentials, thinking, model } = req.body;
+ const { requestId, task, agentName, context, systemPrompt, installedSkills, skillCredentials, thinking, model, attachments } = req.body;
  if (!task) return res.status(400).json({ error: 'Missing task' });
 
  const id = requestId || `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -5518,6 +5521,7 @@ const emitViewportScreenshotFrame = ({
  thinking: thinking || undefined,
  model: streamingExplicitModel || undefined,
  extraSystemPrompt: resolvedSystemPrompt,
+ attachments: Array.isArray(attachments) && attachments.length > 0 ? attachments : undefined,
  timeoutMs: inactivityMs,
  projectFolder,
  steer: req.body?.steer === true || context?.steer === true,
