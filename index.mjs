@@ -381,6 +381,17 @@ function buildToolSummary(tool, params, skillName, rawText) {
  }
 }
 
+function previewString(value, max = 500) {
+ if (typeof value === 'string') return value.length > max ? value.substring(0, max) : value;
+ if (value == null) return '';
+ try {
+  const json = JSON.stringify(value);
+  if (typeof json === 'string') return json.length > max ? json.substring(0, max) : json;
+ } catch {}
+ const fallback = String(value);
+ return fallback.length > max ? fallback.substring(0, max) : fallback;
+}
+
 function buildExecApprovalRecord(payload = {}) {
   const request = payload?.request || {};
   const plan = request?.systemRunPlan || {};
@@ -2260,7 +2271,7 @@ class OpenClawGateway {
  const last = toolCalls[toolCalls.length - 1];
  if (last && last.status === 'called') {
  last.status = data.is_error ? 'failed' : 'ok';
- last.summary = typeof data.content === 'string' ? data.content : (data.output || '');
+ last.summary = previewString(data.content ?? data.output ?? data.result ?? data.summary, 500);
  }
  }
  });
@@ -2818,7 +2829,7 @@ class OpenClawGateway {
  tool: data.name || 'unknown',
  toolCallId: data.id || data.toolCallId || undefined,
  success: !data.is_error,
- summary,
+ summary: previewString(summary, 500),
  subAgentRunId: runId,
  parentRunId: subInfo.parentRunId,
  depth: subInfo.depth,
@@ -3119,7 +3130,7 @@ function extractPatchFilePaths(patchText = '') {
  last.durationMs = Date.now() - (last.startedAt || Date.now());
  // Larger summary limit for exec (show command output) and sessions_spawn (show sub-agent result)
  const summaryLimit = (last.tool === 'exec' || last.tool === 'sessions_spawn') ? 2000 : 500;
- last.summary = typeof data.content === 'string' ? data.content.substring(0, summaryLimit) : (data.output || '').substring(0, summaryLimit);
+ last.summary = previewString(data.content ?? data.output ?? data.result ?? data.summary, summaryLimit);
  if (_projectFolder && !data.is_error) {
  const toolLower = String(last.tool || '').toLowerCase();
  if (toolLower === 'write' || toolLower === 'edit') {
@@ -3414,7 +3425,7 @@ function extractPatchFilePaths(patchText = '') {
  const resultText = result?.result?.payloads?.map(p => p.text).filter(Boolean).join('\n\n');
  console.log(`[OpenClaw:DBG] final result keys:`, JSON.stringify(Object.keys(result?.result || {})));
  console.log(`[OpenClaw:DBG] payloads sample:`, JSON.stringify((result?.result?.payloads || []).slice(0,5).map(p => Object.keys(p))));
- console.log(`[OpenClaw:DBG] full result snippet:`, JSON.stringify(result?.result).substring(0, 800));
+ console.log(`[OpenClaw:DBG] full result snippet:`, previewString(result?.result, 800));
  let response = resultText || textChunks.join('') || null;
 
  // Check for new screenshots created during this agent run — convert to base64 data URIs
