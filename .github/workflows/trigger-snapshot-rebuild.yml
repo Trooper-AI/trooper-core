@@ -73,6 +73,7 @@ jobs:
               event_type: "snapshot-rebuild",
               client_payload: {
                 openclaw_bridge_sha: $sha,
+                auto_promote: true,
                 triggered_by: $trigger,
                 source_repo: "openclawbridge"
               }
