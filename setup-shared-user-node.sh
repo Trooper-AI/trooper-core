@@ -31,7 +31,7 @@ if [ ! -f "${ENV_FILE}" ]; then
 # TROOPER_SHARED_NODE_PUBLIC_URL=
 # RUNTIME_AUTH_SECRET=
 # MISSION_CONTROL_URL=
-# OPENCLAW_DOCKER_IMAGE=ghcr.io/absurdfounder/trooper-gateway:latest
+# OPENCLAW_DOCKER_IMAGE=ghcr.io/trooper-ai/trooper-gateway:latest
 ENV
 fi
 chmod 600 "${ENV_FILE}" 2>/dev/null || true

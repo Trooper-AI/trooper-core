@@ -11341,7 +11341,7 @@ function buildOpenClawCapabilitiesPayload() {
    providerNativeReasoning: true,
   },
   image: {
-   customImage: process.env.OPENCLAW_DOCKER_IMAGE || 'ghcr.io/absurdfounder/trooper-gateway:latest',
+   customImage: process.env.OPENCLAW_DOCKER_IMAGE || 'ghcr.io/trooper-ai/trooper-gateway:latest',
    baseImage: 'ghcr.io/openclaw/openclaw:latest',
    rebuildRequiredForLatestBase: true,
   },

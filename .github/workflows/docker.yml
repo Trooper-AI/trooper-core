@@ -25,4 +25,4 @@ jobs:
         with:
           pull: true
           push: true
-          tags: ghcr.io/absurdfounder/trooper-gateway:latest
+          tags: ghcr.io/trooper-ai/trooper-gateway:latest

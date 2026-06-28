@@ -309,7 +309,7 @@ The bridge runs from source (Node.js files copied into Docker image).
 Ship as a **private Docker image** on GitHub Container Registry:
 
 ```
-ghcr.io/absurdfounder/trooper-gateway:latest    ← OpenClaw + Bridge combined
+ghcr.io/trooper-ai/trooper-gateway:latest    ← OpenClaw + Bridge combined
 ```
 
 This is already how it works. The image contains:

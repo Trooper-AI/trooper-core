@@ -59,7 +59,7 @@ if [ -z "$OPENCLAW_DOCKER_IMAGE" ] || echo "$OPENCLAW_DOCKER_IMAGE" | grep -q '{
     echo "FATAL: managed deployments require a digest-pinned OPENCLAW_DOCKER_IMAGE"
     exit 1
   fi
-  OPENCLAW_DOCKER_IMAGE="ghcr.io/absurdfounder/trooper-gateway:latest"
+  OPENCLAW_DOCKER_IMAGE="ghcr.io/trooper-ai/trooper-gateway:latest"
 fi
 if [ -z "$OPENCLAW_COMPANY_PROVIDER_KEYS" ] || echo "$OPENCLAW_COMPANY_PROVIDER_KEYS" | grep -q '{{.*}}'; then
   OPENCLAW_COMPANY_PROVIDER_KEYS="1"
@@ -398,7 +398,7 @@ DOCKER_PLATFORM="linux/amd64"
 if [ "$HOST_ARCH" = "aarch64" ] || [ "$HOST_ARCH" = "arm64" ]; then
  DOCKER_PLATFORM="linux/arm64"
 fi
-OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/absurdfounder/trooper-gateway:latest}"
+OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/trooper-ai/trooper-gateway:latest}"
 
 if [ "$FROM_SNAPSHOT" = "1" ]; then
   # Image already cached on snapshot — just re-tag it
@@ -406,7 +406,7 @@ if [ "$FROM_SNAPSHOT" = "1" ]; then
   if [ "$TROOPER_MANAGED_DEPLOYMENT" = "1" ]; then
     docker tag "${OPENCLAW_DOCKER_IMAGE}" openclaw:local
   else
-    docker tag "${OPENCLAW_DOCKER_IMAGE}" openclaw:local 2>/dev/null || docker tag ghcr.io/absurdfounder/trooper-gateway:latest openclaw:local
+    docker tag "${OPENCLAW_DOCKER_IMAGE}" openclaw:local 2>/dev/null || docker tag ghcr.io/trooper-ai/trooper-gateway:latest openclaw:local
   fi
   echo "IMAGE_READY=true" > /tmp/docker-pull-status
   DOCKER_PULL_PID=""
