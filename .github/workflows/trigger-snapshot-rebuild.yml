@@ -1,6 +1,6 @@
 name: Trigger Snapshot Rebuild
 
-# Cross-repo trigger: when openclawbridge merges to main or its gateway
+# Cross-repo trigger: when trooper-core merges to main or its gateway
 # Docker image rebuilds, fire a `repository_dispatch` event at trooper so
 # the snapshot pipeline picks up the new bridge SHA.
 #
@@ -12,15 +12,6 @@ name: Trigger Snapshot Rebuild
 #   OPENCLAWBRIDGE_DISPATCH_TOKEN flow on the trooper side.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'index.mjs'
-      - 'lib/**'
-      - 'setup-openclaw-full.sh'
-      - 'Dockerfile'
-      - 'package.json'
-      - 'package-lock.json'
   workflow_run:
     workflows: ['Build Gateway Image']
     types: [completed]
@@ -47,8 +38,11 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_run" ]; then
             SHA="${{ github.event.workflow_run.head_sha }}"
-          else
+          elif [ -n "${{ github.sha }}" ]; then
             SHA="${{ github.sha }}"
+          else
+            echo "::error::Could not resolve source commit SHA"
+            exit 1
           fi
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "Dispatching with bridge SHA $SHA"
@@ -75,7 +69,7 @@ jobs:
                 openclaw_bridge_sha: $sha,
                 auto_promote: true,
                 triggered_by: $trigger,
-                source_repo: "openclawbridge"
+                source_repo: "trooper-core"
               }
             }')"
           echo "Dispatched snapshot-rebuild for bridge SHA $BRIDGE_SHA"

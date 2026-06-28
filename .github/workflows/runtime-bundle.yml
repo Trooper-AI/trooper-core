@@ -21,7 +21,7 @@ jobs:
       RELEASE_TAG: org-runtime-latest
       ASSET_NAME: trooper-org-runtime.tar.gz
     steps:
-      - name: Checkout openclawbridge
+      - name: Checkout trooper-core
         uses: actions/checkout@v4
 
       - name: Download Trooper server source

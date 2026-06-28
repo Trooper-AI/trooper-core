@@ -26,3 +26,19 @@ jobs:
           pull: true
           push: true
           tags: ghcr.io/trooper-ai/trooper-gateway:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/Trooper-AI/trooper-core
+            org.opencontainers.image.description=Trooper OpenClaw gateway runtime
+      - name: Verify public GHCR pull
+        run: |
+          docker logout ghcr.io >/dev/null 2>&1 || true
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if docker manifest inspect ghcr.io/trooper-ai/trooper-gateway:latest >/dev/null 2>&1; then
+              echo "ghcr.io/trooper-ai/trooper-gateway:latest is anonymously pullable"
+              exit 0
+            fi
+            echo "Waiting for ghcr.io/trooper-ai/trooper-gateway:latest to become anonymously pullable ($attempt/12)..."
+            sleep 5
+          done
+          echo "::error::ghcr.io/trooper-ai/trooper-gateway:latest is not anonymously pullable. The Trooper-AI/trooper-core repo can be public while the GHCR package remains private; make the trooper-gateway package public before triggering snapshot builds."
+          exit 1

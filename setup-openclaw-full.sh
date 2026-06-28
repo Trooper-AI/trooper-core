@@ -2112,14 +2112,14 @@ rm -rf /opt/openclaw-bridge 2>/dev/null || true
 for _dl_attempt in 1 2 3; do
   if [ "$TROOPER_MANAGED_DEPLOYMENT" = "1" ]; then
     if git init -q /opt/openclaw-bridge \
-      && git -C /opt/openclaw-bridge remote add origin https://github.com/absurdfounder/trooper-bridge.git \
+      && git -C /opt/openclaw-bridge remote add origin https://github.com/Trooper-AI/trooper-core.git \
       && git -C /opt/openclaw-bridge fetch -q --depth 1 origin "$OPENCLAWBRIDGE_GIT_SHA" \
       && git -C /opt/openclaw-bridge checkout -q --detach FETCH_HEAD \
       && [ "$(git -C /opt/openclaw-bridge rev-parse HEAD)" = "${OPENCLAWBRIDGE_GIT_SHA,,}" ]; then
       dlog "Bridge cloned at ${OPENCLAWBRIDGE_GIT_SHA} ($(wc -c < /opt/openclaw-bridge/index.mjs) bytes)"
       break
     fi
-  elif git clone --depth 1 https://github.com/absurdfounder/trooper-bridge.git /opt/openclaw-bridge; then
+  elif git clone --depth 1 https://github.com/Trooper-AI/trooper-core.git /opt/openclaw-bridge; then
     dlog "Bridge cloned ($(wc -c < /opt/openclaw-bridge/index.mjs) bytes)"
     break
   fi
