@@ -975,12 +975,14 @@ function normalizeHistoryUsageMessage(entry = {}) {
  };
 }
 
-function summarizeHistoryUsage(messages = [], { sinceMs = 0 } = {}) {
+function summarizeHistoryUsage(messages = [], { sinceMs = 0, toMs = 0 } = {}) {
  const rows = [];
  const cutoff = Number.isFinite(Number(sinceMs)) ? Number(sinceMs) : 0;
+ const upperBound = Number.isFinite(Number(toMs)) && Number(toMs) > 0 ? Number(toMs) : 0;
  for (const entry of Array.isArray(messages) ? messages : []) {
   const timestamp = new Date(entry?.timestamp || entry?.message?.timestamp || 0).getTime();
   if (cutoff > 0 && timestamp && timestamp < cutoff) continue;
+  if (upperBound > 0 && timestamp && timestamp > upperBound) continue;
   const row = normalizeHistoryUsageMessage(entry);
   if (row) rows.push(row);
  }
@@ -1006,6 +1008,217 @@ function summarizeHistoryUsage(messages = [], { sinceMs = 0 } = {}) {
   callCount: rows.length,
   modelBreakdown: rows,
  };
+}
+
+function sessionTimestampMs(row = {}) {
+ const raw = row?.updatedAt || row?.lastActiveAt || row?.createdAt || row?.timestamp || null;
+ const numeric = Number(raw);
+ if (Number.isFinite(numeric) && numeric > 0) return Math.floor(numeric);
+ const parsed = Date.parse(String(raw || ''));
+ return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeUsageLogToken(value) {
+ const numeric = Number(value);
+ if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+ return Math.round(numeric);
+}
+
+function normalizeUsageLogContextTokens(...values) {
+ for (const value of values) {
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) return Math.round(numeric);
+ }
+ return null;
+}
+
+function normalizeRuntimeUsageModelBreakdown(rows = [], fallback = {}) {
+ return (Array.isArray(rows) ? rows : [])
+  .map((row) => {
+   if (!row || typeof row !== 'object') return null;
+   const model = row.model || fallback.model || null;
+   const provider = row.provider || fallback.provider || null;
+   const inputTokens = normalizeUsageLogToken(row.inputTokens ?? row.input_tokens ?? row.promptTokens ?? row.prompt_tokens);
+   const outputTokens = normalizeUsageLogToken(row.outputTokens ?? row.output_tokens ?? row.completionTokens ?? row.completion_tokens);
+   const cacheReadTokens = normalizeUsageLogToken(row.cacheReadTokens ?? row.cache_read_tokens ?? row.cacheRead ?? row.cache_read ?? row.cachedTokens ?? row.cached_tokens);
+   const cacheWriteTokens = normalizeUsageLogToken(row.cacheWriteTokens ?? row.cache_write_tokens ?? row.cacheWrite ?? row.cache_write);
+   const reasoningTokens = normalizeUsageLogToken(row.reasoningTokens ?? row.reasoning_tokens ?? row.thinkingTokens ?? row.thinking_tokens);
+   const contextTokens = normalizeUsageLogContextTokens(
+    row.contextTokens,
+    row.context_tokens,
+    row.contextWindowTokens,
+    row.context_window_tokens,
+   );
+   const totalTokens = normalizeUsageLogToken(
+    row.totalTokens
+    ?? row.total_tokens
+    ?? row.total
+    ?? (inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens)
+   );
+   const costUsd = roundUsageCost(
+    row.costUsd
+    ?? row.cost_usd
+    ?? row.totalCost
+    ?? row.total_cost
+    ?? row.cost?.total
+    ?? row.cost?.totalUsd
+    ?? row.cost?.total_usd
+   );
+   if (!model && !provider && !totalTokens && !contextTokens && !costUsd) return null;
+   return {
+    model,
+    provider,
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    reasoningTokens,
+    contextTokens,
+    costUsd,
+    source: row.source || fallback.source || 'session_history',
+   };
+  })
+  .filter(Boolean);
+}
+
+function buildRuntimeUsageEntry(session = {}, historyUsage = null) {
+ const sessionKey = String(session?.key || session?.sessionKey || session?.sessionId || '').trim();
+ if (!sessionKey) return null;
+ const runtimeRunId = String(session?.sessionId || sessionKey).trim() || sessionKey;
+ const responseUsage = session?.responseUsage && typeof session.responseUsage === 'object'
+  ? session.responseUsage
+  : {};
+ const atMs = sessionTimestampMs(session);
+ const model = session?.model || historyUsage?.modelBreakdown?.[0]?.model || null;
+ const provider = session?.modelProvider || historyUsage?.modelBreakdown?.[0]?.provider || null;
+ const inputTokens = firstPositiveUsageNumber(
+  historyUsage?.input_tokens,
+  historyUsage?.inputTokens,
+  responseUsage.input_tokens,
+  responseUsage.inputTokens,
+  responseUsage.prompt_tokens,
+  responseUsage.promptTokens,
+ );
+ const outputTokens = firstPositiveUsageNumber(
+  historyUsage?.output_tokens,
+  historyUsage?.outputTokens,
+  responseUsage.output_tokens,
+  responseUsage.outputTokens,
+  responseUsage.completion_tokens,
+  responseUsage.completionTokens,
+ );
+ const cacheReadTokens = firstPositiveUsageNumber(
+  historyUsage?.cache_read_tokens,
+  historyUsage?.cacheReadTokens,
+  responseUsage.cache_read_tokens,
+  responseUsage.cacheReadTokens,
+  responseUsage.cacheRead,
+  responseUsage.cachedTokens,
+ );
+ const cacheWriteTokens = firstPositiveUsageNumber(
+  historyUsage?.cache_write_tokens,
+  historyUsage?.cacheWriteTokens,
+  responseUsage.cache_write_tokens,
+  responseUsage.cacheWriteTokens,
+  responseUsage.cacheWrite,
+ );
+ const reasoningTokens = firstPositiveUsageNumber(
+  historyUsage?.reasoning_tokens,
+  historyUsage?.reasoningTokens,
+  responseUsage.reasoning_tokens,
+  responseUsage.reasoningTokens,
+  responseUsage.thinking_tokens,
+  responseUsage.thinkingTokens,
+ );
+ const contextTokens = normalizeUsageLogContextTokens(
+  session?.contextTokens,
+  responseUsage.context_window_tokens,
+  responseUsage.contextWindowTokens,
+  responseUsage.contextTokens,
+ );
+ const totalTokens = firstPositiveUsageNumber(
+  historyUsage?.total_tokens,
+  historyUsage?.totalTokens,
+  responseUsage.total_tokens,
+  responseUsage.totalTokens,
+  session?.totalTokens,
+  inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+ );
+ const costUsd = roundUsageCost(
+  historyUsage?.costUsd
+  ?? historyUsage?.cost_usd
+  ?? usageCostFromPayload(responseUsage)
+ );
+ const modelBreakdown = normalizeRuntimeUsageModelBreakdown(historyUsage?.modelBreakdown, {
+  model,
+  provider,
+  source: historyUsage?.source || 'session_history',
+ });
+ const fallbackBreakdown = (!modelBreakdown.length && (model || provider || totalTokens || contextTokens || costUsd))
+  ? [{
+    model,
+    provider,
+    inputTokens: normalizeUsageLogToken(inputTokens),
+    outputTokens: normalizeUsageLogToken(outputTokens),
+    totalTokens: normalizeUsageLogToken(totalTokens),
+    cacheReadTokens: normalizeUsageLogToken(cacheReadTokens),
+    cacheWriteTokens: normalizeUsageLogToken(cacheWriteTokens),
+    reasoningTokens: normalizeUsageLogToken(reasoningTokens),
+    contextTokens,
+    costUsd,
+    source: 'session_snapshot',
+   }]
+  : [];
+ const rows = modelBreakdown.length ? modelBreakdown : fallbackBreakdown;
+ if (!rows.length && !totalTokens && !contextTokens && !costUsd) return null;
+ return {
+  id: `openclaw-runtime:${runtimeRunId}:${atMs || 'unknown'}`,
+  at: atMs > 0 ? new Date(atMs).toISOString() : null,
+  runId: runtimeRunId,
+  sessionKey,
+  source: 'openclaw_runtime',
+  usageSource: historyUsage?.source || 'openclaw_runtime',
+  activityType: 'openclaw_runtime',
+  activityLabel: 'OpenClaw session',
+  model,
+  provider,
+  inputTokens: normalizeUsageLogToken(inputTokens),
+  outputTokens: normalizeUsageLogToken(outputTokens),
+  totalTokens: normalizeUsageLogToken(totalTokens),
+  cacheReadTokens: normalizeUsageLogToken(cacheReadTokens),
+  cacheWriteTokens: normalizeUsageLogToken(cacheWriteTokens),
+  reasoningTokens: normalizeUsageLogToken(reasoningTokens),
+  contextTokens,
+  costUsd,
+  callCount: Math.max(1, Number(historyUsage?.callCount) || rows.length || 1),
+  modelBreakdown: rows,
+ };
+}
+
+function summarizeRuntimeUsageEntries(entries = []) {
+ return (Array.isArray(entries) ? entries : []).reduce((acc, entry) => {
+  acc.requests += Math.max(0, Math.floor(Number(entry?.callCount) || 1));
+  acc.inputTokens += normalizeUsageLogToken(entry?.inputTokens);
+  acc.outputTokens += normalizeUsageLogToken(entry?.outputTokens);
+  acc.totalTokens += normalizeUsageLogToken(entry?.totalTokens);
+  acc.cacheReadTokens += normalizeUsageLogToken(entry?.cacheReadTokens);
+  acc.cacheWriteTokens += normalizeUsageLogToken(entry?.cacheWriteTokens);
+  acc.reasoningTokens += normalizeUsageLogToken(entry?.reasoningTokens);
+  acc.contextTokens = Math.max(acc.contextTokens, normalizeUsageLogToken(entry?.contextTokens));
+  acc.costUsd = roundUsageCost(acc.costUsd + roundUsageCost(entry?.costUsd));
+  return acc;
+ }, {
+  requests: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  totalTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  reasoningTokens: 0,
+  contextTokens: 0,
+  costUsd: 0,
+ });
 }
 
 function readOpenClawConfig() {
@@ -2444,19 +2657,102 @@ class OpenClawGateway {
   }
  }
 
- async fetchRunUsageFromHistory(sessionKey, { sinceMs = 0, limit = 250, timeoutMs = 5000, attempts = 3 } = {}) {
+ async fetchRunUsageFromHistory(sessionKey, { sinceMs = 0, toMs = 0, limit = 250, timeoutMs = 5000, attempts = 3 } = {}) {
   if (!sessionKey) return null;
   const tries = Math.max(1, Math.min(5, Number(attempts) || 3));
   for (let attempt = 0; attempt < tries; attempt += 1) {
    this._historyCache.delete(`${String(sessionKey || '').trim()}\0${Math.max(1, Number(limit) || 250)}`);
    const messages = await this.fetchSessionHistory(sessionKey, limit, { timeoutMs });
-   const usage = summarizeHistoryUsage(messages, { sinceMs });
+   const usage = summarizeHistoryUsage(messages, { sinceMs, toMs });
    if (usage?.modelBreakdown?.length) return usage;
    if (attempt < tries - 1) {
     await new Promise((resolve) => setTimeout(resolve, 500));
    }
   }
   return null;
+ }
+
+ async listUsageSessions({
+  limit = 200,
+  fromMs = 0,
+  toMs = 0,
+  historyLimit = 300,
+  maxHistorySessions = 60,
+  timeoutMs = 10000,
+  includeHistory = true,
+ } = {}) {
+  if (!this.connected) return [];
+  const normalizedLimit = Math.max(1, Math.min(500, Number(limit) || 200));
+  const normalizedHistoryLimit = Math.max(50, Math.min(500, Number(historyLimit) || 300));
+  const normalizedMaxHistorySessions = Math.max(0, Math.min(normalizedLimit, Number(maxHistorySessions) || 60));
+  const normalizedTimeoutMs = Math.max(1000, Math.min(30000, Number(timeoutMs) || 10000));
+  const lowerBound = Number.isFinite(Number(fromMs)) ? Math.max(0, Math.floor(Number(fromMs))) : 0;
+  const upperBound = Number.isFinite(Number(toMs)) ? Math.max(0, Math.floor(Number(toMs))) : 0;
+  const id = randomUUID();
+  try {
+   const result = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+     this._pendingRequests.delete(id);
+     reject(new Error('Usage session list timeout'));
+    }, normalizedTimeoutMs);
+    this._pendingRequests.set(id, {
+     resolve: (payload) => { clearTimeout(timeout); resolve(payload); },
+     reject: (err) => { clearTimeout(timeout); reject(err); },
+    });
+    this.ws.send(JSON.stringify({
+     type: 'req',
+     id,
+     method: 'sessions.list',
+     params: {
+      limit: normalizedLimit,
+      includeDerivedTitles: true,
+     },
+    }));
+   });
+   const rows = Array.isArray(result?.sessions)
+    ? result.sessions
+    : Array.isArray(result?.rows)
+      ? result.rows
+      : Array.isArray(result)
+        ? result
+        : [];
+   const filtered = rows.filter((row) => {
+    const atMs = sessionTimestampMs(row);
+    if (lowerBound > 0 && atMs > 0 && atMs < lowerBound) return false;
+    if (upperBound > 0 && atMs > 0 && atMs > upperBound) return false;
+    return true;
+   });
+   const rowsWithHistory = new Set(
+    filtered
+     .slice()
+     .sort((left, right) => sessionTimestampMs(right) - sessionTimestampMs(left))
+     .slice(0, normalizedMaxHistorySessions)
+     .map((row) => row?.key)
+     .filter(Boolean),
+   );
+   const entries = await Promise.all(filtered.map(async (row) => {
+    let historyUsage = null;
+    if (includeHistory && row?.key && rowsWithHistory.has(row.key)) {
+     historyUsage = await this.fetchRunUsageFromHistory(row.key, {
+      sinceMs: lowerBound,
+      toMs: upperBound,
+      limit: normalizedHistoryLimit,
+      timeoutMs: Math.min(5000, normalizedTimeoutMs),
+      attempts: 2,
+     });
+    }
+    return buildRuntimeUsageEntry(row, historyUsage);
+   }));
+   return entries
+    .filter(Boolean)
+    .sort((left, right) => sessionTimestampMs({ updatedAt: right?.at }) - sessionTimestampMs({ updatedAt: left?.at }))
+    .slice(0, normalizedLimit);
+  } catch (err) {
+   console.error('[OpenClaw] listUsageSessions error:', err.message);
+   return [];
+  } finally {
+   this._pendingRequests.delete(id);
+  }
  }
 
  async abortSession(sessionKey, opts = {}) {
@@ -12528,6 +12824,49 @@ app.get('/api/session-tool-events', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+app.get('/api/usage-log', async (req, res) => {
+ try {
+  const rangeDaysRaw = String(req.query.rangeDays || '7').trim().toLowerCase();
+  const rangeDays = rangeDaysRaw === 'all' ? 'all' : Math.max(1, Math.min(3650, Math.floor(Number(rangeDaysRaw) || 7)));
+  const parseWindowValue = (value) => {
+   if (value == null || value === '') return null;
+   const numeric = Number(value);
+   if (Number.isFinite(numeric) && numeric > 0) return Math.floor(numeric);
+   const parsed = Date.parse(String(value));
+   return Number.isFinite(parsed) ? parsed : null;
+  };
+  const now = Date.now();
+  const fromMs = parseWindowValue(req.query.fromMs ?? req.query.from)
+   ?? (rangeDays === 'all' ? 0 : (now - (rangeDays * 24 * 60 * 60 * 1000)));
+  const toMs = parseWindowValue(req.query.toMs ?? req.query.to) ?? now;
+  const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 200));
+  const historyLimit = Math.max(50, Math.min(500, Number(req.query.historyLimit) || 300));
+  const maxHistorySessions = Math.max(0, Math.min(limit, Number(req.query.maxHistorySessions) || 60));
+  const includeHistory = String(req.query.includeHistory || 'true').trim().toLowerCase() !== 'false';
+  const entries = await gateway.listUsageSessions({
+   fromMs,
+   toMs,
+   limit,
+   historyLimit,
+   maxHistorySessions,
+   includeHistory,
+  });
+  res.set('Cache-Control', 'no-store');
+  res.json({
+   ok: true,
+   source: 'openclaw_runtime',
+   limit,
+   rangeDays,
+   fromMs,
+   toMs,
+   entries,
+   totals: summarizeRuntimeUsageEntries(entries),
+  });
+ } catch (e) {
+  res.status(500).json({ error: e.message });
+ }
 });
 
 app.get('/debug/agent-context', (req, res) => {
