@@ -1784,7 +1784,8 @@ When you do need answers, prepare a compact set of high-leverage questions using
 </confirm_doubts>
 
 Rules:
-- Use 1-5 questions max.
+- Use 1-4 questions per batch max.
+- If there are more unresolved decisions, ask the first 4 now, wait for answers, then ask the next batch of up to 4.
 - Each question should have 2-5 concrete options.
 - Add short parenthetical impact notes when they help the human answer.
 - Use "(choose one)" or "(choose any)" when needed.
