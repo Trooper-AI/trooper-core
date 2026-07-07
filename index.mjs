@@ -5354,12 +5354,44 @@ function getLocalGatewayModelProbeUrl(model) {
  const provider = getLocalGatewayModelProvider(model);
  if (!provider) return null;
  const providerConfig = readOpenClawConfig()?.models?.providers?.[provider] || {};
- const root = String(providerConfig.baseUrl || providerConfig.baseURL || providerConfig.url || '').trim().replace(/\/+$/, '');
+ let root = String(providerConfig.baseUrl || providerConfig.baseURL || providerConfig.url || '').trim().replace(/\/+$/, '');
+ if (!root) {
+  root = selfHealLocalProviderFromStoredSettings(provider, model);
+ }
  if (!root) {
   throw new Error(`Local model provider "${provider}" is not configured on this VPS. Reconnect the local model from the Trooper desktop app.`);
  }
  if (provider === 'ollama') return { provider, url: `${root}/api/tags` };
  return { provider, url: `${root.replace(/\/v1$/i, '')}/health` };
+}
+
+// Self-heal: openclaw.json can lose the local provider entry (implicit removals from
+// routing syncs, or a connect sync that failed after settings were saved) while this
+// bridge's own settings store still has the URL. Both live on this box, so repair
+// openclaw.json from the stored URL instead of failing the user's run.
+function selfHealLocalProviderFromStoredSettings(provider, model) {
+ try {
+  const storedKey = provider === 'ollama' ? 'ollamaBaseUrl' : 'localModelUrl';
+  const stored = String(readConfigKey(storedKey) || '').trim().replace(/\/+$/, '');
+  if (!stored) return '';
+  const selectedModels = model ? [normalizeGatewayModelId(model)] : [];
+  const config = readOpenClawConfig() || {};
+  if (!config.models) config.models = {};
+  if (!config.models.providers) config.models.providers = {};
+  const normalized = normalizeLocalProviderConfig(provider, { baseUrl: stored }, selectedModels);
+  config.models.providers[provider] = normalized;
+  writeOpenClawConfig(config);
+  try {
+   ensureSyntheticLocalAuthProfiles(provider === 'ollama' ? { ollamaProvider: normalized } : { localProvider: normalized });
+  } catch (authErr) {
+   console.warn(`[bridge] Local provider self-heal: auth profile update failed: ${authErr.message}`);
+  }
+  console.warn(`[bridge] Self-healed missing "${provider}" provider in openclaw.json from stored settings (${normalized.baseUrl || stored})`);
+  return String(normalized.baseUrl || stored).trim().replace(/\/+$/, '');
+ } catch (e) {
+  console.error(`[bridge] Local provider self-heal failed: ${e.message}`);
+  return '';
+ }
 }
 
 async function assertLocalGatewayModelReachable(model) {
