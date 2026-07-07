@@ -5394,6 +5394,97 @@ function selfHealLocalProviderFromStoredSettings(provider, model) {
  }
 }
 
+function collectStoredLocalProviderModels(provider) {
+ const providerModels = readConfigKey('providerModels') || {};
+ const modelRouting = readConfigKey('modelRouting') || {};
+ const modelRoutingFallbacks = readConfigKey('modelRoutingFallbacks') || {};
+ const selected = [];
+ const push = (value, assumeProvider = false) => {
+  if (value === undefined || value === null) return;
+  if (Array.isArray(value)) {
+   for (const item of value) push(item, assumeProvider);
+   return;
+  }
+  const raw = String(
+   typeof value === 'object' && value
+    ? (value.id || value.model || value.name || '')
+    : value
+  ).trim();
+  if (!raw) return;
+  if (modelBelongsToLocalProvider(raw, provider)) {
+   selected.push(raw);
+  } else if (assumeProvider && !raw.includes('/')) {
+   selected.push(`${provider}/${raw}`);
+  }
+ };
+
+ push(providerModels?.[provider], true);
+ push(readConfigKey('defaultModel'));
+ push(readConfigKey('composerChatModel'));
+ push(modelRouting?.chat);
+ push(modelRouting?.reasoning);
+ push(modelRouting?.chat_model);
+ push(modelRouting?.chatModel);
+ push(modelRoutingFallbacks?.chat);
+ push(modelRoutingFallbacks?.reasoning);
+ return [...new Set(selected)];
+}
+
+function syncStoredLocalProviderConfigToOpenClaw(reason = 'provider-settings') {
+ const localModelUrl = String(readConfigKey('localModelUrl') || '').trim().replace(/\/+$/, '');
+ const ollamaBaseUrl = String(readConfigKey('ollamaBaseUrl') || '').trim().replace(/\/+$/, '');
+ if (!localModelUrl && !ollamaBaseUrl) return false;
+
+ const config = readOpenClawConfig() || {};
+ if (!config.models) config.models = {};
+ if (!config.models.providers) config.models.providers = {};
+
+ let changed = false;
+ let localProvider = null;
+ let ollamaProvider = null;
+
+ if (localModelUrl) {
+  localProvider = normalizeLocalProviderConfig(
+   'local-llamacpp',
+   { baseUrl: localModelUrl },
+   collectStoredLocalProviderModels('local-llamacpp')
+  );
+  if (JSON.stringify(config.models.providers['local-llamacpp'] || null) !== JSON.stringify(localProvider)) {
+   config.models.providers['local-llamacpp'] = localProvider;
+   changed = true;
+  }
+ }
+
+ if (ollamaBaseUrl) {
+  ollamaProvider = normalizeLocalProviderConfig(
+   'ollama',
+   { baseUrl: ollamaBaseUrl },
+   collectStoredLocalProviderModels('ollama')
+  );
+  if (JSON.stringify(config.models.providers.ollama || null) !== JSON.stringify(ollamaProvider)) {
+   config.models.providers.ollama = ollamaProvider;
+   changed = true;
+  }
+ }
+
+ if (changed) {
+  writeOpenClawConfig(config);
+  const providers = [
+   localProvider ? `local-llamacpp=${localProvider.baseUrl}` : null,
+   ollamaProvider ? `ollama=${ollamaProvider.baseUrl}` : null,
+  ].filter(Boolean).join(', ');
+  console.log(`[bridge] Synced stored local provider config to openclaw.json from ${reason}: ${providers}`);
+ }
+
+ try {
+  ensureSyntheticLocalAuthProfiles({ localProvider, ollamaProvider });
+ } catch (authErr) {
+  console.warn(`[bridge] Local provider auth profile sync failed from ${reason}: ${authErr.message}`);
+ }
+
+ return changed;
+}
+
 async function assertLocalGatewayModelReachable(model) {
  if (!isLocalGatewayModel(model)) return;
  const probe = getLocalGatewayModelProbeUrl(model);
@@ -12528,6 +12619,21 @@ app.put('/config/provider-settings', (req, res) => {
   if (chatThinkingLevel !== undefined) writeConfigKey('chatThinkingLevel', chatThinkingLevel || 'auto');
   if (localModelUrl !== undefined) writeConfigKey('localModelUrl', String(localModelUrl || '').trim().replace(/\/+$/, ''));
   if (ollamaBaseUrl !== undefined) writeConfigKey('ollamaBaseUrl', String(ollamaBaseUrl || '').trim().replace(/\/+$/, ''));
+  if (
+   localModelUrl !== undefined ||
+   ollamaBaseUrl !== undefined ||
+   providerModels !== undefined ||
+   defaultModel !== undefined ||
+   composerChatModel !== undefined ||
+   modelRouting !== undefined ||
+   modelRoutingFallbacks !== undefined
+  ) {
+   try {
+    syncStoredLocalProviderConfigToOpenClaw('provider-settings-write');
+   } catch (e) {
+    console.warn(`[bridge] Local provider settings sync failed during provider-settings write: ${e.message}`);
+   }
+  }
   if (modelRouting !== undefined || modelRoutingFallbacks !== undefined) {
    try {
     syncStoredMediaGenerationRoutingToOpenClawConfig('provider-settings-write');
