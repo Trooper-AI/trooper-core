@@ -12615,10 +12615,10 @@ app.put('/config/provider-settings', (req, res) => {
   if (modelRoutingFallbacks !== undefined) writeConfigKey('modelRoutingFallbacks', modelRoutingFallbacks);
   if (pendingBridgeApply !== undefined) writeConfigKey('pendingBridgeApply', pendingBridgeApply);
   if (defaultModel !== undefined) writeConfigKey('defaultModel', defaultModel);
-  if (composerChatModel !== undefined) writeConfigKey('composerChatModel', composerChatModel || null);
-  if (chatThinkingLevel !== undefined) writeConfigKey('chatThinkingLevel', chatThinkingLevel || 'auto');
-  if (localModelUrl !== undefined) writeConfigKey('localModelUrl', String(localModelUrl || '').trim().replace(/\/+$/, ''));
-  if (ollamaBaseUrl !== undefined) writeConfigKey('ollamaBaseUrl', String(ollamaBaseUrl || '').trim().replace(/\/+$/, ''));
+	  if (composerChatModel !== undefined) writeConfigKey('composerChatModel', composerChatModel || null);
+	  if (chatThinkingLevel !== undefined) writeConfigKey('chatThinkingLevel', chatThinkingLevel || 'auto');
+	  if (localModelUrl !== undefined) writeConfigKey('localModelUrl', String(localModelUrl || '').trim().replace(/\/+$/, ''));
+	  if (ollamaBaseUrl !== undefined) writeConfigKey('ollamaBaseUrl', String(ollamaBaseUrl || '').trim().replace(/\/+$/, ''));
   if (
    localModelUrl !== undefined ||
    ollamaBaseUrl !== undefined ||
@@ -12634,12 +12634,12 @@ app.put('/config/provider-settings', (req, res) => {
     console.warn(`[bridge] Local provider settings sync failed during provider-settings write: ${e.message}`);
    }
   }
-  if (modelRouting !== undefined || modelRoutingFallbacks !== undefined) {
-   try {
-    syncStoredMediaGenerationRoutingToOpenClawConfig('provider-settings-write');
-   } catch (e) {
-    console.warn(`[bridge] Media generation routing sync failed during provider-settings write: ${e.message}`);
-   }
+	  if (modelRouting !== undefined || modelRoutingFallbacks !== undefined) {
+	   try {
+	    syncStoredMediaGenerationRoutingToOpenClawConfig('provider-settings-write');
+	   } catch (e) {
+	    console.warn(`[bridge] Media generation routing sync failed during provider-settings write: ${e.message}`);
+	   }
   }
   res.json({ ok: true });
  } catch (err) {
