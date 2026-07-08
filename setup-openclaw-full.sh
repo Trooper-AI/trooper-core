@@ -48,6 +48,9 @@ OPENCLAW_COMPANY_PROVIDER_KEYS="$(_resolve_input "${OPENCLAW_COMPANY_PROVIDER_KE
 TROOPER_RUNTIME_TARBALL_URL="$(_resolve_input "${TROOPER_RUNTIME_TARBALL_URL:-}" "{{TROOPER_RUNTIME_TARBALL_URL}}")"
 TROOPER_RUNTIME_TARBALL_SHA256="$(_resolve_input "${TROOPER_RUNTIME_TARBALL_SHA256:-}" "{{TROOPER_RUNTIME_TARBALL_SHA256}}")"
 OPENCLAWBRIDGE_GIT_SHA="$(_resolve_input "${OPENCLAWBRIDGE_GIT_SHA:-}" "{{OPENCLAWBRIDGE_GIT_SHA}}")"
+TAILSCALE_AUTH_KEY="$(_resolve_input "${TAILSCALE_AUTH_KEY:-}" "{{TAILSCALE_AUTH_KEY}}")"
+TAILSCALE_HOSTNAME="$(_resolve_input "${TAILSCALE_HOSTNAME:-}" "{{TAILSCALE_HOSTNAME}}")"
+TAILSCALE_TAGS="$(_resolve_input "${TAILSCALE_TAGS:-}" "{{TAILSCALE_TAGS}}")"
 TROOPER_RUNTIME_PORT=3101
 TROOPER_RUNTIME_DATA_DIR=/var/lib/trooper-org-runtime
 TROOPER_MANAGED_DEPLOYMENT="${TROOPER_MANAGED_DEPLOYMENT:-0}"
@@ -106,6 +109,9 @@ _validate_var RUNTIME_AUTH_SECRET "$RUNTIME_AUTH_SECRET" optional
 _validate_var TROOPER_RUNTIME_TARBALL_URL "$TROOPER_RUNTIME_TARBALL_URL" optional
 _validate_var TROOPER_RUNTIME_TARBALL_SHA256 "$TROOPER_RUNTIME_TARBALL_SHA256" optional
 _validate_var OPENCLAWBRIDGE_GIT_SHA "$OPENCLAWBRIDGE_GIT_SHA" optional
+_validate_var TAILSCALE_AUTH_KEY "$TAILSCALE_AUTH_KEY" optional
+_validate_var TAILSCALE_HOSTNAME "$TAILSCALE_HOSTNAME" optional
+_validate_var TAILSCALE_TAGS "$TAILSCALE_TAGS" optional
 
 if [ "$TROOPER_MANAGED_DEPLOYMENT" = "1" ]; then
   if [ -z "$BRIDGE_AUTH_TOKEN" ]; then
@@ -397,6 +403,43 @@ chmod 1777 /var/run/openclaw
 [ -n "${SWAP_PID:-}" ] && wait $SWAP_PID 2>/dev/null || true
 
 fi # end FROM_SNAPSHOT != 1 (Docker + Node + Caddy install)
+
+configure_tailscale_transport() {
+ mkdir -p "$TROOPER_RUNTIME_DATA_DIR"
+ local state_path="$TROOPER_RUNTIME_DATA_DIR/tailscale-status.json"
+ if [ -z "${TAILSCALE_AUTH_KEY:-}" ]; then
+  echo '{"enabled":false,"reason":"auth_key_not_provided"}' > "$state_path"
+  dlog "Tailscale local-model transport disabled (no auth key provided)" "installing"
+  return 0
+ fi
+
+ dlog "Configuring Tailscale local-model transport" "installing"
+ if ! command -v tailscale >/dev/null 2>&1; then
+  curl -fsSL https://tailscale.com/install.sh | sh
+ fi
+ systemctl enable --now tailscaled >/dev/null 2>&1 || true
+
+ local org_short hostname err ip
+ org_short="$(printf '%s' "$ORG_ID" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-' | cut -c1-24)"
+ hostname="${TAILSCALE_HOSTNAME:-trooper-${org_short:-vps}}"
+ local args=(up "--auth-key=${TAILSCALE_AUTH_KEY}" "--hostname=${hostname}" "--accept-routes=false" "--ssh=false")
+ if [ -n "${TAILSCALE_TAGS:-}" ]; then
+  args+=("--advertise-tags=${TAILSCALE_TAGS}")
+ fi
+ if ! tailscale "${args[@]}" >/tmp/trooper-tailscale-up.log 2>&1; then
+  err="$(tail -n 20 /tmp/trooper-tailscale-up.log 2>/dev/null | tr '\n' ' ' | sed 's/"/\\"/g')"
+  printf '{"enabled":true,"ready":false,"error":"%s"}\n' "${err:-tailscale up failed}" > "$state_path"
+  dlog "Tailscale join failed; local user-device models will need reconnect" "installing"
+  echo "[tailscale] WARNING: ${err:-tailscale up failed}"
+  return 0
+ fi
+
+ ip="$(tailscale ip -4 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
+ printf '{"enabled":true,"ready":true,"ip":"%s","hostname":"%s"}\n' "$ip" "$hostname" > "$state_path"
+ dlog "Tailscale ready for local-model transport (${ip:-pending-ip})" "installing"
+}
+
+configure_tailscale_transport || true
 
 # ── Start Docker image pull in BACKGROUND (biggest bottleneck: 2-3 GB download) ──
 # While the image downloads, we continue with config generation, git clone, etc.
