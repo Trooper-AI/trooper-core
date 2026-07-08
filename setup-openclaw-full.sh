@@ -2920,11 +2920,15 @@ if [ ! -f /opt/trooper-org-runtime/server/package.json ] || [ ! -f /opt/trooper-
   exit 1
 fi
 
-dlog "Installing Trooper org runtime dependencies..."
+dlog "Preparing Trooper org runtime dependencies..."
 cd /opt/trooper-org-runtime/server
-if [ -f package-lock.json ]; then
+if [ -f .trooper-runtime-node-modules-bundled ] && [ -d node_modules ]; then
+  dlog "Using bundled Trooper org runtime dependencies"
+elif [ -f package-lock.json ]; then
+  dlog "Installing Trooper org runtime dependencies..."
   npm ci --omit=dev >/tmp/trooper-org-runtime-npm.log 2>&1 || (tail -n 50 /tmp/trooper-org-runtime-npm.log; exit 1)
 else
+  dlog "Installing Trooper org runtime dependencies..."
   npm install --omit=dev >/tmp/trooper-org-runtime-npm.log 2>&1 || (tail -n 50 /tmp/trooper-org-runtime-npm.log; exit 1)
 fi
 cd /opt/openclaw

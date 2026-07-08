@@ -129,8 +129,13 @@ fs.writeFileSync(nextTargetPath, `${JSON.stringify({
 })}\n`, { mode: 0o600 });
 NODE
 
-echo "[update-org-runtime] Installing locked production dependencies..."
-(cd "$NEXT_DIR/server" && npm ci --omit=dev)
+echo "[update-org-runtime] Preparing locked production dependencies..."
+if [ -f "$NEXT_DIR/server/.trooper-runtime-node-modules-bundled" ] && [ -d "$NEXT_DIR/server/node_modules" ]; then
+  echo "[update-org-runtime] Using bundled production dependencies."
+else
+  echo "[update-org-runtime] Installing locked production dependencies..."
+  (cd "$NEXT_DIR/server" && npm ci --omit=dev)
+fi
 
 echo "[update-org-runtime] Activating staged runtime..."
 rm -rf "$PREVIOUS_DIR"
