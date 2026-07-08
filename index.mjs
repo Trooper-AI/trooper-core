@@ -88,6 +88,10 @@ import {
   updateWorkspaceSlotStatus,
 } from './lib/shared-workspace-slots.mjs';
 import { readBridgeVersion } from './lib/version-info.mjs';
+import {
+  configureTailscaleTransport,
+  readTailscaleTransportStatus,
+} from './lib/tailscale-transport.mjs';
 import { applyTelegramTokenToOpenClawConfig, buildTelegramEnvUpdates } from './lib/channel-config.mjs';
 import { hardenActiveMemoryConfigForBridge } from './lib/active-memory-config.mjs';
 import {
@@ -14275,6 +14279,28 @@ app.put('/config/auth-profiles', (req, res) => {
  res.json(response);
  } catch (err) {
  res.status(500).json({ error: err.message });
+ }
+});
+
+// ── Private local-model transport ────────────────────────────────────
+app.get('/transport/tailscale/status', (_req, res) => {
+ try {
+  res.json({ ok: true, ...readTailscaleTransportStatus() });
+ } catch (error) {
+  res.status(500).json({ ok: false, error: error.message });
+ }
+});
+
+app.put('/transport/tailscale', async (req, res) => {
+ try {
+  const status = await configureTailscaleTransport(req.body || {});
+  res.json({ ok: true, ...status });
+ } catch (error) {
+  console.warn(`[tailscale] VPS transport setup failed: ${error.message}`);
+  res.status(/required|hostname|tags|auth key/i.test(error.message) ? 400 : 502).json({
+   ok: false,
+   error: error.message,
+  });
  }
 });
 
