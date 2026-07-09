@@ -5363,10 +5363,20 @@ function getLocalGatewayModelProbeUrl(model) {
   root = selfHealLocalProviderFromStoredSettings(provider, model);
  }
  if (!root) {
-  throw new Error(`Local model provider "${provider}" is not configured on this VPS. Reconnect the local model from the Trooper desktop app.`);
+  throw new Error(
+   `Local model provider "${provider}" is not configured on this VPS. `
+   + 'On the Trooper Mac app open Local Models → Network, ensure both Mac and Server are on Tailscale, '
+   + 'then connect the chat model so OpenClaw receives the Mac URL.',
+  );
  }
  if (provider === 'ollama') return { provider, url: `${root}/api/tags` };
- return { provider, url: `${root.replace(/\/v1$/i, '')}/health` };
+ // Prefer OpenAI-compatible /v1/models (Trooper proxy + llama-server). Fall back to /health.
+ const stripped = root.replace(/\/v1$/i, '');
+ return {
+  provider,
+  url: `${root.endsWith('/v1') ? root : `${stripped}/v1`}/models`,
+  fallbackUrls: [`${stripped}/health`, `${root}/models`],
+ };
 }
 
 // Self-heal: openclaw.json can lose the local provider entry (implicit removals from
@@ -5493,16 +5503,29 @@ async function assertLocalGatewayModelReachable(model) {
  if (!isLocalGatewayModel(model)) return;
  const probe = getLocalGatewayModelProbeUrl(model);
  if (!probe?.url) return;
- let res;
- try {
-  res = await fetch(probe.url, { signal: AbortSignal.timeout(6000) });
- } catch (error) {
-  throw new Error(`Local model tunnel for ${probe.provider} is unreachable from this VPS. Restart/reconnect the local model in the Trooper desktop app, then select it again. (${error?.message || 'network error'})`);
+ const urls = [probe.url, ...(Array.isArray(probe.fallbackUrls) ? probe.fallbackUrls : [])]
+  .map((u) => String(u || '').trim())
+  .filter(Boolean)
+  .filter((u, i, arr) => arr.indexOf(u) === i);
+ let lastError = null;
+ for (const url of urls) {
+  try {
+   const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+   if (res.ok) return;
+   const text = await res.text().catch(() => '');
+   lastError = new Error(
+    `Local model tunnel for ${probe.provider} returned HTTP ${res.status}.${text ? ` ${text.slice(0, 180)}` : ''}`,
+   );
+  } catch (error) {
+   lastError = error;
+  }
  }
- if (!res.ok) {
-  const text = await res.text().catch(() => '');
-  throw new Error(`Local model tunnel for ${probe.provider} returned HTTP ${res.status}. Restart/reconnect the local model in the Trooper desktop app, then select it again.${text ? ` ${text.slice(0, 180)}` : ''}`);
- }
+ const detail = lastError?.message || 'network error';
+ throw new Error(
+  `Local model tunnel for ${probe.provider} is unreachable from this VPS. `
+  + 'Confirm: (1) Mac Local Models engine is running, (2) Tailscale Server is On tailnet '
+  + `(or Cloudflare tunnel is up), (3) reconnect the chat model from the Trooper desktop app. (${detail})`,
+ );
 }
 
 function resolveGatewayThinkingSelection(thinking, model, { explicitModel = null } = {}) {
