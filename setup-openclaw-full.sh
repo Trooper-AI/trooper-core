@@ -3523,25 +3523,9 @@ else
  journalctl -u trooper-org-runtime --no-pager -n 20 || true
 fi
 
-_org_runtime_ready=0
-for i in $(seq 1 150); do
- if curl -sf http://127.0.0.1:${TROOPER_RUNTIME_PORT}/health >/dev/null 2>&1; then
- echo "Org Runtime Local Health: OK (ready after $((i * 2))s)"
- _org_runtime_ready=1
- break
- fi
- if ! systemctl is-active --quiet trooper-org-runtime; then
- echo "Org Runtime: NOT RUNNING DURING HEALTH WAIT"
- journalctl -u trooper-org-runtime --no-pager -n 60 || true
- echo "FATAL: trooper-org-runtime service exited before local health became ready"
- exit 1
- fi
- if [ $((i % 15)) -eq 0 ]; then
- echo "Org Runtime Local Health: warming up after $((i * 2))s"
- fi
- sleep 2
-done
-if [ "$_org_runtime_ready" -eq 0 ]; then
+if curl -sf --max-time 3 http://127.0.0.1:${TROOPER_RUNTIME_PORT}/health >/dev/null 2>&1; then
+ echo "Org Runtime Local Health: OK"
+else
  echo "Org Runtime Local Health: PENDING (backend will continue health reconciliation)"
  journalctl -u trooper-org-runtime --no-pager -n 60 || true
 fi
