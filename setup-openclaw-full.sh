@@ -3592,6 +3592,32 @@ else
 fi
 
 if [ "${TROOPER_SNAPSHOT_BUILD:-0}" = "1" ]; then
+  verify_snapshot_bake_artifacts() {
+    echo "[setup] Verifying snapshot fast-boot artifacts..."
+    test -d /opt/openclaw || { echo "FATAL: snapshot bake missing /opt/openclaw"; exit 1; }
+    test -f /opt/openclaw/docker-compose.yml || { echo "FATAL: snapshot bake missing /opt/openclaw/docker-compose.yml"; exit 1; }
+    test -s /opt/openclaw-bridge/index.mjs || { echo "FATAL: snapshot bake missing /opt/openclaw-bridge/index.mjs"; exit 1; }
+    test -f /opt/openclaw-bridge/package.json || { echo "FATAL: snapshot bake missing /opt/openclaw-bridge/package.json"; exit 1; }
+    test -d /opt/openclaw-bridge/node_modules || { echo "FATAL: snapshot bake missing /opt/openclaw-bridge/node_modules"; exit 1; }
+    test -f /opt/openclaw-bridge/node_modules/better-sqlite3/package.json || { echo "FATAL: snapshot bake missing bridge dependency better-sqlite3"; exit 1; }
+    test -f /opt/openclaw-bridge/node_modules/express/package.json || { echo "FATAL: snapshot bake missing bridge dependency express"; exit 1; }
+    test -f /opt/openclaw-bridge/node_modules/ws/package.json || { echo "FATAL: snapshot bake missing bridge dependency ws"; exit 1; }
+    test -f /opt/trooper-org-runtime/.snapshot-builder || { echo "FATAL: snapshot bake missing runtime placeholder marker"; exit 1; }
+    test -f /opt/trooper-org-runtime/server/org-runtime/index.js || { echo "FATAL: snapshot bake missing runtime placeholder"; exit 1; }
+    for unit in openclaw-docker.service openclaw-bridge.service trooper-org-runtime.service trooper-server.service openclaw-poller.service; do
+      test -f "/etc/systemd/system/${unit}" || { echo "FATAL: snapshot bake missing ${unit}"; exit 1; }
+    done
+    if [ -n "${OPENCLAWBRIDGE_GIT_SHA:-}" ]; then
+      _baked_bridge_sha="$(git -C /opt/openclaw-bridge rev-parse HEAD 2>/dev/null || true)"
+      if [ "${_baked_bridge_sha,,}" != "${OPENCLAWBRIDGE_GIT_SHA,,}" ]; then
+        echo "FATAL: snapshot bake bridge SHA mismatch: expected ${OPENCLAWBRIDGE_GIT_SHA}, got ${_baked_bridge_sha:-missing}"
+        exit 1
+      fi
+    fi
+    echo "[setup] Snapshot fast boot artifacts verified"
+  }
+  verify_snapshot_bake_artifacts
+
   echo "[setup] Preparing snapshot image for reusable first boot..."
   cat > /usr/local/sbin/trooper-snapshot-firstboot-guard.sh <<'SNAPGUARD'
 #!/usr/bin/env bash
