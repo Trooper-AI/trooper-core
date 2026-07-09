@@ -91,6 +91,8 @@ import { readBridgeVersion } from './lib/version-info.mjs';
 import {
   configureTailscaleTransport,
   readTailscaleTransportStatus,
+  ensureTailscaleTransport,
+  startTailscaleTransportSelfHeal,
 } from './lib/tailscale-transport.mjs';
 import { applyTelegramTokenToOpenClawConfig, buildTelegramEnvUpdates } from './lib/channel-config.mjs';
 import { hardenActiveMemoryConfigForBridge } from './lib/active-memory-config.mjs';
@@ -14327,6 +14329,22 @@ app.put('/transport/tailscale', async (req, res) => {
  }
 });
 
+// Silent self-heal / rejoin using the last stored auth key (or body.authKey).
+app.post('/transport/tailscale/ensure', async (req, res) => {
+ try {
+  const status = await ensureTailscaleTransport(req.body || {});
+  const missing = status.action === 'missing_auth_key';
+  res.status(missing ? 409 : 200).json(status);
+ } catch (error) {
+  console.warn(`[tailscale] VPS ensure failed: ${error.message}`);
+  res.status(/required|hostname|tags|auth key/i.test(error.message) ? 400 : 502).json({
+   ok: false,
+   ensured: false,
+   error: error.message,
+  });
+ }
+});
+
 // ── Browser Session Reporting Endpoint ────────────────────────────────
 // Skills (e.g. browserbase, browserbase-sessions) call this to report
 // their live view URL so the bridge can show it in the frontend.
@@ -14483,6 +14501,12 @@ server.listen(PORT, '0.0.0.0', () => {
   port: PORT,
   readVersion: () => readBridgeVersion({ force: true }),
  });
+ // Rejoin private tailnet after reboot without waiting for a user click.
+ try {
+  startTailscaleTransportSelfHeal();
+ } catch (error) {
+  console.warn(`[tailscale] Could not start transport self-heal: ${error.message}`);
+ }
 });
 
 export { bridgeWS };
