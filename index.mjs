@@ -94,7 +94,11 @@ import {
   ensureTailscaleTransport,
   startTailscaleTransportSelfHeal,
 } from './lib/tailscale-transport.mjs';
-import { syncAgentAuthProfileSqlite as syncAgentAuthProfileSqliteFile } from './lib/agent-auth-sqlite.mjs';
+import {
+  LOCAL_PROVIDER_AUTH_KEY as SHARED_LOCAL_PROVIDER_AUTH_KEY,
+  migrateAllAgentAuthJsonToSqlite,
+  syncAgentAuthProfileSqlite as syncAgentAuthProfileSqliteFile,
+} from './lib/agent-auth-sqlite.mjs';
 import { applyTelegramTokenToOpenClawConfig, buildTelegramEnvUpdates } from './lib/channel-config.mjs';
 import { hardenActiveMemoryConfigForBridge } from './lib/active-memory-config.mjs';
 import {
@@ -4705,7 +4709,7 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
 
 // OpenClaw 2026.6+ stores auth in openclaw-agent.sqlite (not only auth-profiles.json).
 // A dummy key is required for local providers even though the Mac proxy ignores it.
-const LOCAL_PROVIDER_AUTH_KEY = 'trooper-local-provider-no-api-key';
+const LOCAL_PROVIDER_AUTH_KEY = SHARED_LOCAL_PROVIDER_AUTH_KEY;
 
 function syncAgentAuthProfileSqlite(authDoc, agentId = 'main') {
   const dbPath = openclawConfigPath('agents', agentId, 'agent', 'openclaw-agent.sqlite');
@@ -4757,15 +4761,52 @@ function ensureSyntheticLocalAuthProfiles({ localProvider, removeLocalProvider, 
   || Object.keys(auth.profiles || {}).some((id) => /^(local-llamacpp|ollama):/.test(id)),
  );
 
- if (changed) {
-  writeMirroredAuthProfiles(auth);
-  console.log(`[bridge] Updated synthetic local auth profiles for: ${touched.join(', ') || '(none)'}`);
- }
+ // writeMirroredAuthProfiles also syncs openclaw-agent.sqlite for every agent.
  if (changed || needsLocalAuth) {
-  const synced = syncAgentAuthProfileSqlite(auth, 'main');
-  if (synced) {
-   console.log('[bridge] Synced local provider auth into openclaw-agent.sqlite (primary store)');
+  writeMirroredAuthProfiles(auth);
+  if (changed) {
+   console.log(`[bridge] Updated synthetic local auth profiles for: ${touched.join(', ') || '(none)'}`);
   }
+  console.log('[bridge] Ensured local provider auth in auth-profiles.json + openclaw-agent.sqlite');
+ }
+}
+
+/**
+ * Boot-time heal so every Trooper VPS is safe after OpenClaw upgrades to
+ * sqlite auth stores. No user action required.
+ */
+function ensureLocalModelAuthReadyForAllAgents(reason = 'startup') {
+ try {
+  const config = readOpenClawConfig() || {};
+  const providersCfg = config.models?.providers || {};
+  let localProvider = providersCfg['local-llamacpp'] || null;
+  let ollamaProvider = providersCfg.ollama || null;
+  const storedLocal = String(readConfigKey('localModelUrl') || '').trim();
+  const storedOllama = String(readConfigKey('ollamaBaseUrl') || '').trim();
+  if (!localProvider && storedLocal) {
+   localProvider = normalizeLocalProviderConfig('local-llamacpp', { baseUrl: storedLocal });
+  }
+  if (!ollamaProvider && storedOllama) {
+   ollamaProvider = normalizeLocalProviderConfig('ollama', { baseUrl: storedOllama });
+  }
+
+  const providers = [];
+  if (localProvider) providers.push('local-llamacpp');
+  if (ollamaProvider) providers.push('ollama');
+  if (providers.length === 0) return { ok: true, skipped: true, reason };
+
+  ensureSyntheticLocalAuthProfiles({ localProvider, ollamaProvider });
+  const migrated = migrateAllAgentAuthJsonToSqlite({
+   agentsRoot: OPENCLAW_AGENTS_CONFIG_ROOT,
+   providers,
+  });
+  console.log(
+   `[bridge] Local model auth ready (${reason}): providers=${providers.join(',')} agents=${migrated.length}`,
+  );
+  return { ok: true, providers, migrated, reason };
+ } catch (error) {
+  console.warn(`[bridge] Local model auth boot heal failed (${reason}): ${error.message}`);
+  return { ok: false, error: error.message, reason };
  }
 }
 
@@ -5052,6 +5093,10 @@ function normalizeLocalProviderConfig(providerName, providerConfig, selectedMode
  }
  if (isLlamaCpp && !next.api) {
   next.api = 'openai-completions';
+ }
+ // OpenClaw requires an apiKey field even for local endpoints that ignore it.
+ if ((isLlamaCpp || isOllama) && !String(next.apiKey || next.key || '').trim()) {
+  next.apiKey = LOCAL_PROVIDER_AUTH_KEY;
  }
 
  const entries = Array.isArray(next.models) ? next.models : [];
@@ -14534,6 +14579,13 @@ server.listen(PORT, '0.0.0.0', () => {
   startTailscaleTransportSelfHeal();
  } catch (error) {
   console.warn(`[tailscale] Could not start transport self-heal: ${error.message}`);
+ }
+ // Product-wide: keep local-llamacpp/ollama auth in OpenClaw 2026.6+ sqlite
+ // stores so users never see "No API key found for provider local-llamacpp".
+ try {
+  ensureLocalModelAuthReadyForAllAgents('startup');
+ } catch (error) {
+  console.warn(`[bridge] ensureLocalModelAuthReadyForAllAgents failed: ${error.message}`);
  }
 });
 
