@@ -94,6 +94,7 @@ import {
   ensureTailscaleTransport,
   startTailscaleTransportSelfHeal,
 } from './lib/tailscale-transport.mjs';
+import { syncAgentAuthProfileSqlite as syncAgentAuthProfileSqliteFile } from './lib/agent-auth-sqlite.mjs';
 import { applyTelegramTokenToOpenClawConfig, buildTelegramEnvUpdates } from './lib/channel-config.mjs';
 import { hardenActiveMemoryConfigForBridge } from './lib/active-memory-config.mjs';
 import {
@@ -4691,11 +4692,24 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
 	    mkdirSync(dirname(sub), { recursive: true });
 		    writeJsonFileIfChanged(sub, authDoc);
 		    try { execSync(`chown 1000:1000 ${sub} 2>/dev/null; chmod 600 ${sub} 2>/dev/null`, { timeout: 3000 }); } catch {}
+	    // Keep non-main agents sqlite auth stores in sync too (OpenClaw 2026.6+).
+	    syncAgentAuthProfileSqlite(authDoc, d.name);
 	   } catch (err) {
 	    console.warn(`[bridge] Failed to mirror auth profiles to ${sub}: ${err.message}`);
 	   }
   }
  } catch {}
+ // Primary agent sqlite store (required by OpenClaw 2026.6+).
+ syncAgentAuthProfileSqlite(authDoc, 'main');
+}
+
+// OpenClaw 2026.6+ stores auth in openclaw-agent.sqlite (not only auth-profiles.json).
+// A dummy key is required for local providers even though the Mac proxy ignores it.
+const LOCAL_PROVIDER_AUTH_KEY = 'trooper-local-provider-no-api-key';
+
+function syncAgentAuthProfileSqlite(authDoc, agentId = 'main') {
+  const dbPath = openclawConfigPath('agents', agentId, 'agent', 'openclaw-agent.sqlite');
+  return syncAgentAuthProfileSqliteFile(dbPath, authDoc);
 }
 
 function ensureSyntheticLocalAuthProfiles({ localProvider, removeLocalProvider, ollamaProvider, removeOllamaProvider }) {
@@ -4712,7 +4726,7 @@ function ensureSyntheticLocalAuthProfiles({ localProvider, removeLocalProvider, 
  const touched = [];
  const ensureProfile = (provider) => {
   const profileId = `${provider}:default`;
-  const next = { type: 'api_key', provider, key: 'local-model' };
+  const next = { type: 'api_key', provider, key: LOCAL_PROVIDER_AUTH_KEY };
   if (JSON.stringify(auth.profiles[profileId]) !== JSON.stringify(next)) {
    auth.profiles[profileId] = next;
    changed = true;
@@ -4735,9 +4749,23 @@ function ensureSyntheticLocalAuthProfiles({ localProvider, removeLocalProvider, 
  if (ollamaProvider && typeof ollamaProvider === 'object') ensureProfile('ollama');
  else if (removeOllamaProvider) removeProfile('ollama');
 
+ // Always re-sync sqlite when local providers are present — OpenClaw 2026.6+
+ // ignores auth-profiles.json if the agent sqlite store is empty.
+ const needsLocalAuth = Boolean(
+  (localProvider && typeof localProvider === 'object')
+  || (ollamaProvider && typeof ollamaProvider === 'object')
+  || Object.keys(auth.profiles || {}).some((id) => /^(local-llamacpp|ollama):/.test(id)),
+ );
+
  if (changed) {
   writeMirroredAuthProfiles(auth);
   console.log(`[bridge] Updated synthetic local auth profiles for: ${touched.join(', ') || '(none)'}`);
+ }
+ if (changed || needsLocalAuth) {
+  const synced = syncAgentAuthProfileSqlite(auth, 'main');
+  if (synced) {
+   console.log('[bridge] Synced local provider auth into openclaw-agent.sqlite (primary store)');
+  }
  }
 }
 
