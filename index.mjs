@@ -1658,6 +1658,49 @@ function sanitizeBravePluginConfigForGatewayStart(config, repairs) {
  }
 }
 
+function readOpenClawEnvValueForSecrets(name) {
+ const key = String(name || '').trim();
+ if (!key) return '';
+ if (process.env[key]) return String(process.env[key]).trim();
+ try {
+  const envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+  const match = envContent.match(new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}=(.*)$`, 'm'));
+  return match ? String(match[1] || '').trim() : '';
+ } catch {
+  return '';
+ }
+}
+
+/**
+ * Soft-start: OpenClaw 2026.x fails the whole gateway when a provider uses
+ * apiKey: { source: "env", id: "OPENAI_API_KEY" } and the env var is empty.
+ * Strip unresolved env secret refs so local models and control UI keep working.
+ */
+function sanitizeUnresolvedProviderEnvSecrets(providers, repairs = []) {
+ if (!providers || typeof providers !== 'object' || Array.isArray(providers)) return repairs;
+ for (const [name, provider] of Object.entries(providers)) {
+  if (!provider || typeof provider !== 'object') continue;
+  const apiKey = provider.apiKey;
+  if (!apiKey || typeof apiKey !== 'object') continue;
+  const source = String(apiKey.source || '').trim().toLowerCase();
+  if (source !== 'env' && source !== 'default') continue;
+  const envId = String(apiKey.id || '').trim();
+  const resolved = envId ? readOpenClawEnvValueForSecrets(envId) : '';
+  if (resolved) continue;
+  // Local providers should never use env secret refs — convert to placeholder.
+  if (name === 'local-llamacpp' || name === 'ollama') {
+   provider.apiKey = SHARED_LOCAL_PROVIDER_AUTH_KEY;
+   repairs.push(`models.providers.${name}.apiKey: replaced unresolved env secret with local placeholder`);
+   continue;
+  }
+  delete providers[name];
+  repairs.push(
+   `models.providers.${name}: removed (unresolved env secret ${envId || 'unknown'} — gateway would refuse to start)`,
+  );
+ }
+ return repairs;
+}
+
 function prepareOpenClawConfigForGatewayStart(config) {
  const next = cloneJson(config);
  const repairs = [];
@@ -1669,6 +1712,16 @@ function prepareOpenClawConfigForGatewayStart(config) {
   if (Object.prototype.hasOwnProperty.call(providers, 'composio')) {
    delete providers.composio;
    repairs.push('models.providers.composio: removed non-model provider overlay');
+  }
+  sanitizeUnresolvedProviderEnvSecrets(providers, repairs);
+  // Always stamp local providers with a non-empty apiKey string.
+  for (const name of ['local-llamacpp', 'ollama']) {
+   const provider = providers[name];
+   if (!provider || typeof provider !== 'object') continue;
+   if (!String(provider.apiKey || provider.key || '').trim() || typeof provider.apiKey === 'object') {
+    provider.apiKey = SHARED_LOCAL_PROVIDER_AUTH_KEY;
+    repairs.push(`models.providers.${name}.apiKey: ensured local placeholder`);
+   }
   }
  }
 
@@ -7653,6 +7706,23 @@ function requireBridgeAuth(req, res) {
  res.status(401).json({ error: 'Unauthorized — bridge auth token required' });
  return false;
 }
+
+// POST /admin/ensure-local-model-auth — product-wide local model auth + soft-start heal
+app.post('/admin/ensure-local-model-auth', (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+  const auth = ensureLocalModelAuthReadyForAllAgents('admin-ensure');
+  const repaired = repairOpenClawConfigForGatewayStart('admin-ensure-local-model-auth');
+  res.json({
+   ok: true,
+   auth,
+   configRepairs: repaired.repairs || [],
+   configUpdated: Boolean(repaired.updated),
+  });
+ } catch (error) {
+  res.status(500).json({ ok: false, error: error.message });
+ }
+});
 
 // POST /admin/restart-services — restart Docker containers without data loss
 app.post('/admin/restart-services', async (req, res) => {
@@ -14418,6 +14488,37 @@ app.post('/transport/tailscale/ensure', async (req, res) => {
  }
 });
 
+/**
+ * Probe a local-model base URL from the VPS (not the Mac). Mac-side probes
+ * can green-light Tailscale URLs that the VPS cannot actually reach.
+ */
+app.post('/local-model/probe', async (req, res) => {
+ try {
+  const baseUrl = String(req.body?.baseUrl || req.body?.url || '').trim().replace(/\/+$/, '');
+  if (!baseUrl) return res.status(400).json({ ok: false, error: 'baseUrl is required' });
+  const candidates = [
+   /\/v1$/i.test(baseUrl) ? `${baseUrl}/models` : `${baseUrl}/v1/models`,
+   `${baseUrl.replace(/\/v1$/i, '')}/health`,
+   baseUrl,
+  ];
+  let lastError = '';
+  for (const url of candidates) {
+   try {
+    const probe = await fetch(url, { signal: AbortSignal.timeout(7000) });
+    if (probe.ok) {
+     return res.json({ ok: true, reachable: true, url, status: probe.status });
+    }
+    lastError = `HTTP ${probe.status}`;
+   } catch (error) {
+    lastError = error.message || 'fetch failed';
+   }
+  }
+  return res.json({ ok: true, reachable: false, error: lastError || 'not reachable from VPS' });
+ } catch (error) {
+  return res.status(500).json({ ok: false, error: error.message });
+ }
+});
+
 // ── Browser Session Reporting Endpoint ────────────────────────────────
 // Skills (e.g. browserbase, browserbase-sessions) call this to report
 // their live view URL so the bridge can show it in the frontend.
@@ -14587,6 +14688,61 @@ server.listen(PORT, '0.0.0.0', () => {
  } catch (error) {
   console.warn(`[bridge] ensureLocalModelAuthReadyForAllAgents failed: ${error.message}`);
  }
+ // Soft-start: strip unresolved env secrets + restart path if gateway is dead.
+ try {
+  const repaired = repairOpenClawConfigForGatewayStart('startup');
+  if (repaired.updated || (repaired.repairs && repaired.repairs.length)) {
+   console.log(`[bridge] Gateway-start config heal applied (${(repaired.repairs || []).length} repairs)`);
+  }
+  startGatewayProcessWatchdog();
+ } catch (error) {
+  console.warn(`[bridge] Gateway soft-start heal failed: ${error.message}`);
+ }
 });
+
+/**
+ * Keep OpenClaw gateway process alive. Empty cloud API keys must never leave
+ * the org control plane (*.crabhq.com) on a permanent 502 Host Error.
+ */
+function startGatewayProcessWatchdog({ intervalMs = 45_000, initialDelayMs = 25_000 } = {}) {
+ if (globalThis.__trooperGatewayWatchdogStarted) return;
+ globalThis.__trooperGatewayWatchdogStarted = true;
+ let consecutiveFailures = 0;
+ let lastRestartAt = 0;
+
+ const tick = async (reason) => {
+  try {
+   const res = await fetch('http://127.0.0.1:18789/healthz', {
+    signal: AbortSignal.timeout(2500),
+   }).catch(() => null);
+   if (res?.ok) {
+    consecutiveFailures = 0;
+    return;
+   }
+   consecutiveFailures += 1;
+   if (consecutiveFailures < 2) return;
+   const now = Date.now();
+   if (now - lastRestartAt < 90_000) return;
+   lastRestartAt = now;
+   console.warn(`[gateway-watchdog] Gateway unhealthy (${reason}, fails=${consecutiveFailures}) — repairing secrets + restarting`);
+   repairOpenClawConfigForGatewayStart('gateway-watchdog');
+   try {
+    execSync(
+     'cd /opt/openclaw && docker compose up -d --force-recreate openclaw-gateway 2>&1',
+     { timeout: 120000 },
+    );
+    consecutiveFailures = 0;
+    console.log('[gateway-watchdog] openclaw-gateway recreated');
+   } catch (error) {
+    console.warn(`[gateway-watchdog] restart failed: ${error.message}`);
+   }
+  } catch (error) {
+   console.warn(`[gateway-watchdog] tick failed: ${error.message}`);
+  }
+ };
+
+ setTimeout(() => { tick('startup'); }, Math.max(0, initialDelayMs));
+ setInterval(() => { tick('interval'); }, Math.max(15_000, intervalMs)).unref?.();
+}
 
 export { bridgeWS };
