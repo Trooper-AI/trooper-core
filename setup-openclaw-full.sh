@@ -3615,6 +3615,7 @@ if [ "${TROOPER_SNAPSHOT_BUILD:-0}" = "1" ]; then
       fi
     fi
     echo "[setup] Snapshot fast boot artifacts verified"
+    touch /tmp/trooper-snapshot-fast-ready
   }
   verify_snapshot_bake_artifacts
 
