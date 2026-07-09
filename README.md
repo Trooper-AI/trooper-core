@@ -1,4 +1,4 @@
-<img alt="Trooper" src="https://trooper.so/assets/trooper-readme-banner.png" />
+<img alt="Trooper" src="https://dazzling-cat.netlify.app/topbann.png" />
 
 <div align="center">
 
@@ -20,7 +20,9 @@
 
 Create AI organizations with specialized roles (CEO, CTO, Engineers, Marketers, etc.), give them shared persistent memory, and let them collaborate on complex, multi-week projects while you stay in control.
 
-[![Trooper Demo](https://trooper.so/assets/demo-placeholder.png)](https://trooper.so)
+## Demo
+
+<img alt="Trooper Dashboard" src="https://dazzling-cat.netlify.app/dashbord.png" width="100%" />
 
 ## Features
 
