@@ -400,6 +400,12 @@ write_env_line() {
   write_env_line TROOPER_MAC_SCREEN_RECORDING "${TROOPER_MAC_SCREEN_RECORDING:-0}"
   write_env_line TROOPER_ALLOW_EXISTING_BROWSER "${TROOPER_ALLOW_EXISTING_BROWSER:-0}"
   write_env_line PATH "$PATH"
+  # So bridge/gateway helpers can reach Colima's docker.sock without Docker Desktop.
+  if [[ -S "$HOME/.colima/default/docker.sock" ]]; then
+    write_env_line DOCKER_HOST "unix://$HOME/.colima/default/docker.sock"
+  elif [[ -S "$HOME/.colima/docker.sock" ]]; then
+    write_env_line DOCKER_HOST "unix://$HOME/.colima/docker.sock"
+  fi
 } > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
@@ -442,7 +448,50 @@ set -a
 source "$ENV_FILE"
 set +a
 
+# Free GATEWAY_PORT: Trooper may also run a managed OpenClaw node gateway
+# (ai.openclaw.gateway) on 18789. That process steals the port from Docker and
+# causes "gateway token mismatch" because it uses a different auth token.
+free_gateway_port() {
+  local port="${GATEWAY_PORT:-18789}"
+  local uid
+  uid="$(/usr/bin/id -u)"
+  /bin/launchctl bootout "gui/$uid/ai.openclaw.gateway" >/dev/null 2>&1 || true
+  /bin/launchctl bootout "gui/$uid" "$HOME/Library/LaunchAgents/ai.openclaw.gateway.plist" >/dev/null 2>&1 || true
+  # Stop any leftover host OpenClaw gateway still bound to the port.
+  local pids
+  pids="$(/usr/sbin/lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)"
+  if [[ -n "$pids" ]]; then
+    echo "Stopping processes on gateway port $port: $pids"
+    # shellcheck disable=SC2086
+    /bin/kill $pids >/dev/null 2>&1 || true
+    sleep 1
+    pids="$(/usr/sbin/lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)"
+    if [[ -n "$pids" ]]; then
+      # shellcheck disable=SC2086
+      /bin/kill -9 $pids >/dev/null 2>&1 || true
+    fi
+  fi
+}
+
+# Point Docker CLI at Colima when the standard socket is missing.
+if [[ -z "${DOCKER_HOST:-}" ]]; then
+  if [[ -S "$HOME/.colima/default/docker.sock" ]]; then
+    export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
+  elif [[ -S "$HOME/.colima/docker.sock" ]]; then
+    export DOCKER_HOST="unix://$HOME/.colima/docker.sock"
+  fi
+fi
+
 if command -v docker >/dev/null 2>&1; then
+  free_gateway_port
+  # Ensure Colima is up when using the Trooper user-local docker runtime.
+  if ! docker info >/dev/null 2>&1; then
+    if command -v colima >/dev/null 2>&1; then
+      echo "Starting Colima Docker runtime..."
+      colima start --runtime docker >/dev/null 2>&1 || colima start >/dev/null 2>&1 || true
+      sleep 2
+    fi
+  fi
   docker rm -f "${OPENCLAW_GATEWAY_CONTAINER}" trooper-local-gateway >/dev/null 2>&1 || true
   exec docker run --name "${OPENCLAW_GATEWAY_CONTAINER}" --pull=missing \
     -p "127.0.0.1:${GATEWAY_PORT}:${GATEWAY_PORT}" \
@@ -580,6 +629,14 @@ write_plist so.trooper.local-gateway "$BIN_DIR/start-gateway.sh"
 write_plist so.trooper.local-tunnel "$BIN_DIR/start-tunnel.sh"
 write_plist so.trooper.local-heartbeat "$BIN_DIR/heartbeat.sh"
 
+# Avoid port 18789 collisions with the managed OpenClaw node gateway
+# (ai.openclaw.gateway). That service uses a different token and causes
+# "gateway token mismatch" when it steals the port from Docker.
+launchctl bootout "gui/$(id -u)/ai.openclaw.gateway" >/dev/null 2>&1 || true
+launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/ai.openclaw.gateway.plist" >/dev/null 2>&1 || true
+# Disable so LaunchAgent KeepAlive does not steal the port again.
+launchctl disable "gui/$(id -u)/ai.openclaw.gateway" >/dev/null 2>&1 || true
+
 for label in so.trooper.local-gateway so.trooper.local-bridge so.trooper.local-tunnel so.trooper.local-heartbeat; do
   launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
   launchctl bootout "gui/$(id -u)" "$PLIST_DIR/$label.plist" >/dev/null 2>&1 || true
@@ -590,6 +647,86 @@ for label in so.trooper.local-gateway so.trooper.local-bridge so.trooper.local-t
     fi
   fi
 done
+
+# Wait for gateway, auto-approve the Trooper bridge device, then wait for bridge health.
+echo "Waiting for local gateway and bridge to become healthy..."
+gateway_ready=0
+for _ in $(seq 1 60); do
+  if curl -fsS --max-time 2 "http://127.0.0.1:${GATEWAY_PORT}/health" 2>/dev/null | grep -q '"live"\|"ok"\|"ready"'; then
+    gateway_ready=1
+    break
+  fi
+  sleep 2
+done
+if [[ "$gateway_ready" != "1" ]]; then
+  echo "Warning: gateway health did not report live yet; continuing. Check logs in $LOG_DIR."
+fi
+
+# Approve pending bridge pairing inside the gateway container (required for WS operator role).
+if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' | grep -qx "${OPENCLAW_GATEWAY_CONTAINER}"; then
+  echo "Approving Trooper bridge device with the local gateway..."
+  docker exec -e OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" -e GATEWAY_TOKEN="$GATEWAY_TOKEN" \
+    "${OPENCLAW_GATEWAY_CONTAINER}" \
+    sh -c 'cd /app && node openclaw.mjs devices approve --token "$GATEWAY_TOKEN" --latest' \
+    >/dev/null 2>&1 || true
+  # Nudge bridge to reconnect after approval.
+  launchctl kickstart -k "gui/$(id -u)/so.trooper.local-bridge" >/dev/null 2>&1 || true
+fi
+
+bridge_ready=0
+for _ in $(seq 1 45); do
+  health_json="$(curl -fsS --max-time 3 "http://127.0.0.1:${BRIDGE_PORT}/health" 2>/dev/null || true)"
+  if printf '%s' "$health_json" | grep -q '"status":"ok"'; then
+    bridge_ready=1
+    break
+  fi
+  # Retry device approval once mid-wait if still pairing.
+  if printf '%s' "$health_json" | grep -qi 'pairing\|not approved'; then
+    docker exec -e OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" -e GATEWAY_TOKEN="$GATEWAY_TOKEN" \
+      "${OPENCLAW_GATEWAY_CONTAINER}" \
+      sh -c 'cd /app && node openclaw.mjs devices approve --token "$GATEWAY_TOKEN" --latest' \
+      >/dev/null 2>&1 || true
+  fi
+  sleep 2
+done
+if [[ "$bridge_ready" == "1" ]]; then
+  echo "Local bridge is healthy and connected to the gateway."
+else
+  echo "Warning: bridge health is not fully green yet. Services will keep retrying in the background."
+  echo "  Bridge logs: $LOG_DIR/so.trooper.local-bridge.err.log"
+  echo "  Gateway logs: $LOG_DIR/so.trooper.local-gateway.err.log"
+fi
+
+# One immediate heartbeat so Trooper UI can leave "connecting..." as soon as health is ok.
+if [[ -n "${ORG_ID:-}" && "${ORG_ID}" != "local-unpaired" && -x "$BIN_DIR/heartbeat.sh" ]]; then
+  # Run a single heartbeat cycle without the infinite loop.
+  HEALTH_JSON="$(curl -fsS --max-time 5 "http://127.0.0.1:${BRIDGE_PORT}/health" 2>/dev/null || printf '{}')"
+  BODY="$(HEALTH_JSON="$HEALTH_JSON" BRIDGE_AUTH_TOKEN="$BRIDGE_AUTH_TOKEN" HOST_DEVICE_ID="$HOST_DEVICE_ID" \
+    PUBLIC_BRIDGE_URL="${PUBLIC_BRIDGE_URL:-}" PUBLIC_GATEWAY_URL="${PUBLIC_GATEWAY_URL:-}" \
+    BRIDGE_PORT="$BRIDGE_PORT" GATEWAY_PORT="$GATEWAY_PORT" TUNNEL_PROVIDER="${TUNNEL_PROVIDER:-cloudflare}" \
+    BROWSER_MODE="${BROWSER_MODE:-managed}" python3 - <<'PY'
+import json, os
+try:
+    health = json.loads(os.environ.get("HEALTH_JSON") or "{}")
+except Exception:
+    health = {}
+payload = {
+    "token": os.environ.get("BRIDGE_AUTH_TOKEN"),
+    "hostDeviceId": os.environ.get("HOST_DEVICE_ID"),
+    "bridgeUrl": os.environ.get("PUBLIC_BRIDGE_URL") or f"http://127.0.0.1:{os.environ.get('BRIDGE_PORT', '3002')}",
+    "gatewayUrl": os.environ.get("PUBLIC_GATEWAY_URL") or f"http://127.0.0.1:{os.environ.get('GATEWAY_PORT', '18789')}",
+    "tunnelProvider": os.environ.get("TUNNEL_PROVIDER") or "cloudflare",
+    "platform": "macOS",
+    "status": "ready" if health.get("status") == "ok" else "local_pending",
+    "health": health,
+    "browserModes": {"default": os.environ.get("BROWSER_MODE") or "managed", "managed": True, "existingOsBrowser": True, "vpsDesktop": False},
+}
+print(json.dumps(payload, separators=(",", ":")))
+PY
+)"
+  curl -fsS -X POST "$API_URL/api/organizations/$ORG_ID/local-host/heartbeat" \
+    -H 'Content-Type: application/json' --data "$BODY" >/dev/null 2>&1 || true
+fi
 
 cat <<EOF
 Trooper Local Mac Host installed.
