@@ -4717,11 +4717,18 @@ function ensureAuthProfileSecretKeySource() {
      if (isLocalHostRuntime()) {
       const container = process.env.OPENCLAW_GATEWAY_CONTAINER || 'openclaw-openclaw-gateway-1';
       execSync(`docker restart ${container} 2>/dev/null || true`, { timeout: 120000 });
+<<<<<<< HEAD
       console.log(`[bridge] Restarted local gateway after OAuth secret mount (${container})`);
      } else {
       execSync('cd /opt/openclaw && docker compose up -d --force-recreate openclaw-gateway 2>/dev/null || docker compose up -d --force-recreate 2>/dev/null', { timeout: 120000 });
       console.log('[bridge] Recreated OpenClaw gateway with OAuth secret key mount');
      }
+=======
+     } else {
+      execSync('cd /opt/openclaw && docker compose up -d --force-recreate openclaw-gateway 2>/dev/null || docker compose up -d --force-recreate 2>/dev/null', { timeout: 120000 });
+     }
+     console.log('[bridge] Recreated OpenClaw gateway with OAuth secret key mount');
+>>>>>>> 4d72f0e (fix(local-mac): align setup + bridge with reliable Mac host install)
     } catch (err) {
      console.warn(`[bridge] Failed to recreate gateway after adding OAuth secret mount: ${err.message}`);
     }
