@@ -158,7 +158,9 @@ mac_arch() {
 download_file() {
   local url="$1"
   local dest="$2"
-  curl --fail --location --retry 3 --retry-delay 2 --output "$dest" "$url"
+  # -sS: no progress meter (keeps in-app install logs readable), still show errors
+  echo "Downloading $(basename "$dest")..."
+  curl --fail --silent --show-error --location --retry 3 --retry-delay 2 --output "$dest" "$url"
 }
 
 install_homebrew() {
@@ -325,20 +327,36 @@ fi
 echo "Preparing Trooper gateway image..."
 docker pull "$OPENCLAW_DOCKER_IMAGE"
 
-if [[ ! -d "$BRIDGE_DIR/.git" ]]; then
-  git clone "$TROOPER_BRIDGE_REPO_URL" "$BRIDGE_DIR"
-else
+# Ensure a real git checkout. Prior failed installs (or Docker bind-mounts of a missing
+# startup.sh) can leave BRIDGE_DIR non-empty without .git — plain `git clone` then fails
+# with exit 128 ("destination path already exists and is not an empty directory").
+if [[ -d "$BRIDGE_DIR/.git" ]]; then
+  echo "Updating Trooper bridge..."
   git -C "$BRIDGE_DIR" fetch --all --prune || {
     rm -f "$BRIDGE_DIR/.git/refs/remotes/origin/main" "$BRIDGE_DIR/.git/packed-refs.lock"
     git -C "$BRIDGE_DIR" fetch origin main --prune
   }
   git -C "$BRIDGE_DIR" pull --ff-only || true
+else
+  if [[ -e "$BRIDGE_DIR" ]]; then
+    echo "Clearing incomplete bridge directory at $BRIDGE_DIR..."
+    rm -rf "$BRIDGE_DIR"
+  fi
+  echo "Cloning Trooper bridge..."
+  git clone "$TROOPER_BRIDGE_REPO_URL" "$BRIDGE_DIR"
 fi
 
 if [[ -n "${OPENCLAWBRIDGE_GIT_SHA:-}" ]]; then
   git -C "$BRIDGE_DIR" checkout "$OPENCLAWBRIDGE_GIT_SHA"
 fi
 
+# Guard against Docker turning a missing bind-mount source into a directory later.
+if [[ -d "$BRIDGE_DIR/startup.sh" && ! -f "$BRIDGE_DIR/startup.sh" ]]; then
+  echo "Removing invalid startup.sh directory left by a previous Docker mount..."
+  rm -rf "$BRIDGE_DIR/startup.sh"
+fi
+
+echo "Installing bridge dependencies..."
 npm --prefix "$BRIDGE_DIR" install --omit=dev
 
 write_env_line() {
