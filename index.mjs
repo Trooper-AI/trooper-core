@@ -1752,7 +1752,8 @@ function writePreparedOpenClawConfig(prepared) {
 function ensureOpenClawConfigOwnership() {
  try {
   if (existsSync(OPENCLAW_CONFIG_PATH)) {
-   execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 });
+   // Quote paths: macOS Application Support has spaces and breaks unquoted chown.
+   execSync(`chown 1000:1000 "${OPENCLAW_CONFIG_PATH}" && chmod 600 "${OPENCLAW_CONFIG_PATH}"`, { timeout: 3000 });
   }
  } catch (err) {
   console.warn(`[bridge] Failed to repair OpenClaw config ownership: ${err.message}`);
@@ -4708,8 +4709,14 @@ function ensureAuthProfileSecretKeySource() {
    if (!env.includes('OPENCLAW_AUTH_PROFILE_SECRET_DIR=')) {
     writeFileSync(envPath, `${env.replace(/\s*$/, '\n')}${line}\n`);
     try {
-     execSync('cd /opt/openclaw && docker compose up -d --force-recreate openclaw-gateway 2>/dev/null || docker compose up -d --force-recreate 2>/dev/null', { timeout: 120000 });
-     console.log('[bridge] Recreated OpenClaw gateway with OAuth secret key mount');
+     if (isLocalHostRuntime()) {
+      const container = process.env.OPENCLAW_GATEWAY_CONTAINER || 'openclaw-openclaw-gateway-1';
+      execSync(`docker restart ${container} 2>/dev/null || true`, { timeout: 120000 });
+      console.log(`[bridge] Restarted local gateway after OAuth secret mount (${container})`);
+     } else {
+      execSync('cd /opt/openclaw && docker compose up -d --force-recreate openclaw-gateway 2>/dev/null || docker compose up -d --force-recreate 2>/dev/null', { timeout: 120000 });
+      console.log('[bridge] Recreated OpenClaw gateway with OAuth secret key mount');
+     }
     } catch (err) {
      console.warn(`[bridge] Failed to recreate gateway after adding OAuth secret mount: ${err.message}`);
     }
@@ -14727,12 +14734,20 @@ function startGatewayProcessWatchdog({ intervalMs = 45_000, initialDelayMs = 25_
    console.warn(`[gateway-watchdog] Gateway unhealthy (${reason}, fails=${consecutiveFailures}) — repairing secrets + restarting`);
    repairOpenClawConfigForGatewayStart('gateway-watchdog');
    try {
-    execSync(
-     'cd /opt/openclaw && docker compose up -d --force-recreate openclaw-gateway 2>&1',
-     { timeout: 120000 },
-    );
-    consecutiveFailures = 0;
-    console.log('[gateway-watchdog] openclaw-gateway recreated');
+    if (isLocalHostRuntime()) {
+     // Local Mac/Windows host: gateway is a standalone docker run (no /opt/openclaw compose).
+     const container = process.env.OPENCLAW_GATEWAY_CONTAINER || 'openclaw-openclaw-gateway-1';
+     execSync(`docker restart ${container} 2>&1`, { timeout: 120000 });
+     consecutiveFailures = 0;
+     console.log(`[gateway-watchdog] local gateway container restarted (${container})`);
+    } else {
+     execSync(
+      'cd /opt/openclaw && docker compose up -d --force-recreate openclaw-gateway 2>&1',
+      { timeout: 120000 },
+     );
+     consecutiveFailures = 0;
+     console.log('[gateway-watchdog] openclaw-gateway recreated');
+    }
    } catch (error) {
     console.warn(`[gateway-watchdog] restart failed: ${error.message}`);
    }

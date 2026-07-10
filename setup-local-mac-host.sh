@@ -448,6 +448,10 @@ set -a
 source "$ENV_FILE"
 set +a
 
+# Always prefer Trooper-bundled docker/colima over a missing system PATH (LaunchAgents
+# only inherit a minimal PATH).
+export PATH="${TROOPER_HOME:-$HOME/Library/Application Support/Trooper/runtime}/bin:${TROOPER_HOME:-$HOME/Library/Application Support/Trooper/runtime}/lima/bin:/opt/homebrew/bin:/usr/local/bin:/Applications/Docker.app/Contents/Resources/bin:$HOME/Applications/Docker.app/Contents/Resources/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
 # Free GATEWAY_PORT: Trooper may also run a managed OpenClaw node gateway
 # (ai.openclaw.gateway) on 18789. That process steals the port from Docker and
 # causes "gateway token mismatch" because it uses a different auth token.
@@ -457,7 +461,7 @@ free_gateway_port() {
   uid="$(/usr/bin/id -u)"
   /bin/launchctl bootout "gui/$uid/ai.openclaw.gateway" >/dev/null 2>&1 || true
   /bin/launchctl bootout "gui/$uid" "$HOME/Library/LaunchAgents/ai.openclaw.gateway.plist" >/dev/null 2>&1 || true
-  # Stop any leftover host OpenClaw gateway still bound to the port.
+  /bin/launchctl disable "gui/$uid/ai.openclaw.gateway" >/dev/null 2>&1 || true
   local pids
   pids="$(/usr/sbin/lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)"
   if [[ -n "$pids" ]]; then
@@ -473,27 +477,52 @@ free_gateway_port() {
   fi
 }
 
-# Point Docker CLI at Colima when the standard socket is missing.
-if [[ -z "${DOCKER_HOST:-}" ]]; then
-  if [[ -S "$HOME/.colima/default/docker.sock" ]]; then
-    export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
-  elif [[ -S "$HOME/.colima/docker.sock" ]]; then
-    export DOCKER_HOST="unix://$HOME/.colima/docker.sock"
+ensure_docker() {
+  if [[ -z "${DOCKER_HOST:-}" ]]; then
+    if [[ -S "$HOME/.colima/default/docker.sock" ]]; then
+      export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
+    elif [[ -S "$HOME/.colima/docker.sock" ]]; then
+      export DOCKER_HOST="unix://$HOME/.colima/docker.sock"
+    fi
   fi
-fi
+  # Avoid a broken docker "colima" context when meta.json is missing.
+  unset DOCKER_CONTEXT || true
+  if docker info >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! command -v colima >/dev/null 2>&1; then
+    return 1
+  fi
+  echo "Starting Colima Docker runtime..."
+  # Rosetta makes the current amd64 gateway image usable on Apple Silicon.
+  colima start --runtime docker --arch aarch64 2>/dev/null \
+    || colima start --runtime docker 2>/dev/null \
+    || colima start 2>/dev/null \
+    || true
+  local i
+  for i in $(seq 1 45); do
+    if [[ -S "$HOME/.colima/default/docker.sock" ]]; then
+      export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
+    fi
+    if docker info >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
 
 if command -v docker >/dev/null 2>&1; then
   free_gateway_port
-  # Ensure Colima is up when using the Trooper user-local docker runtime.
-  if ! docker info >/dev/null 2>&1; then
-    if command -v colima >/dev/null 2>&1; then
-      echo "Starting Colima Docker runtime..."
-      colima start --runtime docker >/dev/null 2>&1 || colima start >/dev/null 2>&1 || true
-      sleep 2
-    fi
+  if ! ensure_docker; then
+    echo "Docker daemon is not available (Colima failed to start)." >&2
+    sleep 30
+    exit 1
   fi
   docker rm -f "${OPENCLAW_GATEWAY_CONTAINER}" trooper-local-gateway >/dev/null 2>&1 || true
+  # Gateway image is currently linux/amd64; Colima binfmt/rosetta emulates it on arm64.
   exec docker run --name "${OPENCLAW_GATEWAY_CONTAINER}" --pull=missing \
+    --platform linux/amd64 \
     -p "127.0.0.1:${GATEWAY_PORT}:${GATEWAY_PORT}" \
     -v "${OPENCLAW_DATA_DIR}:/home/node/.openclaw" \
     -v "${TROOPER_BRIDGE_DIR}/startup.sh:/opt/startup.sh:ro" \
@@ -503,12 +532,13 @@ if command -v docker >/dev/null 2>&1; then
     -e "GATEWAY_TOKEN=${GATEWAY_TOKEN}" \
     -e "OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}" \
     -e "TROOPER_GATEWAY_SKIP_DOCTOR=1" \
+    -e "DOCKER_HOST=${DOCKER_HOST:-}" \
     "${OPENCLAW_DOCKER_IMAGE}" \
     /opt/startup.sh \
     "${GATEWAY_PORT}"
 fi
 
-echo "Docker Desktop is not installed. Install Docker Desktop or set up a direct OpenClaw gateway runner." >&2
+echo "Docker is not available." >&2
 sleep 30
 exit 1
 EOF
@@ -614,7 +644,8 @@ write_plist() {
   <dict>
     <key>HOME</key><string>$HOME</string>
     <key>TROOPER_HOME</key><string>$TROOPER_HOME</string>
-    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/Applications/Docker.app/Contents/Resources/bin:$HOME/Applications/Docker.app/Contents/Resources/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PATH</key><string>$TROOPER_HOME/bin:$TROOPER_HOME/lima/bin:/opt/homebrew/bin:/usr/local/bin:/Applications/Docker.app/Contents/Resources/bin:$HOME/Applications/Docker.app/Contents/Resources/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>DOCKER_HOST</key><string>unix://$HOME/.colima/default/docker.sock</string>
   </dict>
   <key>StandardOutPath</key><string>$LOG_DIR/$label.out.log</string>
   <key>StandardErrorPath</key><string>$LOG_DIR/$label.err.log</string>
@@ -649,17 +680,21 @@ for label in so.trooper.local-gateway so.trooper.local-bridge so.trooper.local-t
 done
 
 # Wait for gateway, auto-approve the Trooper bridge device, then wait for bridge health.
+# Gateway image is amd64-emulated on Apple Silicon and can take 1–2 minutes to listen.
 echo "Waiting for local gateway and bridge to become healthy..."
 gateway_ready=0
-for _ in $(seq 1 60); do
-  if curl -fsS --max-time 2 "http://127.0.0.1:${GATEWAY_PORT}/health" 2>/dev/null | grep -q '"live"\|"ok"\|"ready"'; then
+for _ in $(seq 1 90); do
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${GATEWAY_PORT}/" 2>/dev/null || echo 000)"
+  if [[ "$code" == "200" ]] || curl -fsS --max-time 2 "http://127.0.0.1:${GATEWAY_PORT}/health" 2>/dev/null | grep -q '"live"\|"ok"\|"ready"'; then
     gateway_ready=1
     break
   fi
   sleep 2
 done
 if [[ "$gateway_ready" != "1" ]]; then
-  echo "Warning: gateway health did not report live yet; continuing. Check logs in $LOG_DIR."
+  echo "Warning: gateway HTTP did not become ready yet; continuing. Check logs in $LOG_DIR."
+else
+  echo "Local gateway is accepting connections on :${GATEWAY_PORT}."
 fi
 
 # Approve pending bridge pairing inside the gateway container (required for WS operator role).
@@ -669,23 +704,28 @@ if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' | grep -
     "${OPENCLAW_GATEWAY_CONTAINER}" \
     sh -c 'cd /app && node openclaw.mjs devices approve --token "$GATEWAY_TOKEN" --latest' \
     >/dev/null 2>&1 || true
+  docker exec -e OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" -e GATEWAY_TOKEN="$GATEWAY_TOKEN" \
+    "${OPENCLAW_GATEWAY_CONTAINER}" \
+    sh -c 'cd /app && node openclaw.mjs devices approve --latest' \
+    >/dev/null 2>&1 || true
   # Nudge bridge to reconnect after approval.
   launchctl kickstart -k "gui/$(id -u)/so.trooper.local-bridge" >/dev/null 2>&1 || true
 fi
 
 bridge_ready=0
-for _ in $(seq 1 45); do
+for _ in $(seq 1 60); do
   health_json="$(curl -fsS --max-time 3 "http://127.0.0.1:${BRIDGE_PORT}/health" 2>/dev/null || true)"
-  if printf '%s' "$health_json" | grep -q '"status":"ok"'; then
+  if printf '%s' "$health_json" | grep -qE '"status":"ok"|"gateway_available":true|"websocketConnected":true'; then
     bridge_ready=1
     break
   fi
-  # Retry device approval once mid-wait if still pairing.
-  if printf '%s' "$health_json" | grep -qi 'pairing\|not approved'; then
+  # Retry device approval mid-wait if still pairing or missing scopes.
+  if printf '%s' "$health_json" | grep -qiE 'pairing|not approved|missing scope|auth_or_pairing'; then
     docker exec -e OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" -e GATEWAY_TOKEN="$GATEWAY_TOKEN" \
       "${OPENCLAW_GATEWAY_CONTAINER}" \
-      sh -c 'cd /app && node openclaw.mjs devices approve --token "$GATEWAY_TOKEN" --latest' \
+      sh -c 'cd /app && node openclaw.mjs devices approve --latest' \
       >/dev/null 2>&1 || true
+    launchctl kickstart -k "gui/$(id -u)/so.trooper.local-bridge" >/dev/null 2>&1 || true
   fi
   sleep 2
 done
