@@ -141,7 +141,34 @@ if ! command -v npm >/dev/null 2>&1; then
 fi
 
 docker_ready() {
-  command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
+  if ! command -v docker >/dev/null 2>&1; then
+    return 1
+  fi
+  # Always prefer the Colima-forwarded host socket when present.
+  if [[ -S "$HOME/.colima/default/docker.sock" ]]; then
+    export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
+  elif [[ -S "$HOME/.colima/docker.sock" ]]; then
+    export DOCKER_HOST="unix://$HOME/.colima/docker.sock"
+  fi
+  unset DOCKER_CONTEXT || true
+  docker info >/dev/null 2>&1
+}
+
+# Colima profile used for Trooper local host. 8GiB avoids OOM while the amd64
+# gateway image runs under qemu/binfmt on Apple Silicon.
+colima_start_trooper() {
+  local mem="${TROOPER_COLIMA_MEMORY_GIB:-8}"
+  local cpus="${TROOPER_COLIMA_CPUS:-4}"
+  # Best-effort: Rosetta makes amd64 containers much faster when available.
+  if [[ "$(uname -m)" == "arm64" ]] && [[ ! -d /Library/Apple/usr/libexec/oah ]]; then
+    echo "Installing Rosetta (helps amd64 gateway image on Apple Silicon)..."
+    /usr/sbin/softwareupdate --install-rosetta --agree-to-license >/dev/null 2>&1 || true
+  fi
+  colima start --runtime docker --vm-type vz --mount-type virtiofs --memory "$mem" --cpu "$cpus" 2>/dev/null \
+    || colima start --runtime docker --memory "$mem" --cpu "$cpus" 2>/dev/null \
+    || colima start --runtime docker 2>/dev/null \
+    || colima start 2>/dev/null \
+    || true
 }
 
 mac_arch() {
@@ -244,7 +271,16 @@ install_standalone_colima_docker_runtime() (
   hash -r
 
   echo "Starting Colima..."
-  colima start --runtime docker --vm-type vz --mount-type virtiofs || colima start --runtime docker
+  # Subshell cannot call outer shell functions — inline the Trooper Colima profile.
+  local mem="${TROOPER_COLIMA_MEMORY_GIB:-8}"
+  local cpus="${TROOPER_COLIMA_CPUS:-4}"
+  if [[ "$(uname -m)" == "arm64" ]] && [[ ! -d /Library/Apple/usr/libexec/oah ]]; then
+    /usr/sbin/softwareupdate --install-rosetta --agree-to-license >/dev/null 2>&1 || true
+  fi
+  colima start --runtime docker --vm-type vz --mount-type virtiofs --memory "$mem" --cpu "$cpus" \
+    || colima start --runtime docker --memory "$mem" --cpu "$cpus" \
+    || colima start --runtime docker \
+    || colima start
 )
 
 install_colima_docker_runtime() {
@@ -274,7 +310,7 @@ install_colima_docker_runtime() {
   hash -r
 
   echo "Starting Colima..."
-  colima start
+  colima_start_trooper
 }
 
 start_docker_desktop() {
@@ -478,33 +514,39 @@ free_gateway_port() {
 }
 
 ensure_docker() {
-  if [[ -z "${DOCKER_HOST:-}" ]]; then
-    if [[ -S "$HOME/.colima/default/docker.sock" ]]; then
-      export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
-    elif [[ -S "$HOME/.colima/docker.sock" ]]; then
-      export DOCKER_HOST="unix://$HOME/.colima/docker.sock"
-    fi
+  # Prefer the Colima-forwarded host socket. Never restart docker.service inside
+  # the guest alone — that leaves a stale host socket while guest docker is fine.
+  if [[ -S "$HOME/.colima/default/docker.sock" ]]; then
+    export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
+  elif [[ -S "$HOME/.colima/docker.sock" ]]; then
+    export DOCKER_HOST="unix://$HOME/.colima/docker.sock"
   fi
-  # Avoid a broken docker "colima" context when meta.json is missing.
   unset DOCKER_CONTEXT || true
+
   if docker info >/dev/null 2>&1; then
     return 0
   fi
   if ! command -v colima >/dev/null 2>&1; then
     return 1
   fi
+
   echo "Starting Colima Docker runtime..."
-  # Rosetta makes the current amd64 gateway image usable on Apple Silicon.
-  colima start --runtime docker --arch aarch64 2>/dev/null \
-    || colima start --runtime docker 2>/dev/null \
-    || colima start 2>/dev/null \
-    || true
+  colima_start_trooper
   local i
-  for i in $(seq 1 45); do
-    if [[ -S "$HOME/.colima/default/docker.sock" ]]; then
-      export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
+  for i in $(seq 1 20); do
+    if docker_ready; then
+      return 0
     fi
-    if docker info >/dev/null 2>&1; then
+    sleep 2
+  done
+
+  # Host socket often goes stale after guest churn. Full restart re-binds the forward.
+  echo "Host Docker socket is stale — restarting Colima to rebind unix socket..."
+  colima stop 2>/dev/null || true
+  sleep 1
+  colima_start_trooper
+  for i in $(seq 1 30); do
+    if docker_ready; then
       return 0
     fi
     sleep 2
@@ -520,10 +562,12 @@ if command -v docker >/dev/null 2>&1; then
     exit 1
   fi
   docker rm -f "${OPENCLAW_GATEWAY_CONTAINER}" trooper-local-gateway >/dev/null 2>&1 || true
-  # Gateway image is currently linux/amd64; Colima binfmt/rosetta emulates it on arm64.
+  # Gateway image is currently linux/amd64; Colima binfmt/qemu emulates it on arm64.
+  # Publish on 0.0.0.0 (not 127.0.0.1): with Colima, 127.0.0.1 is the guest loopback
+  # and is NOT forwarded to the Mac host, so the bridge can never reach the gateway.
   exec docker run --name "${OPENCLAW_GATEWAY_CONTAINER}" --pull=missing \
     --platform linux/amd64 \
-    -p "127.0.0.1:${GATEWAY_PORT}:${GATEWAY_PORT}" \
+    -p "${GATEWAY_PORT}:${GATEWAY_PORT}" \
     -v "${OPENCLAW_DATA_DIR}:/home/node/.openclaw" \
     -v "${TROOPER_BRIDGE_DIR}/startup.sh:/opt/startup.sh:ro" \
     --entrypoint /bin/bash \
@@ -698,16 +742,26 @@ else
 fi
 
 # Approve pending bridge pairing inside the gateway container (required for WS operator role).
+# First-time pairing often needs an explicit request id; --latest is best-effort after that.
+approve_gateway_devices() {
+  command -v docker >/dev/null 2>&1 || return 0
+  docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${OPENCLAW_GATEWAY_CONTAINER}" || return 0
+  docker exec -e OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" -e GATEWAY_TOKEN="$GATEWAY_TOKEN" \
+    "${OPENCLAW_GATEWAY_CONTAINER}" \
+    sh -c '
+      cd /app || exit 0
+      # Approve every pending request id (if the CLI prints them).
+      node openclaw.mjs devices list 2>/dev/null | sed -n "s/.*requestId[=\": ]*\\([a-f0-9-]\\{36\\}\\).*/\\1/p" | while read -r rid; do
+        node openclaw.mjs devices approve "$rid" 2>/dev/null || true
+      done
+      node openclaw.mjs devices approve --token "$GATEWAY_TOKEN" --latest 2>/dev/null || true
+      node openclaw.mjs devices approve --latest 2>/dev/null || true
+    ' >/dev/null 2>&1 || true
+}
+
 if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' | grep -qx "${OPENCLAW_GATEWAY_CONTAINER}"; then
   echo "Approving Trooper bridge device with the local gateway..."
-  docker exec -e OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" -e GATEWAY_TOKEN="$GATEWAY_TOKEN" \
-    "${OPENCLAW_GATEWAY_CONTAINER}" \
-    sh -c 'cd /app && node openclaw.mjs devices approve --token "$GATEWAY_TOKEN" --latest' \
-    >/dev/null 2>&1 || true
-  docker exec -e OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" -e GATEWAY_TOKEN="$GATEWAY_TOKEN" \
-    "${OPENCLAW_GATEWAY_CONTAINER}" \
-    sh -c 'cd /app && node openclaw.mjs devices approve --latest' \
-    >/dev/null 2>&1 || true
+  approve_gateway_devices
   # Nudge bridge to reconnect after approval.
   launchctl kickstart -k "gui/$(id -u)/so.trooper.local-bridge" >/dev/null 2>&1 || true
 fi
@@ -721,10 +775,7 @@ for _ in $(seq 1 60); do
   fi
   # Retry device approval mid-wait if still pairing or missing scopes.
   if printf '%s' "$health_json" | grep -qiE 'pairing|not approved|missing scope|auth_or_pairing'; then
-    docker exec -e OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" -e GATEWAY_TOKEN="$GATEWAY_TOKEN" \
-      "${OPENCLAW_GATEWAY_CONTAINER}" \
-      sh -c 'cd /app && node openclaw.mjs devices approve --latest' \
-      >/dev/null 2>&1 || true
+    approve_gateway_devices
     launchctl kickstart -k "gui/$(id -u)/so.trooper.local-bridge" >/dev/null 2>&1 || true
   fi
   sleep 2

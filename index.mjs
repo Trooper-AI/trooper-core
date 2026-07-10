@@ -1751,10 +1751,15 @@ function writePreparedOpenClawConfig(prepared) {
 
 function ensureOpenClawConfigOwnership() {
  try {
-  if (existsSync(OPENCLAW_CONFIG_PATH)) {
-   // Quote paths: macOS Application Support has spaces and breaks unquoted chown.
-   execSync(`chown 1000:1000 "${OPENCLAW_CONFIG_PATH}" && chmod 600 "${OPENCLAW_CONFIG_PATH}"`, { timeout: 3000 });
+  if (!existsSync(OPENCLAW_CONFIG_PATH)) return;
+  // On local Mac/Windows hosts the config lives on the user volume. chown 1000:1000
+  // is a VPS container ownership fix and is not permitted / not needed on Darwin.
+  if (isLocalHostRuntime()) {
+   try { execSync(`chmod 600 "${OPENCLAW_CONFIG_PATH}"`, { timeout: 3000 }); } catch {}
+   return;
   }
+  // Quote paths: Application Support (and other paths) can contain spaces.
+  execSync(`chown 1000:1000 "${OPENCLAW_CONFIG_PATH}" && chmod 600 "${OPENCLAW_CONFIG_PATH}"`, { timeout: 3000 });
  } catch (err) {
   console.warn(`[bridge] Failed to repair OpenClaw config ownership: ${err.message}`);
  }
