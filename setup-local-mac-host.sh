@@ -423,8 +423,11 @@ write_env_line() {
   write_env_line OPENCLAW_DATA_DIR "$OPENCLAW_DATA_DIR"
   write_env_line OPENCLAW_DATA_ROOT "$OPENCLAW_DATA_DIR"
   write_env_line OPENCLAW_CONFIG_ROOT "$OPENCLAW_CONFIG_ROOT"
-  write_env_line OPENCLAW_DEVICES_DIR "$OPENCLAW_CONFIG_ROOT/devices"
-  write_env_line OPENCLAW_PAIRED_JSON_PATH "$OPENCLAW_CONFIG_ROOT/devices/paired.json"
+  # Gateway reads ~/.openclaw/devices/paired.json (bind-mounted OPENCLAW_DATA_DIR).
+  # Do NOT point at config/devices — OpenClaw treats tokenless paired entries as
+  # roleFrom=<none>, which loops on "pairing required: role-upgrade" / missing scope.
+  write_env_line OPENCLAW_DEVICES_DIR "$OPENCLAW_DATA_DIR/devices"
+  write_env_line OPENCLAW_PAIRED_JSON_PATH "$OPENCLAW_DATA_DIR/devices/paired.json"
   write_env_line OPENCLAW_WORKSPACE_HOST_ROOT "$OPENCLAW_DATA_DIR/workspace"
   write_env_line OPENCLAW_DOCKER_IMAGE "$OPENCLAW_DOCKER_IMAGE"
   write_env_line OPENCLAW_GATEWAY_CONTAINER "$OPENCLAW_GATEWAY_CONTAINER"
@@ -488,42 +491,65 @@ set +a
 # only inherit a minimal PATH).
 export PATH="${TROOPER_HOME:-$HOME/Library/Application Support/Trooper/runtime}/bin:${TROOPER_HOME:-$HOME/Library/Application Support/Trooper/runtime}/lima/bin:/opt/homebrew/bin:/usr/local/bin:/Applications/Docker.app/Contents/Resources/bin:$HOME/Applications/Docker.app/Contents/Resources/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
-# Free GATEWAY_PORT: Trooper may also run a managed OpenClaw node gateway
-# (ai.openclaw.gateway) on 18789. That process steals the port from Docker and
-# causes "gateway token mismatch" because it uses a different auth token.
+# Free GATEWAY_PORT from competing OpenClaw native gateways only.
+# NEVER kill Colima/Lima SSH port-forwards or docker-proxy — that tears down
+# the host→guest mapping for the containerized gateway and leaves the socket dead.
 free_gateway_port() {
   local port="${GATEWAY_PORT:-18789}"
-  local uid
+  local uid pid cmd
   uid="$(/usr/bin/id -u)"
   /bin/launchctl bootout "gui/$uid/ai.openclaw.gateway" >/dev/null 2>&1 || true
   /bin/launchctl bootout "gui/$uid" "$HOME/Library/LaunchAgents/ai.openclaw.gateway.plist" >/dev/null 2>&1 || true
   /bin/launchctl disable "gui/$uid/ai.openclaw.gateway" >/dev/null 2>&1 || true
-  local pids
-  pids="$(/usr/sbin/lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)"
-  if [[ -n "$pids" ]]; then
-    echo "Stopping processes on gateway port $port: $pids"
-    # shellcheck disable=SC2086
-    /bin/kill $pids >/dev/null 2>&1 || true
-    sleep 1
-    pids="$(/usr/sbin/lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)"
-    if [[ -n "$pids" ]]; then
-      # shellcheck disable=SC2086
-      /bin/kill -9 $pids >/dev/null 2>&1 || true
+  while read -r pid; do
+    [[ -z "$pid" ]] && continue
+    cmd="$(/bin/ps -p "$pid" -o args= 2>/dev/null || true)"
+    # Keep docker/colima listeners intact (ssh port-forward, docker-proxy, lima).
+    if echo "$cmd" | /usr/bin/grep -Eqi 'ssh|docker-proxy|lima|colima|vpnkit'; then
+      echo "Keeping port $port listener pid=$pid (docker/colima forward): ${cmd:0:80}"
+      continue
     fi
-  fi
+    # Only stop known competing OpenClaw / node gateway processes.
+    if echo "$cmd" | /usr/bin/grep -Eqi 'openclaw|ai\.openclaw|gateway --port|dist/index\.js gateway'; then
+      echo "Stopping competing gateway on port $port: pid=$pid ${cmd:0:80}"
+      /bin/kill "$pid" >/dev/null 2>&1 || true
+      sleep 1
+      /bin/kill -9 "$pid" >/dev/null 2>&1 || true
+    else
+      echo "Leaving unknown listener on port $port pid=$pid: ${cmd:0:80}"
+    fi
+  done < <(/usr/sbin/lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)
 }
 
-ensure_docker() {
-  # Prefer the Colima-forwarded host socket. Never restart docker.service inside
-  # the guest alone — that leaves a stale host socket while guest docker is fine.
+# Self-contained helpers (this script is run by LaunchAgent — do not call
+# functions defined only in setup-local-mac-host.sh).
+docker_cli_ready() {
   if [[ -S "$HOME/.colima/default/docker.sock" ]]; then
     export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
   elif [[ -S "$HOME/.colima/docker.sock" ]]; then
     export DOCKER_HOST="unix://$HOME/.colima/docker.sock"
   fi
   unset DOCKER_CONTEXT || true
+  command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
+}
 
-  if docker info >/dev/null 2>&1; then
+start_colima_for_gateway() {
+  local mem="${TROOPER_COLIMA_MEMORY_GIB:-8}"
+  local cpus="${TROOPER_COLIMA_CPUS:-4}"
+  if [[ "$(uname -m)" == "arm64" ]] && [[ ! -d /Library/Apple/usr/libexec/oah ]]; then
+    /usr/sbin/softwareupdate --install-rosetta --agree-to-license >/dev/null 2>&1 || true
+  fi
+  colima start --runtime docker --vm-type vz --mount-type virtiofs --memory "$mem" --cpu "$cpus" 2>/dev/null \
+    || colima start --runtime docker --memory "$mem" --cpu "$cpus" 2>/dev/null \
+    || colima start --runtime docker 2>/dev/null \
+    || colima start 2>/dev/null \
+    || true
+}
+
+ensure_docker() {
+  # Prefer the Colima-forwarded host socket. Never restart docker.service inside
+  # the guest alone — that leaves a stale host socket while guest docker is fine.
+  if docker_cli_ready; then
     return 0
   fi
   if ! command -v colima >/dev/null 2>&1; then
@@ -531,10 +557,10 @@ ensure_docker() {
   fi
 
   echo "Starting Colima Docker runtime..."
-  colima_start_trooper
+  start_colima_for_gateway
   local i
   for i in $(seq 1 20); do
-    if docker_ready; then
+    if docker_cli_ready; then
       return 0
     fi
     sleep 2
@@ -544,9 +570,9 @@ ensure_docker() {
   echo "Host Docker socket is stale — restarting Colima to rebind unix socket..."
   colima stop 2>/dev/null || true
   sleep 1
-  colima_start_trooper
+  start_colima_for_gateway
   for i in $(seq 1 30); do
-    if docker_ready; then
+    if docker_cli_ready; then
       return 0
     fi
     sleep 2
@@ -555,18 +581,28 @@ ensure_docker() {
 }
 
 if command -v docker >/dev/null 2>&1; then
-  free_gateway_port
   if ! ensure_docker; then
     echo "Docker daemon is not available (Colima failed to start)." >&2
     sleep 30
     exit 1
   fi
+  # If a healthy gateway is already running and listening, attach to it instead of
+  # free_gateway_port / force-recreate (LaunchAgent KeepAlive must not kill Colima's
+  # SSH port-forward for a live container).
+  if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${OPENCLAW_GATEWAY_CONTAINER}"; then
+    if curl -fsS --max-time 2 "http://127.0.0.1:${GATEWAY_PORT}/" >/dev/null 2>&1; then
+      echo "Gateway container already healthy on :${GATEWAY_PORT}; watching..."
+      exec docker wait "${OPENCLAW_GATEWAY_CONTAINER}"
+    fi
+  fi
+  free_gateway_port
   docker rm -f "${OPENCLAW_GATEWAY_CONTAINER}" trooper-local-gateway >/dev/null 2>&1 || true
-  # Gateway image is currently linux/amd64; Colima binfmt/qemu emulates it on arm64.
+  # Gateway image is currently linux/amd64; Colima binfmt/rosetta emulates it on arm64.
   # Publish on 0.0.0.0 (not 127.0.0.1): with Colima, 127.0.0.1 is the guest loopback
   # and is NOT forwarded to the Mac host, so the bridge can never reach the gateway.
   exec docker run --name "${OPENCLAW_GATEWAY_CONTAINER}" --pull=missing \
     --platform linux/amd64 \
+    --restart unless-stopped \
     -p "${GATEWAY_PORT}:${GATEWAY_PORT}" \
     -v "${OPENCLAW_DATA_DIR}:/home/node/.openclaw" \
     -v "${TROOPER_BRIDGE_DIR}/startup.sh:/opt/startup.sh:ro" \
