@@ -27,16 +27,28 @@ if command -v Xvnc &>/dev/null; then
 fi
 
 # Belt-and-suspenders: keep runtime permissions aligned with entrypoint.sh.
-# The host bridge runs as root, so private gateway state does not need
-# group/world access.
-chown -R 1000:1000 /home/node/.openclaw 2>/dev/null || true
-chown -R 1000:1000 /home/node/.npm 2>/dev/null || true
-find /home/node/.openclaw -type d -exec chmod 700 {} \; 2>/dev/null || true
-find /home/node/.openclaw -name '*.json' -exec chmod 600 {} \; 2>/dev/null || true
-chmod 700 /home/node/.openclaw/devices 2>/dev/null || true
+# IMPORTANT (local Mac / Colima + amd64 image): full-tree `chown -R` / `find -exec chmod`
+# over ~/.openclaw can take many minutes (thousands of agent workspace files) and blocks
+# the gateway from binding :18789, which makes Trooper loop on "OpenClaw is restarting".
+# Only fix the security-sensitive roots here; avoid recursive walks at boot.
+echo "[startup] Applying fast permission pass (sensitive dirs only)..."
+for d in \
+  /home/node/.openclaw \
+  /home/node/.openclaw/devices \
+  /home/node/.openclaw/identity \
+  /home/node/.openclaw/config \
+  /home/node/.openclaw/agents \
+  /home/node/.openclaw/credentials \
+  /home/node/.openclaw/auth-profile-secrets
+do
+  chown 1000:1000 "$d" 2>/dev/null || true
+  chmod 700 "$d" 2>/dev/null || true
+done
 chmod 600 /home/node/.openclaw/devices/*.json 2>/dev/null || true
-chmod 700 /home/node/.openclaw/identity 2>/dev/null || true
 chmod 600 /home/node/.openclaw/identity/*.json 2>/dev/null || true
+chmod 600 /home/node/.openclaw/*.json 2>/dev/null || true
+chown 1000:1000 /home/node/.npm 2>/dev/null || true
+echo "[startup] Permission pass complete"
 
 # Startup optimizations (recommended by openclaw doctor)
 export NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache

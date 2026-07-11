@@ -123,7 +123,7 @@ import {
   writePluginFilesFromAbsolutePaths,
 } from './lib/gateway-plugins.mjs';
 
-const OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write', 'operator.approvals', 'operator.talk.secrets'];
+const OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write', 'operator.approvals', 'operator.pairing', 'operator.talk.secrets'];
 
 function isLocalHostRuntime() {
  return process.platform === 'darwin'
@@ -446,11 +446,37 @@ function isLoopbackRequest(req) {
  );
 }
 
+/** Loopback-only open routes for local Mac/Windows host console (no token on 127.0.0.1). */
+const LOCAL_HOST_LOOPBACK_OPEN_GET = new Set([
+  '/logs',
+  '/admin/logs',
+  '/admin/health',
+  '/admin/diagnostics',
+  '/admin/stats',
+  '/gateway/status',
+  '/config/openclaw',
+  '/config/auth-profiles',
+  '/config/api-keys',
+  '/config/provider-settings',
+]);
+const LOCAL_HOST_LOOPBACK_OPEN_WRITE = new Set([
+  '/config/openclaw',
+  '/config/auth-profiles',
+]);
+
 function isLocalHostLogRead(req) {
  if (!isLocalHostRuntime()) return false;
- if (req.method !== 'GET' && req.method !== 'HEAD') return false;
- if (req.path !== '/logs' && req.path !== '/admin/logs') return false;
- return isLoopbackRequest(req);
+ if (!isLoopbackRequest(req)) return false;
+ const method = String(req.method || 'GET').toUpperCase();
+ // CORS preflight from the desktop webview must not hit 401.
+ if (method === 'OPTIONS') return true;
+ if (method === 'GET' || method === 'HEAD') {
+  return LOCAL_HOST_LOOPBACK_OPEN_GET.has(req.path);
+ }
+ if (method === 'PUT' || method === 'POST' || method === 'PATCH') {
+  return LOCAL_HOST_LOOPBACK_OPEN_WRITE.has(req.path);
+ }
+ return false;
 }
 
 // Browser tool names that trigger live screenshot streaming
@@ -1890,15 +1916,19 @@ function upsertBridgePairedDevice({ force = false, reason = 'repair' } = {}) {
  paired = normalized.paired;
  const existing = paired[deviceIdentity.deviceId] || {};
  const desired = buildBridgePairedDeviceEntry(existing);
- const changed = force || normalized.changed || bridgePairedDeviceNeedsRewrite(existing, desired);
+ // IMPORTANT: `force` means "attempt repair now", not "always rewrite".
+ // Treating force as changed=true rewrote paired.json every connect/scope-repair
+ // (fresh approvedAtMs/ts) and triggered infinite docker restart thrash.
+ const contentChanged = normalized.changed || bridgePairedDeviceNeedsRewrite(existing, desired);
+ const changed = contentChanged;
  if (changed) {
   paired[deviceIdentity.deviceId] = desired;
   writeFileSync(OPENCLAW_PAIRED_JSON_PATH, JSON.stringify(paired, null, 2), { mode: 0o600 });
   try { execSync(`chown -R 1000:1000 ${OPENCLAW_DEVICES_DIR} 2>/dev/null || true`, { timeout: 5000 }); } catch {}
   const action = Object.keys(existing).length ? 'repaired' : 'added';
-  console.log(`[OpenClaw] Bridge device ${action} in paired.json (${reason})`);
+  console.log(`[OpenClaw] Bridge device ${action} in paired.json (${reason}${force ? ', forced-check' : ''})`);
  } else {
-  console.log(`[OpenClaw] Bridge device already matches paired.json (${reason})`);
+  console.log(`[OpenClaw] Bridge device already matches paired.json (${reason}${force ? ', forced-check' : ''})`);
  }
  return {
   changed,
@@ -1921,7 +1951,11 @@ function getBridgeOperatorDeviceToken() {
 }
 
 function isGatewayPairingError(message = '') {
- return /pairing required|not paired|unpaired|device.*pair|pair.*device|approval required|device.*approval/i.test(String(message || ''));
+ return /pairing required|not paired|unpaired|device.*pair|pair.*device|approval required|device.*approval|missing scope|role-upgrade|role from|not approved/i.test(String(message || ''));
+}
+
+function isGatewayMissingScopeError(message = '') {
+ return /missing scope\s*:?\s*operator\.|missing scope|role-upgrade/i.test(String(message || ''));
 }
 
 function ensureOpenClawStartupScript({ reason = 'repair' } = {}) {
@@ -2298,6 +2332,9 @@ class OpenClawGateway {
  this.connected = true;
  this.lastConnectedAt = Date.now();
  this.lastError = null;
+ // Clear sticky auth failures so health/UI stop reporting "missing scope" after a good connect.
+ this.lastAuthError = null;
+ this.lastAuthAt = null;
  this._resetErrorWindowStartedAt = 0;
  this._resetErrorCount = 0;
  this.expectedReconnectUntil = 0;
@@ -2310,7 +2347,7 @@ class OpenClawGateway {
  // Auto-approve bridge device so sessions_spawn works after gateway restarts
  // Write to paired.json directly (reliable) rather than relying on the CLI flow
  try {
- upsertBridgePairedDevice({ reason: 'connect' });
+ upsertBridgePairedDevice({ force: true, reason: 'connect' });
  } catch (e) { console.warn('[OpenClaw] paired.json auto-approve failed:', e.message); }
  // Reconcile ACP sessions on connect — discover active sessions that survived bridge restart
  (async () => {
@@ -2432,7 +2469,14 @@ class OpenClawGateway {
  () => clearTimeout(authTimeout),
  );
 
- if (USE_GATEWAY_DEVICE_AUTH) {
+ // Always wait for connect.challenge when we can sign with device identity.
+ // Sending connect *before* the challenge (no nonce / no device proof) while
+ // requesting operator.admin scopes fails with: missing scope: operator.admin
+ // and the UI loops on "OpenClaw is restarting".
+ const canSignDevice = Boolean(deviceIdentity?.privateKeyPem)
+  || Boolean(getBridgeOperatorDeviceToken())
+  || USE_GATEWAY_DEVICE_AUTH;
+ if (canSignDevice) {
  console.log('[OpenClaw] Waiting for gateway connect challenge...');
  } else {
  this._sendConnect();
@@ -2555,34 +2599,43 @@ class OpenClawGateway {
  }
  return;
  }
- // Handle pairing required gracefully — resolve (not reject!) to avoid unhandled rejection crash
+ // Handle pairing / missing-scope gracefully — resolve (not reject!) to avoid unhandled rejection crash
  if (isGatewayPairingError(errMsg) && frame.id === this._authRequestId) {
- console.log('[OpenClaw] Pairing required — attempting self-approve via paired.json...');
+ const scopeIssue = isGatewayMissingScopeError(errMsg);
+ console.log(`[OpenClaw] ${scopeIssue ? 'Missing operator scopes' : 'Pairing required'} — repairing paired.json (restart only if needed)...`);
  this._pendingRequests.delete(frame.id);
- // Self-approval strategy: write our device directly to paired.json on the host,
- // then restart the gateway so it loads the approval from disk on next start.
- // Cooldown: only attempt restart once every 5 minutes to prevent restart loops.
+ // Self-approval strategy: write our device directly to paired.json on the host.
+ // On local Mac host, avoid restart thrash: only docker-restart when paired.json actually changed.
+ // Scope repairs previously used a short cooldown and always restarted, which kept :18789 dead.
+ const cooldownMs = scopeIssue && isLocalHostRuntime() ? 5 * 60 * 1000 : 5 * 60 * 1000;
  const now = Date.now();
- if (now - this._lastSelfApproveMs < 5 * 60 * 1000) {
- console.log(`[OpenClaw] Self-approve cooldown active (${Math.round((5 * 60 * 1000 - (now - this._lastSelfApproveMs)) / 1000)}s remaining) — skipping restart`);
+ if (now - this._lastSelfApproveMs < cooldownMs) {
+ console.log(`[OpenClaw] Self-approve cooldown active (${Math.round((cooldownMs - (now - this._lastSelfApproveMs)) / 1000)}s remaining) — skipping restart`);
  // Resolve auth so reconnect timer fires normally
  if (this._authResolve) { const r = this._authResolve; this._authResolve = null; this._authReject = null; r(null); }
  return;
  }
  this._lastSelfApproveMs = now;
- this._reconnectDelay = 35000;
+ this._reconnectDelay = scopeIssue ? 25000 : 35000;
  (async () => {
  try {
  const { promisify: _p } = await import('util');
  const { exec: _e } = await import('child_process');
  const _run = _p(_e);
  if (deviceIdentity?.deviceId) {
- console.log(`[OpenClaw] Self-approving deviceId ${deviceIdentity.deviceId.slice(0, 12)}...`);
+ console.log(`[OpenClaw] Self-approving deviceId ${deviceIdentity.deviceId.slice(0, 12)}... (${scopeIssue ? 'scope-repair' : 'pairing'})`);
 
+ let pairedChanged = true;
  // Write directly to paired.json on the host (gateway config dir is bind-mounted here)
  try {
- upsertBridgePairedDevice({ force: true, reason: 'pairing-required' });
- console.log('[OpenClaw] Written to paired.json — restarting gateway to apply...');
+ // force:false — only restart when content actually needs rewrite
+ const result = upsertBridgePairedDevice({ force: false, reason: scopeIssue ? 'missing-scope' : 'pairing-required' });
+ pairedChanged = !!(result && result.changed);
+ if (pairedChanged) {
+  console.log('[OpenClaw] paired.json changed — restarting gateway to apply...');
+ } else {
+  console.log('[OpenClaw] paired.json already correct — reconnect only (no docker restart thrash)');
+ }
  } catch (writeErr) {
  console.warn('[OpenClaw] Could not write paired.json directly:', writeErr.message, '— falling back to docker exec approve');
  // Fallback: try CLI approval (may fail if pending request is gone)
@@ -2590,17 +2643,22 @@ class OpenClawGateway {
  `docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`,
  { timeout: 20000 }
  ).catch(() => {});
+ pairedChanged = true;
  }
 
- // Restart gateway so it picks up the updated paired.json
- await _run(`docker restart ${OPENCLAW_GATEWAY_CONTAINER}`, { timeout: 60000 }).catch(() => {});
- // Fix identity dir permissions after restart (gateway writes to it on boot)
- await _run(`chown -R 1000:1000 /opt/openclaw-data/config/identity 2>/dev/null || true`).catch(() => {});
+ // Restart gateway only when paired.json actually changed
+ if (pairedChanged) {
+  await _run(`docker restart ${OPENCLAW_GATEWAY_CONTAINER}`, { timeout: 60000 }).catch(() => {});
+  // Fix identity dir permissions after restart (gateway writes to it on boot)
+  const dataRoot = process.env.OPENCLAW_DATA_ROOT || process.env.OPENCLAW_DATA_DIR || '/opt/openclaw-data';
+  await _run(`chown -R 1000:1000 "${dataRoot}/config/identity" "${dataRoot}/devices" 2>/dev/null || true`).catch(() => {});
+ }
  // Give gateway time to fully start before bridge reconnects
- this._reconnectDelay = 35000;
+ const delay = pairedChanged ? (scopeIssue ? 25000 : 35000) : 8000;
+ this._reconnectDelay = delay;
  this.token = getDesiredGatewayToken() || this.token;
- this.forceReconnect(35000, 'pairing-required');
- console.log('[OpenClaw] Gateway restarted — will reconnect in 35s');
+ this.forceReconnect(delay, scopeIssue ? 'missing-scope-repair' : 'pairing-required');
+ console.log(`[OpenClaw] ${pairedChanged ? 'Gateway restarted' : 'Reconnect scheduled'} — will retry in ${Math.round(delay / 1000)}s`);
  }
  } catch (err) {
  console.warn('[OpenClaw] Self-approve failed:', err.message);
@@ -4735,7 +4793,11 @@ function ensureAuthProfileSecretKeySource() {
 ensureAuthProfileSecretKeySource();
 
 function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
- for (const target of [AUTH_PROFILES_PATH, AUTH_PROFILES_ROOT_PATH]) {
+ // OpenClaw gateway default agent dir is ~/.openclaw/agents/main/agent (DATA root),
+ // while Trooper also keeps managed copies under CONFIG_ROOT/agents/... Write both.
+ const gatewayStateAuthPath = openclawDataPath('agents', 'main', 'agent', 'auth-profiles.json');
+ const gatewayStateRootAuth = openclawDataPath('auth-profiles.json');
+ for (const target of [AUTH_PROFILES_PATH, AUTH_PROFILES_ROOT_PATH, gatewayStateAuthPath, gatewayStateRootAuth]) {
   try {
    mkdirSync(dirname(target), { recursive: true });
 	   if (backup) {
@@ -4757,10 +4819,14 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
   const dirs = readdirSync(agentsDir, { withFileTypes: true }).filter(d => d.isDirectory() && d.name !== 'main');
 	  for (const d of dirs) {
 	   const sub = `${agentsDir}/${d.name}/agent/auth-profiles.json`;
+	   const stateSub = openclawDataPath('agents', d.name, 'agent', 'auth-profiles.json');
 	   try {
 	    mkdirSync(dirname(sub), { recursive: true });
 		    writeJsonFileIfChanged(sub, authDoc);
 		    try { execSync(`chown 1000:1000 ${sub} 2>/dev/null; chmod 600 ${sub} 2>/dev/null`, { timeout: 3000 }); } catch {}
+	    mkdirSync(dirname(stateSub), { recursive: true });
+	    writeJsonFileIfChanged(stateSub, authDoc);
+	    try { execSync(`chown 1000:1000 ${stateSub} 2>/dev/null; chmod 600 ${stateSub} 2>/dev/null`, { timeout: 3000 }); } catch {}
 	    // Keep non-main agents sqlite auth stores in sync too (OpenClaw 2026.6+).
 	    syncAgentAuthProfileSqlite(authDoc, d.name);
 	   } catch (err) {
@@ -4770,6 +4836,13 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
  } catch {}
  // Primary agent sqlite store (required by OpenClaw 2026.6+).
  syncAgentAuthProfileSqlite(authDoc, 'main');
+ // Also sync sqlite into gateway state agent dir (not only CONFIG_ROOT).
+ try {
+  const stateDb = openclawDataPath('agents', 'main', 'agent', 'openclaw-agent.sqlite');
+  syncAgentAuthProfileSqliteFile(stateDb, authDoc);
+ } catch (err) {
+  console.warn(`[bridge] Failed to sync state-root agent sqlite: ${err.message}`);
+ }
 }
 
 // OpenClaw 2026.6+ stores auth in openclaw-agent.sqlite (not only auth-profiles.json).
@@ -5426,21 +5499,25 @@ function normalizeGatewayModelId(model) {
  if (!model) return model;
  let m = String(model).trim();
  const EXACT_MODEL_MAP = {
-  'gpt': 'openai/gpt-5.4',
-  'gpt-5.4': 'openai/gpt-5.4',
-  'openai/gpt-5.4': 'openai/gpt-5.4',
-  'openai-codex/gpt-5.4': 'openai/gpt-5.4',
-  'gpt-5-4': 'openai/gpt-5.4',
-  'openai/gpt-5-4': 'openai/gpt-5.4',
-  'openai-codex/gpt-5-4': 'openai/gpt-5.4',
-  'gpt-5.2': 'openai/gpt-5.2',
-  'openai/gpt-5.2': 'openai/gpt-5.2',
-  'gpt-5-2': 'openai/gpt-5.2',
-  'openai/gpt-5-2': 'openai/gpt-5.2',
-  'gpt-5.0': 'openai/gpt-5.0',
-  'openai/gpt-5.0': 'openai/gpt-5.0',
-  'gpt-5-0': 'openai/gpt-5.0',
-  'openai/gpt-5-0': 'openai/gpt-5.0',
+  'gpt': 'openai-codex/gpt-5.4',
+  'gpt-5.4': 'openai-codex/gpt-5.4',
+  // Keep openai-codex/* as-is — never rewrite to openai/* (API-key path).
+  // Mapping to openai/* caused 401 Missing bearer when only Codex OAuth is present.
+  'openai-codex/gpt-5.4': 'openai-codex/gpt-5.4',
+  'gpt-5-4': 'openai-codex/gpt-5.4',
+  'openai-codex/gpt-5-4': 'openai-codex/gpt-5.4',
+  'gpt-5.5': 'openai-codex/gpt-5.4',
+  'openai/gpt-5.5': 'openai-codex/gpt-5.4',
+  'openai/gpt-5.4': 'openai-codex/gpt-5.4',
+  'openai/gpt-5-4': 'openai-codex/gpt-5.4',
+  'gpt-5.2': 'openai-codex/gpt-5.2',
+  'openai/gpt-5.2': 'openai-codex/gpt-5.2',
+  'gpt-5-2': 'openai-codex/gpt-5.2',
+  'openai/gpt-5-2': 'openai-codex/gpt-5.2',
+  'gpt-5.0': 'openai-codex/gpt-5.0',
+  'openai/gpt-5.0': 'openai-codex/gpt-5.0',
+  'gpt-5-0': 'openai-codex/gpt-5.0',
+  'openai/gpt-5-0': 'openai-codex/gpt-5.0',
   'gpt-5-mini': 'openrouter/openai/gpt-5-mini',
   'openai/gpt-5-mini': 'openrouter/openai/gpt-5-mini',
  };
@@ -6107,6 +6184,23 @@ async function handleIncomingTask(req, res) {
 
  // Persist any skill credentials to the container environment
  if (skillCredentials) ensureSkillCredentials(skillCredentials);
+
+ // Fail fast when no AI credentials are configured (local Mac BYO host).
+ // Avoids opaque 30s openai 401 / "fetch failed" for empty auth-profiles.
+ try {
+  const _authPre = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+  const _profiles = _authPre?.profiles || {};
+  const _hasAny = Object.values(_profiles).some((p) => p && (p.access || p.key || p.token));
+  if (!_hasAny) {
+   const msg = 'No AI provider is connected on this Mac. Open Trooper → Settings → Connections and connect ChatGPT/Codex (or paste an API key). Auth profiles are empty.';
+   console.warn(`[${id}] ${msg}`);
+   return res.status(401).json({ error: msg, code: 'auth_profiles_empty', requestId: id, isAuthError: true });
+  }
+ } catch (e) {
+  const msg = 'Could not read AI auth profiles on this host. Connect ChatGPT/Codex in Settings → Connections.';
+  console.warn(`[${id}] auth preflight failed: ${e.message}`);
+  return res.status(401).json({ error: msg, code: 'auth_profiles_unreadable', requestId: id, isAuthError: true });
+ }
 
  if (!gateway.isReady) {
  const reconnected = await gateway.ensureConnected();
@@ -7345,9 +7439,11 @@ function buildGatewayRuntimeStatus({ includeLogs = false } = {}) {
  if (!container.running) {
   runtimeState = 'gateway_down';
   stateReason = container.inspectError || 'container_not_running';
- } else if (recentAuthError && !wsReady) {
+ } else if (recentAuthError && (!wsReady || /missing scope|pairing required|not approved|role-upgrade/i.test(gateway.lastAuthError || ''))) {
+  // Sticky scope/pairing failures must not look "ok" just because the socket is open.
   runtimeState = 'auth_error';
   stateReason = 'gateway_auth_or_pairing_failed';
+  if (wsReady) transient = true;
  } else if (wsReady && recentSnapshotTimeout) {
   runtimeState = 'gateway_busy';
   stateReason = 'session_snapshot_timeout';
@@ -12150,21 +12246,24 @@ function normalizeModelId(model) {
  if (trooperTier) return trooperTier.id;
  // Only normalize explicit known aliases. Never blanket-convert dots↔dashes across providers.
  const EXACT_MODEL_MAP = {
-   'gpt': 'openai/gpt-5.4',
-   'gpt-5.4': 'openai/gpt-5.4',
-   'openai/gpt-5.4': 'openai/gpt-5.4',
-   'openai-codex/gpt-5.4': 'openai/gpt-5.4',
-   'gpt-5-4': 'openai/gpt-5.4',
-   'openai/gpt-5-4': 'openai/gpt-5.4',
-   'openai-codex/gpt-5-4': 'openai/gpt-5.4',
-   'gpt-5.2': 'openai/gpt-5.2',
-   'openai/gpt-5.2': 'openai/gpt-5.2',
-   'gpt-5-2': 'openai/gpt-5.2',
-   'openai/gpt-5-2': 'openai/gpt-5.2',
-   'gpt-5.0': 'openai/gpt-5.0',
-   'openai/gpt-5.0': 'openai/gpt-5.0',
-   'gpt-5-0': 'openai/gpt-5.0',
-   'openai/gpt-5-0': 'openai/gpt-5.0',
+   'gpt': 'openai-codex/gpt-5.4',
+   'gpt-5.4': 'openai-codex/gpt-5.4',
+   // Never rewrite openai-codex/* → openai/* (that forces API-key path and 401s).
+   'openai-codex/gpt-5.4': 'openai-codex/gpt-5.4',
+   'gpt-5-4': 'openai-codex/gpt-5.4',
+   'openai-codex/gpt-5-4': 'openai-codex/gpt-5.4',
+   'gpt-5.5': 'openai-codex/gpt-5.4',
+   'openai/gpt-5.5': 'openai-codex/gpt-5.4',
+   'openai/gpt-5.4': 'openai-codex/gpt-5.4',
+   'openai/gpt-5-4': 'openai-codex/gpt-5.4',
+   'gpt-5.2': 'openai-codex/gpt-5.2',
+   'openai/gpt-5.2': 'openai-codex/gpt-5.2',
+   'gpt-5-2': 'openai-codex/gpt-5.2',
+   'openai/gpt-5-2': 'openai-codex/gpt-5.2',
+   'gpt-5.0': 'openai-codex/gpt-5.0',
+   'openai/gpt-5.0': 'openai-codex/gpt-5.0',
+   'gpt-5-0': 'openai-codex/gpt-5.0',
+   'openai/gpt-5-0': 'openai-codex/gpt-5.0',
    'gpt-5-mini': 'openrouter/openai/gpt-5-mini',
    'openai/gpt-5-mini': 'openrouter/openai/gpt-5-mini',
  };
