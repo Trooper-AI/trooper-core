@@ -4208,6 +4208,51 @@ const formattedToolLog = toolLog.map(t => ({
 	   model: explicitModel || effectiveRequestedModel,
 	  },
 	 });
+  // Char-estimate fallback when history usage is missing (keeps Trooper run cost UI usable).
+  if (!runUsage || (!(runUsage.input_tokens || runUsage.inputTokens || runUsage.modelBreakdown?.length)
+    && !(runUsage.output_tokens || runUsage.outputTokens))) {
+    const charsPerToken = 3.5;
+    const toolInputChars = toolLog.reduce((sum, t) => sum + JSON.stringify(t.params || {}).length, 0);
+    const toolOutputChars = toolLog.reduce((sum, t) => sum + (t.summary || '').length, 0);
+    const estimatedOutputTokens = Math.ceil(((response || '').length + toolInputChars) / charsPerToken);
+    const estimatedInputTokens = Math.ceil(((message || '').length + toolOutputChars) / charsPerToken) + (toolLog.length * 200);
+    if (estimatedInputTokens > 0 || estimatedOutputTokens > 0) {
+      runUsage = {
+        input_tokens: estimatedInputTokens,
+        output_tokens: estimatedOutputTokens,
+        total_tokens: estimatedInputTokens + estimatedOutputTokens,
+        estimated: true,
+        source: 'char_estimate',
+        model: explicitModel || effectiveRequestedModel || null,
+      };
+    }
+  }
+  // Emit terminal usage events so live trackers / timeline can price the run.
+  // (Return payload alone is not enough — chat-handler and store stream observers need events.)
+  if (onEvent) {
+    const modelLabel = explicitModel || effectiveRequestedModel || runUsage?.model || null;
+    const usagePayload = runUsage && typeof runUsage === 'object' ? runUsage : null;
+    if (usagePayload && modelLabel) {
+      onEvent('model_done', {
+        eventType: 'model_done',
+        confidence: usagePayload.estimated ? 'estimated' : 'native',
+        model: modelLabel,
+        provider: usagePayload.provider || (String(modelLabel).startsWith('openrouter/') ? 'openrouter' : null),
+        usage: usagePayload,
+        time: Date.now(),
+        runId: mainRunId || null,
+        sessionKey,
+      });
+    }
+    onEvent('done', {
+      eventType: 'done',
+      usage: usagePayload,
+      model: modelLabel,
+      runId: mainRunId || null,
+      sessionKey,
+      time: Date.now(),
+    });
+  }
 	 if (response) console.log(`[OpenClaw] Agent streaming response: ${response.length} chars (${toolLog.length} tool calls)`);
 	 return { response, toolLog: formattedToolLog, runId: mainRunId || null, sessionKey, usage: runUsage || null };
  } finally {
