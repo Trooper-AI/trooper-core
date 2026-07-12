@@ -69,6 +69,7 @@ import {
   stripGatewayErrorPrefix,
 } from './lib/provider-runtime.mjs';
 import { startFleetHeartbeat } from './lib/fleet-heartbeat.mjs';
+import { classifyOpenClawLifecycleSignal } from './lib/run-lifecycle-policy.mjs';
 import {
   assertRuntimeUpgradeCompatibility,
   validateRuntimeUpgradeRequest,
@@ -2271,11 +2272,14 @@ class OpenClawGateway {
  this.connected = false;
  this._connectPromise = null;
  this._stopPing();
- for (const [, pending] of this._pendingRequests) {
+ for (const [id, pending] of this._pendingRequests) {
+   if (pending.preserveAcrossReconnect === true) {
+    pending.transportDetached = true;
+    continue;
+   }
    try { pending.reject(new Error('Gateway reconnecting')); } catch {}
+   this._pendingRequests.delete(id);
  }
- this._pendingRequests.clear();
- this._eventListeners.clear();
  this._historyInflight.clear();
  this._historyCache.clear();
  this._historyQueue.splice(0);
@@ -2404,10 +2408,13 @@ class OpenClawGateway {
  console.log('[OpenClaw] Disconnected (code=' + code + '), reconnecting in ' + (this._reconnectDelay / 1000) + 's...');
  captureLog('warn', `Gateway disconnected (code=${code}), reconnecting in ${this._reconnectDelay / 1000}s`);
  for (const [id, pending] of this._pendingRequests) {
- pending.reject(new Error('WebSocket disconnected'));
+ if (pending.preserveAcrossReconnect === true) {
+  pending.transportDetached = true;
+  continue;
  }
- this._pendingRequests.clear();
- this._eventListeners.clear();
+ pending.reject(new Error('WebSocket disconnected'));
+ this._pendingRequests.delete(id);
+ }
  this._historyInflight.clear();
  this._historyCache.clear();
  this._historyQueue.splice(0);
@@ -2784,7 +2791,7 @@ class OpenClawGateway {
  // Session key in canonical format: agent:{agentId}:{rest}
  const _agentId = opts.agentId || 'main';
  const sessionKey = opts.sessionKey || `agent:${_agentId}:hook:trooper:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
- const timeoutMs = Number.isFinite(Number(opts.timeoutMs)) ? Number(opts.timeoutMs) : 600000;
+ const timeoutMs = Number.isFinite(Number(opts.timeoutMs)) ? Number(opts.timeoutMs) : 0;
  const { explicitModel, effectiveModel: effectiveRequestedModel } = resolveGatewayModelSelection(opts.model);
  const selectedThinking = resolveGatewayThinkingSelection(opts.thinking, effectiveRequestedModel, { explicitModel });
  await assertLocalGatewayModelReachable(effectiveRequestedModel);
@@ -2804,6 +2811,20 @@ class OpenClawGateway {
  last.status = data.is_error ? 'failed' : 'ok';
  last.summary = previewString(data.content ?? data.output ?? data.result ?? data.summary, 500);
  }
+ }
+ const lifecycleSignal = stream === 'lifecycle'
+  ? classifyOpenClawLifecycleSignal(data)
+  : null;
+ if (lifecycleSignal?.terminal) {
+  const pending = this._pendingRequests.get(id);
+  if (pending?.transportDetached === true) {
+   if (lifecycleSignal.successful) {
+    pending.resolve({ status: 'completed', sessionKey, recoveredAfterReconnect: true });
+   } else {
+    pending.reject(new Error(data?.error || data?.message || `OpenClaw run ${lifecycleSignal.phase}`));
+   }
+   this._pendingRequests.delete(id);
+  }
  }
  });
 
@@ -2825,7 +2846,11 @@ class OpenClawGateway {
  this._pendingRequests.set(id, {
  resolve: (payload) => { clearTimeout(timeout); this._activeTimeoutReset = null; resolve(payload); },
  reject: (err) => { clearTimeout(timeout); this._activeTimeoutReset = null; reject(err); },
- expectFinal: true, runId: null, idempotencyKey,
+ expectFinal: true,
+ runId: null,
+ idempotencyKey,
+ preserveAcrossReconnect: true,
+ transportDetached: false,
  });
 
  this.ws.send(JSON.stringify({
@@ -3325,7 +3350,7 @@ class OpenClawGateway {
  // Session key in canonical format: agent:{agentId}:{rest}
  const _agentId2 = opts.agentId || 'main';
  const sessionKey = opts.sessionKey || `agent:${_agentId2}:hook:trooper:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
- const timeoutMs = Number.isFinite(Number(opts.timeoutMs)) ? Number(opts.timeoutMs) : 600000;
+ const timeoutMs = Number.isFinite(Number(opts.timeoutMs)) ? Number(opts.timeoutMs) : 0;
  const runStartedAt = Date.now();
  const _projectFolder = opts.projectFolder || null;
  const attachmentCount = Array.isArray(opts.attachments) ? opts.attachments.filter(Boolean).length : 0;
@@ -3725,6 +3750,9 @@ function extractPatchFilePaths(patchText = '') {
  }
  lifecycleDepth++;
  }
+ const lifecycleSignal = stream === 'lifecycle'
+  ? classifyOpenClawLifecycleSignal(data)
+  : null;
  if (stream === 'lifecycle' && data?.phase === 'end') {
  lifecycleDepth = Math.max(0, lifecycleDepth - 1);
  if (steerMode && (!steerAckRunId || runId === steerAckRunId || runId === mainRunId)) {
@@ -3732,7 +3760,24 @@ function extractPatchFilePaths(patchText = '') {
  completeSteerWait();
  }
  }
- // Gateway auth/provider error — forward immediately and terminate
+ if (lifecycleSignal?.terminal) {
+  const pending = this._pendingRequests.get(id);
+  if (pending?.transportDetached === true) {
+   if (lifecycleSignal.successful) {
+    pending.resolve({
+     status: 'completed',
+     runId: runId || mainRunId || pending.runId || null,
+     sessionKey,
+     recoveredAfterReconnect: true,
+    });
+   } else {
+    pending.reject(new Error(data?.error || data?.message || `OpenClaw run ${lifecycleSignal.phase}`));
+   }
+   this._pendingRequests.delete(id);
+  }
+ }
+ // A lifecycle error can be a recoverable model/tool/compaction attempt while
+ // OpenClaw keeps the parent run active. Never turn it into EOF on our own.
  if (stream === 'lifecycle' && data?.phase === 'error') {
  const rawErrMsg = stripGatewayErrorPrefix(data.error || 'Gateway error') || 'Gateway error';
  const { provider: errorProvider, model: errorModel } = resolveProviderRuntimeContext({
@@ -3743,26 +3788,14 @@ function extractPatchFilePaths(patchText = '') {
  });
  const errMsg = normalizeProviderErrorMessage(rawErrMsg, { provider: errorProvider, model: errorModel }) || 'Gateway error';
  console.error(`[OpenClaw] Gateway lifecycle error ${formatProviderLogLabel({ provider: errorProvider, model: errorModel })}: ${errMsg}`);
- if (onEvent) onEvent('error', { message: errMsg, provider: errorProvider, model: errorModel });
- // Reject the pending request so the SSE stream terminates immediately
- // Try by runId first, then scan all pending requests
- let pendingEntry = null;
- for (const [reqId, p] of this._pendingRequests.entries()) {
-  if (p.runId === runId || reqId === runId) { pendingEntry = { id: reqId, ...p }; break; }
- }
- // If no match by runId, reject the most recent pending request (likely the one that caused the error)
- if (!pendingEntry && this._pendingRequests.size > 0) {
-  const lastKey = [...this._pendingRequests.keys()].pop();
-  const lastP = this._pendingRequests.get(lastKey);
-  pendingEntry = { id: lastKey, ...lastP };
- }
- if (pendingEntry?.reject) {
-  const gatewayError = new Error(`Gateway error: ${errMsg}`);
-  gatewayError.provider = errorProvider;
-  gatewayError.model = errorModel;
-  pendingEntry.reject(gatewayError);
-  this._pendingRequests.delete(pendingEntry.id);
- }
+ if (onEvent) onEvent('lifecycle_error', {
+  message: errMsg,
+  provider: errorProvider,
+  model: errorModel,
+  terminal: lifecycleSignal.terminal,
+  phase: lifecycleSignal.phase,
+ });
+ console.warn(`[OpenClaw] Lifecycle error recorded without closing active run ${runId || mainRunId || sessionKey}`);
  }
  if (stream === 'tool_use' && data) {
  const entry = { tool: data.name || data.tool || 'unknown', params: data.input || data.params || {}, status: 'called', startedAt: Date.now() };
@@ -3972,7 +4005,9 @@ function extractPatchFilePaths(patchText = '') {
  this._pendingRequests.set(id, {
  resolve: (payload) => { clearTimeout(timeout); this._activeTimeoutReset = null; resolve(payload); },
  reject: (err) => { clearTimeout(timeout); this._activeTimeoutReset = null; reject(err); },
- expectFinal: !steerMode, runId: null, idempotencyKey,
+  expectFinal: !steerMode, runId: null, idempotencyKey,
+  preserveAcrossReconnect: !steerMode,
+  transportDetached: false,
  });
 
  const method = steerMode
