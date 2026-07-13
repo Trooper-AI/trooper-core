@@ -3495,7 +3495,7 @@ class OpenClawGateway {
  console.log(`[TEXT:DBG] runId=${runId?.substring(0,8)} isSubAgent=${isSubAgent} chars=${data.text.length} snippet="${data.text.substring(0, 60).replace(/\n/g, '\\n')}"`);
  }
 
- if (!isSubAgent && ['assistant', 'thinking', 'tool_use', 'tool_result'].includes(stream)) {
+ if (!isSubAgent && ['assistant', 'thinking', 'tool_use', 'tool_result', 'compaction'].includes(stream)) {
  sawLiveStreamPayload = true;
  }
 
@@ -3732,6 +3732,15 @@ function extractPatchFilePaths(patchText = '') {
  }
  if (stream === 'progress' && data) {
  if (onEvent) onEvent('progress', { ...data, runId: runId || mainRunId || null, sessionKey });
+ }
+ if (stream === 'compaction' && data) {
+ if (onEvent) onEvent('compaction', {
+  ...data,
+  phase: data.phase || data.status || 'start',
+  runId: runId || mainRunId || null,
+  sessionKey,
+  source: data.source || 'openclaw_gateway',
+ });
  }
  // Track ALL lifecycle events (including from nested runIds via _activeSessionListener)
  if (stream === 'lifecycle' && data?.phase === 'start') {
@@ -4352,8 +4361,12 @@ const gateway = new OpenClawGateway(OPENCLAW_URL, OPENCLAW_GATEWAY_TOKEN);
 // ── Live agent event forwarding (cron, background runs → Trooper frontend) ──
 gateway._onAnyAgentEvent = (stream, data, runId) => {
   // Only forward meaningful events, not high-frequency text chunks
-  if (stream === 'tool_use' || stream === 'tool_result' || stream === 'lifecycle') {
-    const eventType = stream === 'tool_use' ? 'tool_start' : stream === 'tool_result' ? 'tool_result' : 'lifecycle';
+  if (stream === 'tool_use' || stream === 'tool_result' || stream === 'lifecycle' || stream === 'compaction') {
+    const eventType = stream === 'tool_use'
+      ? 'tool_start'
+      : stream === 'tool_result'
+        ? 'tool_result'
+        : stream;
     const toolName = data?.name || data?.tool || null;
     const payload = {
       event: eventType,
@@ -4363,7 +4376,9 @@ gateway._onAnyAgentEvent = (stream, data, runId) => {
         params: stream === 'tool_use' ? (data?.input || data?.params || {}) : undefined,
         success: stream === 'tool_result' ? !data?.is_error : undefined,
         summary: stream === 'tool_result' ? (typeof data?.content === 'string' ? data.content.slice(0, 500) : '') : undefined,
-        phase: stream === 'lifecycle' ? data?.phase : undefined,
+        phase: (stream === 'lifecycle' || stream === 'compaction') ? data?.phase : undefined,
+        completed: stream === 'compaction' ? data?.completed : undefined,
+        willRetry: stream === 'compaction' ? data?.willRetry : undefined,
         error: data?.error || undefined,
       },
       time: Date.now(),
