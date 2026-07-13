@@ -486,6 +486,23 @@ function isBrowserTool(tool) {
  return tool && BROWSER_TOOLS.some(t => String(tool).toLowerCase().includes(t));
 }
 
+function normalizeRuntimeBrowserMode(value = '') {
+ const raw = String(value || '').trim().toLowerCase().replace(/_/g, '-');
+ if (['desktop', 'vm', 'full-desktop', 'visible'].includes(raw)) return 'desktop';
+ if (['vps-browser', 'live-browser'].includes(raw)) return 'vps-browser';
+ if (['chrome-extension'].includes(raw)) return 'chrome-extension';
+ return 'headless';
+}
+
+function hasVisibleBrowserViewport(value = '') {
+ const mode = normalizeRuntimeBrowserMode(value);
+ return mode === 'desktop' || mode === 'vps-browser';
+}
+
+function isSteerContinuationBoundaryError(error) {
+ return /cannot continue from message role\s*:\s*assistant/i.test(String(error?.message || error || ''));
+}
+
 // ── VNC Live View ─────────────────────────────────────────────────────
 // When Xvnc + noVNC/websockify are running, send the client a live VNC URL
 // instead of polling screenshots. Caddy proxies /vnc/* → websockify:6080.
@@ -3416,6 +3433,7 @@ class OpenClawGateway {
  let emittedMainRunStart = false;
  let sawLiveStreamPayload = false;
  let historyPoller = null;
+ let historyPollStartTimer = null;
  let historyPollInFlight = false;
  let historyPollFailures = 0;
  let lastHistoryAssistantText = '';
@@ -3996,7 +4014,9 @@ function extractPatchFilePaths(patchText = '') {
  this._activeSessionListener = eventHandler;
 
  try {
- const result = await new Promise((resolve, reject) => {
+ let result;
+ try {
+ result = await new Promise((resolve, reject) => {
  // Inactivity timeout — resets every time the gateway sends an event
  let timeout;
  const resetTimeout = () => {
@@ -4118,12 +4138,36 @@ function extractPatchFilePaths(patchText = '') {
  }
  };
 
- setTimeout(() => {
+ historyPollStartTimer = setTimeout(() => {
  if (historyPoller || sawLiveStreamPayload) return;
  historyPoller = setInterval(pollSessionHistory, 10000);
  pollSessionHistory().catch(() => {});
  }, 8000);
  });
+ } catch (error) {
+  if (!steerMode || !isSteerContinuationBoundaryError(error)) throw error;
+  console.warn(`[OpenClaw] sessions.steer reached an assistant transcript boundary; retrying as a normal follow-up in ${sessionKey}`);
+  if (historyPollStartTimer) clearTimeout(historyPollStartTimer);
+  if (historyPoller) clearInterval(historyPoller);
+  historyPollStartTimer = null;
+  historyPoller = null;
+  this._pendingRequests.delete(id);
+  this._eventListeners.delete(idempotencyKey);
+  if (this._activeSessionListener === eventHandler) this._activeSessionListener = null;
+  if (onEvent) {
+   onEvent('steer_fallback', {
+    reason: 'assistant_transcript_boundary',
+    message: 'The active turn ended while steering; continuing as a follow-up in the same session.',
+    sessionKey,
+   });
+  }
+  return this.runAgentStreaming(message, {
+   ...opts,
+   steer: false,
+   sessionKey,
+   idempotencyKey: randomUUID(),
+  }, rawOnEvent);
+ }
 
  if (steerMode) {
  steerAckRunId = result?.runId || result?.idempotencyKey || idempotencyKey;
@@ -4300,6 +4344,7 @@ const formattedToolLog = toolLog.map(t => ({
 	 if (response) console.log(`[OpenClaw] Agent streaming response: ${response.length} chars (${toolLog.length} tool calls)`);
 	 return { response, toolLog: formattedToolLog, runId: mainRunId || null, sessionKey, usage: runUsage || null };
  } finally {
+ if (historyPollStartTimer) clearTimeout(historyPollStartTimer);
  if (historyPoller) clearInterval(historyPoller);
  if (subagentDrainTimer) clearTimeout(subagentDrainTimer);
  if (steerCompletionTimer) clearTimeout(steerCompletionTimer);
@@ -6593,6 +6638,8 @@ const emitViewportScreenshotFrame = ({
 
 	 let response, toolLog, gatewayRunId, resolvedSessionKey, gatewayRunUsage;
 	 let abortedForPlanMode = false;
+	 const runtimeBrowserMode = normalizeRuntimeBrowserMode(context?.browserMode);
+	 const visibleBrowserViewport = hasVisibleBrowserViewport(runtimeBrowserMode);
 	 const streamingCallback = (event, data) => {
 	 // Forward each event to SSE as it arrives
 	 if (context?.planMode === true && event === 'tool_start' && !abortedForPlanMode) {
@@ -6612,17 +6659,21 @@ const emitViewportScreenshotFrame = ({
 	 if (abortedForPlanMode && event !== 'error' && event !== 'done' && event !== 'text') {
 	  return;
 	 }
-	 // Forward each event to SSE as it arrives
-	 sendSSE(event, data);
+	 // Tag generic browser tools with their actual surface. The client must not
+	 // turn a headless tool call into a visible VNC panel.
+	 const streamedData = isBrowserTool(data?.tool) || (event === 'screenshot_frame' && isBrowserTask)
+	  ? { ...(data || {}), browserMode: runtimeBrowserMode, provider: runtimeBrowserMode }
+	  : data;
+	 sendSSE(event, streamedData);
 
  // Start desktop recording when exec/desktop tools are used
  const isDesktopTool = (t) => t && ['exec', 'bash', 'write', 'edit'].includes(String(t).toLowerCase());
- if (event === 'tool_start' && isDesktopTool(data?.tool)) {
+ if (event === 'tool_start' && isDesktopTool(data?.tool) && visibleBrowserViewport) {
   startDesktopRecording();
  }
 
  // Start live browser view when browser tool begins
- if (event === 'tool_start' && isBrowserTool(data?.tool)) {
+ if (event === 'tool_start' && isBrowserTool(data?.tool) && visibleBrowserViewport) {
   if (screenshotPollerInterval) {
    clearInterval(screenshotPollerInterval);
   }
@@ -6643,16 +6694,16 @@ const emitViewportScreenshotFrame = ({
   const skillSession = getSkillBrowserSession();
   if (skillSession?.liveViewUrl) {
    browserSessionId = skillSession.sessionId || browserSessionId || null;
-   sendSSE('browser_session', buildBrowserSessionPayload({ liveViewUrl: skillSession.liveViewUrl, sessionId: skillSession.sessionId, domain, provider: skillSession.provider }));
+   sendSSE('browser_session', buildBrowserSessionPayload({ liveViewUrl: skillSession.liveViewUrl, sessionId: skillSession.sessionId, domain, provider: skillSession.provider, browserMode: runtimeBrowserMode }));
    console.log(`[browser-session] Sent skill-reported live view URL to client: ${skillSession.liveViewUrl}`);
    emitViewportScreenshotFrame();
   } else if (getVNCLiveViewUrl() && isVNCAvailable()) {
-   sendSSE('browser_session', buildBrowserSessionPayload({ liveViewUrl: getVNCLiveViewUrl(), domain, provider: 'vnc' }));
+   sendSSE('browser_session', buildBrowserSessionPayload({ liveViewUrl: getVNCLiveViewUrl(), domain, provider: 'vnc', browserMode: runtimeBrowserMode }));
    console.log('[VNC] Sent live view URL to client');
    emitViewportScreenshotFrame();
   } else {
    // Emit browser_session event so frontend knows a browser session started (screenshot polling mode)
-   sendSSE('browser_session', buildBrowserSessionPayload({ domain, provider: 'screenshot' }));
+   sendSSE('browser_session', buildBrowserSessionPayload({ domain, provider: 'screenshot', browserMode: runtimeBrowserMode }));
    console.log('[screenshot] Browser session started — polling the live viewport');
    emitViewportScreenshotFrame();
    // Fallback: capture the real 1920x1080 browser viewport every 1.5s.
@@ -6704,10 +6755,12 @@ if (browserSessionActive) {
 
 // Signal browser session end
 if (endSession) {
- try { sendSSE('browser_session_end', buildBrowserSessionEndPayload({ sessionId: endSession.sessionId, recordingUrl })); } catch {}
+ if (browserSessionActive) {
+  try { sendSSE('browser_session_end', buildBrowserSessionEndPayload({ sessionId: endSession.sessionId, recordingUrl, browserMode: runtimeBrowserMode })); } catch {}
+ }
  clearSkillBrowserSession();
-} else if (browserSessionActive || isBrowserTask) {
- try { sendSSE('browser_session_end', buildBrowserSessionEndPayload({ sessionId: browserSessionId, recordingUrl })); } catch {}
+} else if (browserSessionActive) {
+ try { sendSSE('browser_session_end', buildBrowserSessionEndPayload({ sessionId: browserSessionId, recordingUrl, browserMode: runtimeBrowserMode })); } catch {}
  }
 
  // Send final done event with complete result + tool log
