@@ -69,7 +69,11 @@ import {
   stripGatewayErrorPrefix,
 } from './lib/provider-runtime.mjs';
 import { startFleetHeartbeat } from './lib/fleet-heartbeat.mjs';
-import { classifyOpenClawLifecycleSignal } from './lib/run-lifecycle-policy.mjs';
+import {
+  buildPostCompactionRecoveryMessage,
+  classifyOpenClawLifecycleSignal,
+  shouldRecoverAssistantTranscriptBoundary,
+} from './lib/run-lifecycle-policy.mjs';
 import {
   assertRuntimeUpgradeCompatibility,
   validateRuntimeUpgradeRequest,
@@ -498,10 +502,6 @@ function normalizeRuntimeBrowserMode(value = '') {
 function hasVisibleBrowserViewport(value = '') {
  const mode = normalizeRuntimeBrowserMode(value);
  return mode === 'desktop' || mode === 'vps-browser';
-}
-
-function isSteerContinuationBoundaryError(error) {
- return /cannot continue from message role\s*:\s*assistant/i.test(String(error?.message || error || ''));
 }
 
 // ── VNC Live View ─────────────────────────────────────────────────────
@@ -3375,6 +3375,7 @@ class OpenClawGateway {
  const { explicitModel, effectiveModel: effectiveRequestedModel } = resolveGatewayModelSelection(opts.model);
 	 const selectedThinking = resolveGatewayThinkingSelection(opts.thinking, effectiveRequestedModel, { explicitModel });
 	 const steerMode = opts.steer === true;
+	 const continuationRecoveryAttempt = Math.max(0, Number(opts.continuationRecoveryAttempt || 0));
 	 if (!steerMode) await assertLocalGatewayModelReachable(effectiveRequestedModel);
 	 if (!steerMode) {
 	  await authorizeRuntimeQuota({
@@ -3433,6 +3434,7 @@ class OpenClawGateway {
  let lifecycleDepth = 0; // track nested lifecycle start/end for sub-agent detection
  let emittedMainRunStart = false;
  let sawLiveStreamPayload = false;
+ let sawCompaction = false;
  let historyPoller = null;
  let historyPollStartTimer = null;
  let historyPollInFlight = false;
@@ -3753,6 +3755,7 @@ function extractPatchFilePaths(patchText = '') {
  if (onEvent) onEvent('progress', { ...data, runId: runId || mainRunId || null, sessionKey });
  }
  if (stream === 'compaction' && data) {
+ sawCompaction = true;
  if (onEvent) onEvent('compaction', {
   ...data,
   phase: data.phase || data.status || 'start',
@@ -4146,8 +4149,11 @@ function extractPatchFilePaths(patchText = '') {
  }, 8000);
  });
  } catch (error) {
-  if (!steerMode || !isSteerContinuationBoundaryError(error)) throw error;
-  console.warn(`[OpenClaw] sessions.steer reached an assistant transcript boundary; retrying as a normal follow-up in ${sessionKey}`);
+  if (!shouldRecoverAssistantTranscriptBoundary({ error, attempt: continuationRecoveryAttempt })) throw error;
+  const recoveryReason = steerMode
+   ? 'assistant_transcript_boundary'
+   : (sawCompaction ? 'post_compaction_assistant_boundary' : 'assistant_transcript_boundary');
+  console.warn(`[OpenClaw] ${steerMode ? 'sessions.steer' : 'agent run'} reached an assistant transcript boundary${sawCompaction ? ' after compaction' : ''}; retrying as a normal follow-up in ${sessionKey}`);
   if (historyPollStartTimer) clearTimeout(historyPollStartTimer);
   if (historyPoller) clearInterval(historyPoller);
   historyPollStartTimer = null;
@@ -4156,17 +4162,23 @@ function extractPatchFilePaths(patchText = '') {
   this._eventListeners.delete(idempotencyKey);
   if (this._activeSessionListener === eventHandler) this._activeSessionListener = null;
   if (onEvent) {
-   onEvent('steer_fallback', {
-    reason: 'assistant_transcript_boundary',
-    message: 'The active turn ended while steering; continuing as a follow-up in the same session.',
+   onEvent('continuation_recovery', {
+    reason: recoveryReason,
+    message: sawCompaction
+     ? 'Context compacted. Resuming the interrupted work from the compacted checkpoint.'
+     : 'The active turn ended at a transcript boundary. Continuing as a follow-up in the same session.',
     sessionKey,
    });
   }
-  return this.runAgentStreaming(message, {
+  const recoveryMessage = sawCompaction
+   ? buildPostCompactionRecoveryMessage(message)
+   : message;
+  return this.runAgentStreaming(recoveryMessage, {
    ...opts,
    steer: false,
    sessionKey,
    idempotencyKey: randomUUID(),
+   continuationRecoveryAttempt: continuationRecoveryAttempt + 1,
   }, rawOnEvent);
  }
 
