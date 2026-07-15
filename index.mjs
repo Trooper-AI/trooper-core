@@ -412,6 +412,7 @@ function buildExecApprovalRecord(payload = {}) {
   const commandPreview = request?.commandPreview || request?.command || (commandArgv.length ? commandArgv.join(' ') : '');
   return {
     id: payload?.id || null,
+    orgId: payload?.orgId || payload?.organizationId || request?.orgId || request?.organizationId || ORG_ID || null,
     createdAtMs: Number(payload?.createdAtMs || Date.now()),
     expiresAtMs: Number(payload?.expiresAtMs || 0) || null,
     request: {
