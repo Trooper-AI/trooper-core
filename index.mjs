@@ -4479,7 +4479,133 @@ async function forwardToMissionControl(taskId, agentName, result, requestId) {
 
 // ── ACP Session Registry (tracks active ACP agent sessions) ─────────
 const acpSessionRegistry = new Map(); // sessionId -> { agent, sessionKey, status, spawnedAt, lastActivity, permissions, output }
+const acpHarnessRuntimeState = new Map(); // harness -> last observed auth/quota/runtime state
 const execApprovalRegistry = new Map(); // approvalId -> { id, createdAtMs, expiresAtMs, request, ...derivedFields }
+
+const ACP_HARNESS_CATALOG = Object.freeze({
+ claude: {
+  label: 'Claude Code',
+  provider: 'anthropic',
+  authProvider: 'anthropic',
+  nativeModelLabel: 'Claude Code account default',
+  connectAction: 'connect_claude',
+ },
+ codex: {
+  label: 'Codex CLI',
+  provider: 'openai-codex',
+  authProvider: 'openai-codex',
+  nativeModelLabel: 'Codex account default',
+  connectAction: 'connect_codex',
+ },
+ gemini: {
+  label: 'Gemini CLI',
+  provider: 'gemini',
+  authProvider: 'gemini',
+  nativeModelLabel: 'Gemini CLI account default',
+  connectAction: 'connect_gemini',
+ },
+ opencode: {
+  label: 'OpenCode',
+  provider: 'opencode',
+  authProvider: null,
+  nativeModelLabel: 'OpenCode session default',
+  connectAction: 'configure_opencode',
+ },
+ pi: {
+  label: 'Pi',
+  provider: 'pi',
+  authProvider: null,
+  nativeModelLabel: 'Pi session default',
+  connectAction: 'configure_pi',
+ },
+});
+
+function classifyAcpHarnessFailure(value) {
+ const text = stripAnsi(value?.message || value || '').trim();
+ if (!text) return { connectionStatus: 'unknown', errorKind: 'runtime_error', text };
+ if (/\b(UsageLimitExceeded|Quota exceeded|usage limit|rate limit(?:ed)?|allowance exhausted)\b/i.test(text)) {
+  return { connectionStatus: 'quota_exhausted', errorKind: 'acp_quota_exhausted', text };
+ }
+ if (/\b(Authentication required|not authenticated|not logged in|login required|sign in required|missing (?:credential|token|auth)|no auth profile|unauthorized|invalid_grant)\b/i.test(text)) {
+  return { connectionStatus: 'auth_required', errorKind: 'acp_auth_required', text };
+ }
+ if (/\b(model .* not supported|unsupported model|model_invalid|invalid model)\b/i.test(text)) {
+  return { connectionStatus: 'connected', errorKind: 'acp_model_invalid', text };
+ }
+ return { connectionStatus: 'unknown', errorKind: 'runtime_error', text };
+}
+
+function setAcpHarnessRuntimeState(harness, update = {}) {
+ const normalized = String(harness || '').trim().toLowerCase();
+ if (!ACP_HARNESS_CATALOG[normalized]) return;
+ acpHarnessRuntimeState.set(normalized, {
+  ...(acpHarnessRuntimeState.get(normalized) || {}),
+  ...update,
+  updatedAt: Date.now(),
+ });
+}
+
+function getAcpHarnessConnectionState(harness) {
+ const normalized = String(harness || '').trim().toLowerCase();
+ const meta = ACP_HARNESS_CATALOG[normalized];
+ if (!meta) return { connectionStatus: 'unsupported', connected: false };
+ if (normalized === 'codex') {
+  const native = getCodexAcpNativeAuthStatus();
+  const observed = acpHarnessRuntimeState.get(normalized) || {};
+  // An authenticated native session is authoritative. A stale quota error
+  // from the former API-key fallback must not survive after ChatGPT reconnect.
+  if (native.connected) {
+   return {
+    ...observed,
+    ...native,
+    connectionStatus: 'connected',
+    connected: true,
+    errorKind: null,
+    text: null,
+    lastError: null,
+   };
+  }
+  return { ...observed, ...native };
+ }
+ const observed = acpHarnessRuntimeState.get(normalized) || {};
+ if (observed.connectionStatus === 'quota_exhausted') {
+  return { ...observed, connected: true };
+ }
+ if (observed.connectionStatus === 'auth_required') {
+  return { ...observed, connected: false };
+ }
+ if (observed.connectionStatus === 'connected') {
+  return { ...observed, connected: true };
+ }
+ if (meta.authProvider) {
+  const connected = hasRuntimeProviderCredential(meta.authProvider);
+  return {
+   ...observed,
+   connected,
+   connectionStatus: connected ? 'connected' : 'auth_required',
+   errorKind: connected ? null : 'acp_auth_required',
+  };
+ }
+ return {
+  ...observed,
+  connected: null,
+  connectionStatus: gateway.isReady ? 'unknown' : 'gateway_offline',
+ };
+}
+
+function isHarnessNativeModel(harness, requestedModel) {
+ const model = String(requestedModel || '').trim().toLowerCase();
+ if (!model) return false;
+ if (harness === 'codex') {
+  return !/(?:^|\/)(?:openrouter|deepseek|qwen|claude|anthropic|gemini|google)(?:\/|$)/i.test(model)
+   && /^(?:openai\/)?(?:gpt-|codex|o\d)|^[^/]+\/(?:low|medium|high|xhigh)$/i.test(model);
+ }
+ if (harness === 'claude') return /^(?:anthropic\/)?claude[-/]/i.test(model);
+ if (harness === 'gemini') return /^(?:(?:google|gemini)\/)?gemini[-/]/i.test(model);
+ // OpenCode and Pi can front several providers. Their adapters own model
+ // validation; a parent-agent model must still never be inherited implicitly.
+ return false;
+}
 
 // Garbage-collect stale ACP sessions every 60 seconds
 setInterval(() => {
@@ -4888,6 +5014,12 @@ try {
 const AUTH_PROFILES_PATH = openclawConfigPath('agents', 'main', 'agent', 'auth-profiles.json');
 const AUTH_PROFILES_ROOT_PATH = openclawConfigPath('auth-profiles.json');
 const CODEX_OAUTH_SIDECAR_DIR = openclawConfigPath('credentials', 'auth-profiles');
+// The bundled codex-acp adapter runs with its own CODEX_HOME. Keeping only an
+// OpenClaw auth profile is insufficient: the Codex CLI will otherwise fall
+// back to an OPENAI_API_KEY and charge API quota instead of the user's
+// ChatGPT/Codex subscription.
+const CODEX_ACP_HOME = openclawConfigPath('acpx', 'codex-home');
+const CODEX_ACP_AUTH_PATH = path.join(CODEX_ACP_HOME, 'auth.json');
 const AUTH_PROFILE_SECRET_DIR = openclawDataPath('auth-profile-secrets');
 const AUTH_PROFILE_SECRET_FILE = path.join(AUTH_PROFILE_SECRET_DIR, 'auth-profile-secret-key');
 
@@ -4978,6 +5110,10 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
  } catch (err) {
   console.warn(`[bridge] Failed to sync state-root agent sqlite: ${err.message}`);
  }
+ // ACP adapters own their native credential stores. Synchronize the selected
+ // Codex OAuth session into the adapter's CODEX_HOME after every auth-profile
+ // write so tagged @Codex work never inherits the parent Trooper API model.
+ syncCodexOAuthToAcpHome(authDoc);
 }
 
 // OpenClaw 2026.6+ stores auth in openclaw-agent.sqlite (not only auth-profiles.json).
@@ -5093,6 +5229,113 @@ function isUsableCodexOAuthProfile(profile) {
    || (profile.oauthRef && typeof profile.oauthRef === 'object' && profile.oauthRef.source)
   )
  );
+}
+
+function pickCodexOAuthProfile(authDoc) {
+ const profiles = authDoc?.profiles && typeof authDoc.profiles === 'object'
+  ? authDoc.profiles
+  : {};
+ const preferredId = authDoc?.lastGood?.['openai-codex'];
+ const preferred = preferredId ? profiles[preferredId] : null;
+ if (isUsableCodexOAuthProfile(preferred)) return { id: preferredId, profile: preferred };
+ const match = Object.entries(profiles).find(([, profile]) => isUsableCodexOAuthProfile(profile));
+ return match ? { id: match[0], profile: match[1] } : null;
+}
+
+function readCodexOAuthSidecar(profile) {
+ const ref = getCodexOAuthRef(profile);
+ if (!ref) return null;
+ try {
+  const sidecarPath = path.join(CODEX_OAUTH_SIDECAR_DIR, `${ref.id}.json`);
+  return JSON.parse(readFileSync(sidecarPath, 'utf8'));
+ } catch {
+  return null;
+ }
+}
+
+function codexOAuthTokensFromProfile(profile) {
+ if (!profile || typeof profile !== 'object') return null;
+ const sidecar = readCodexOAuthSidecar(profile);
+ const access = String(profile.access || sidecar?.access || '').trim();
+ const refresh = String(profile.refresh || sidecar?.refresh || '').trim();
+ const idToken = String(
+  profile.idToken
+  || profile.id_token
+  || sidecar?.idToken
+  || sidecar?.id_token
+  || ''
+ ).trim();
+ const accountId = String(profile.accountId || profile.account_id || '').trim();
+ if (!access || !refresh) return null;
+ return { access, refresh, idToken, accountId };
+}
+
+function syncCodexOAuthToAcpHome(authDoc) {
+ try {
+  const selected = pickCodexOAuthProfile(authDoc);
+  const tokens = codexOAuthTokensFromProfile(selected?.profile);
+  if (!tokens) return false;
+  const next = {
+   auth_mode: 'chatgpt',
+   OPENAI_API_KEY: null,
+   tokens: {
+    id_token: tokens.idToken || null,
+    access_token: tokens.access,
+    refresh_token: tokens.refresh,
+    account_id: tokens.accountId || null,
+   },
+   last_refresh: new Date().toISOString(),
+  };
+  mkdirSync(CODEX_ACP_HOME, { recursive: true });
+  writeJsonFileIfChanged(CODEX_ACP_AUTH_PATH, next);
+  chmodSync(CODEX_ACP_AUTH_PATH, 0o600);
+  try {
+   execSync(`chown -R 1000:1000 ${CODEX_ACP_HOME} 2>/dev/null`, { timeout: 3000 });
+  } catch {}
+  setAcpHarnessRuntimeState('codex', {
+   connectionStatus: 'connected',
+   errorKind: null,
+   lastError: null,
+   connectionMethod: 'chatgpt_oauth',
+  });
+  return true;
+ } catch (err) {
+  console.warn(`[bridge] Failed to synchronize Codex OAuth to ACP home: ${err.message}`);
+  return false;
+ }
+}
+
+function getCodexAcpNativeAuthStatus() {
+ try {
+  const auth = JSON.parse(readFileSync(CODEX_ACP_AUTH_PATH, 'utf8'));
+  const tokens = auth?.tokens && typeof auth.tokens === 'object' ? auth.tokens : {};
+  const hasSubscriptionSession = auth?.auth_mode === 'chatgpt'
+   && Boolean(tokens.access_token)
+   && Boolean(tokens.refresh_token);
+  if (hasSubscriptionSession) {
+   return {
+    connected: true,
+    connectionStatus: 'connected',
+    connectionMethod: 'chatgpt_oauth',
+   };
+  }
+  if (auth?.OPENAI_API_KEY) {
+   return {
+    connected: false,
+    connectionStatus: 'auth_required',
+    connectionMethod: 'api_key',
+    errorKind: 'acp_auth_required',
+    reason: 'native_subscription_login_required',
+   };
+  }
+ } catch {}
+ return {
+  connected: false,
+  connectionStatus: 'auth_required',
+  connectionMethod: null,
+  errorKind: 'acp_auth_required',
+  reason: 'missing_native_session',
+ };
 }
 
 function getCodexOAuthRef(profile) {
@@ -13574,12 +13817,37 @@ async function reapTerminalGatewayAcpSessions(parentSessionKey) {
  return reaped;
 }
 
-async function spawnAcpRun({ agent, cwd, model, message, channel, projectRef, parentRunId, parentMessageId, parentSessionKey: requestedParentSessionKey, permissions }) {
+async function spawnAcpRun({ agent, cwd, workerModel, model, modelSource, message, channel, projectRef, parentRunId, parentMessageId, parentSessionKey: requestedParentSessionKey, permissions }) {
  const task = String(message || '').trim();
  if (!task) throw new Error('message required to start an ACP run');
  const parentSessionKey = String(requestedParentSessionKey || '').trim() || acpParentSessionKey(channel);
  const harness = String(agent || 'claude').trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '');
- if (!harness) throw new Error('ACP harness is required');
+ const harnessMeta = ACP_HARNESS_CATALOG[harness];
+ if (!harnessMeta) throw new Error(`Unsupported ACP harness: ${harness || '(missing)'}`);
+ const connection = getAcpHarnessConnectionState(harness);
+ if (connection.connectionStatus === 'auth_required') {
+  const error = new Error(`${harnessMeta.label} is not connected. Sign in to ${harnessMeta.label} before starting this ACP worker.`);
+  error.code = 'ACP_AUTH_REQUIRED';
+  error.errorKind = 'acp_auth_required';
+  error.provider = harnessMeta.authProvider || harnessMeta.provider;
+  error.connectAction = harnessMeta.connectAction;
+  throw error;
+ }
+ if (connection.connectionStatus === 'quota_exhausted') {
+  const error = new Error(`${harnessMeta.label} is connected, but this account has no ACP usage allowance available. Reconnect a different account or update that provider subscription.`);
+  error.code = 'ACP_QUOTA_EXHAUSTED';
+  error.errorKind = 'acp_quota_exhausted';
+  error.provider = harnessMeta.authProvider || harnessMeta.provider;
+  error.connectAction = harnessMeta.connectAction;
+  throw error;
+ }
+ // `model` was historically the parent Trooper model. Accept it only when the
+ // caller explicitly marks it as a worker selection and it belongs to this
+ // harness. Otherwise the provider CLI chooses its own account-native default.
+ const requestedWorkerModel = String(workerModel || (modelSource === 'worker' ? model : '') || '').trim();
+ const effectiveWorkerModel = isHarnessNativeModel(harness, requestedWorkerModel)
+  ? requestedWorkerModel
+  : null;
  const label = `trooper-${harness}-${randomUUID().slice(0, 8)}`;
  const spawnParts = [
   '/acp spawn',
@@ -13604,9 +13872,9 @@ async function spawnAcpRun({ agent, cwd, model, message, channel, projectRef, pa
  }
  let permissionWarning = null;
  try {
-  if (model) {
+  if (effectiveWorkerModel) {
    const modelReply = await runGatewaySlashCommand(
-    `/acp model ${acpCommandToken(model)} ${acpCommandToken(childSessionKey)}`,
+    `/acp model ${acpCommandToken(effectiveWorkerModel)} ${acpCommandToken(childSessionKey)}`,
     parentSessionKey,
     { timeoutMs: 30000 },
    );
@@ -13645,6 +13913,11 @@ async function spawnAcpRun({ agent, cwd, model, message, channel, projectRef, pa
   runId: null,
   parentSessionKey,
   agent: harness,
+  provider: harnessMeta.provider,
+  workerModel: effectiveWorkerModel,
+  workerModelLabel: effectiveWorkerModel || harnessMeta.nativeModelLabel,
+  modelSource: effectiveWorkerModel ? 'worker' : 'provider_default',
+  connectionStatus: 'connected',
   status: 'working',
   spawnedAt: Date.now(),
   lastActivity: Date.now(),
@@ -13666,9 +13939,15 @@ async function spawnAcpRun({ agent, cwd, model, message, channel, projectRef, pa
    local.lastActivity = Date.now();
    local.steerResponse = text;
    if (/\b(ACP_TURN_FAILED|Authentication required|Quota exceeded|UsageLimitExceeded)\b/i.test(text)) {
-   local.status = 'failed';
-   local.output = text;
+    const failure = classifyAcpHarnessFailure(text);
+    local.status = 'failed';
+    local.output = text;
+    local.errorKind = failure.errorKind;
+    local.connectionStatus = failure.connectionStatus;
+    setAcpHarnessRuntimeState(harness, failure);
     void closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {});
+   } else {
+    setAcpHarnessRuntimeState(harness, { connectionStatus: 'connected', errorKind: null, lastError: null });
    }
   })
   .catch((error) => {
@@ -13676,6 +13955,10 @@ async function spawnAcpRun({ agent, cwd, model, message, channel, projectRef, pa
    if (!local) return;
    local.status = 'failed';
    local.output = stripAnsi(error?.message || String(error)).trim();
+   const failure = classifyAcpHarnessFailure(local.output);
+   local.errorKind = failure.errorKind;
+   local.connectionStatus = failure.connectionStatus;
+   setAcpHarnessRuntimeState(harness, failure);
    local.lastActivity = Date.now();
    void closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {});
   });
@@ -13695,7 +13978,14 @@ app.post('/acp/spawn', async (req, res) => {
  const session = await spawnAcpRun(req.body || {});
  res.json({ sessionId: session.sessionId, session, agent: session.agent, spawned: true });
  } catch (e) {
- res.status(500).json({ error: e.message });
+ const status = e.code === 'ACP_AUTH_REQUIRED' ? 401 : e.code === 'ACP_QUOTA_EXHAUSTED' ? 429 : 500;
+ res.status(status).json({
+  error: e.message,
+  code: e.code || 'ACP_SPAWN_FAILED',
+  errorKind: e.errorKind || 'runtime_error',
+  provider: e.provider || null,
+  connectAction: e.connectAction || null,
+ });
  }
 });
 
@@ -13741,8 +14031,6 @@ app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
 
  try {
  const startedAt = Date.now();
- let lastSignature = '';
- let stablePolls = 0;
  let sentFinal = false;
  let lastProgressAt = 0;
  while (!res.writableEnded && Date.now() - startedAt < 2 * 60 * 60 * 1000) {
@@ -13759,11 +14047,8 @@ app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
   const finalText = messageText(assistantMessages[assistantMessages.length - 1]);
   const snapshot = await gateway.fetchSessionSnapshot(local.sessionKey);
   const status = String(snapshot?.status || '').toLowerCase();
-  const signature = `${history.length}:${finalText}`;
-  stablePolls = signature && signature === lastSignature ? stablePolls + 1 : 0;
-  lastSignature = signature;
   const terminal = ['completed', 'complete', 'done', 'idle', 'failed', 'cancelled', 'canceled'].includes(status);
-  if (finalText && (terminal || stablePolls >= 3)) {
+  if (finalText && terminal) {
    res.write(`data: ${JSON.stringify({ type: 'chunk', content: finalText })}\n\n`);
    res.write(`data: ${JSON.stringify({ type: 'done', exitCode: 0, status: status || 'completed' })}\n\n`);
    local.status = 'completed';
@@ -14084,14 +14369,35 @@ app.get('/acp/doctor', async (req, res) => {
 
 // GET /acp/agents — List available ACP agent harnesses
 app.get('/acp/agents', async (req, res) => {
+ // Auth profiles can be refreshed independently from the bridge process.
+ // Reconcile the selected ChatGPT/Codex OAuth session into the ACP adapter's
+ // native CODEX_HOME before reporting availability.
+ try {
+  const authDoc = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+  syncCodexOAuthToAcpHome(authDoc);
+ } catch {}
+ const agents = Object.entries(ACP_HARNESS_CATALOG).map(([name, meta]) => {
+  const connection = getAcpHarnessConnectionState(name);
+  const available = gateway.isReady && connection.connectionStatus !== 'auth_required';
+  return {
+   name,
+   label: meta.label,
+   provider: meta.provider,
+   authProvider: meta.authProvider,
+   nativeModelLabel: meta.nativeModelLabel,
+   modelSource: 'provider_default',
+   installed: null,
+   gatewayAvailable: gateway.isReady,
+   available,
+   connected: connection.connected,
+   connectionStatus: connection.connectionStatus,
+   errorKind: connection.errorKind || null,
+   lastError: connection.text || connection.lastError || null,
+   connectAction: meta.connectAction,
+  };
+ });
  res.json({
- agents: [
- { name: 'claude', label: 'Claude Code', installed: null, available: gateway.isReady },
- { name: 'codex', label: 'Codex CLI', installed: null, available: gateway.isReady },
- { name: 'gemini', label: 'Gemini CLI', installed: null, available: gateway.isReady },
- { name: 'opencode', label: 'OpenCode', installed: null, available: gateway.isReady },
- { name: 'pi', label: 'Pi', installed: null, available: gateway.isReady },
- ],
+ agents,
  available: gateway.isReady,
  transport: 'gateway-tools.invoke/sessions_spawn',
  });
