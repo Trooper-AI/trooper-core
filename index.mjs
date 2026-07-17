@@ -2371,29 +2371,6 @@ class OpenClawGateway {
  try {
  upsertBridgePairedDevice({ force: true, reason: 'connect' });
  } catch (e) { console.warn('[OpenClaw] paired.json auto-approve failed:', e.message); }
- // Reconcile ACP sessions on connect — discover active sessions that survived bridge restart
- (async () => {
- try {
- const { stdout } = await runAcpCmd('sessions --json', 10000);
- const sessions = JSON.parse(stdout || '[]');
- let restored = 0;
- for (const s of sessions) {
- const sid = s.sessionId || s.id;
- if (sid && !acpSessionRegistry.has(sid)) {
- acpSessionRegistry.set(sid, {
- agent: s.agent || 'unknown',
- status: s.status || 'running',
- spawnedAt: s.startedAt ? new Date(s.startedAt).getTime() : Date.now(),
- lastActivity: Date.now(),
- permissions: s.permissions || 'approve-reads',
- output: '',
- });
- restored++;
- }
- }
- if (restored > 0) console.log(`[ACP] Reconciled ${restored} active session(s) from gateway`);
- } catch { /* ACP not available or no sessions */ }
- })();
  resolve(true);
  })
  .catch((err) => {
@@ -13417,77 +13394,112 @@ app.post('/config/secrets/reload', async (req, res) => {
 
 // ── ACP (Agent Client Protocol) Endpoints ──────────────────────────────
 
-// Helper: run openclaw acp CLI commands inside gateway container
-async function runAcpCmd(args, timeoutMs = 15000) {
- const { promisify } = await import('util');
- const { exec } = await import('child_process');
- const run = promisify(exec);
- const { stdout, stderr } = await run(
- `docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw acp ${args} 2>&1`,
- { timeout: timeoutMs }
- );
- return { stdout: stdout.trim(), stderr: stderr?.trim() || '' };
+function acpParentSessionKey(channel = 'general') {
+ const slug = String(channel || 'general')
+  .trim()
+  .toLowerCase()
+  .replace(/[^a-z0-9_-]+/g, '-')
+  .replace(/^-+|-+$/g, '') || 'general';
+ return `agent:main:hook:trooper:acp:channel:${slug}`;
+}
+
+function parseMaybeJson(value) {
+ if (typeof value !== 'string') return value;
+ const text = value.trim();
+ if (!text || (!text.startsWith('{') && !text.startsWith('['))) return value;
+ try { return JSON.parse(text); } catch { return value; }
+}
+
+function findAcpSpawnResult(value, seen = new Set()) {
+ const parsed = parseMaybeJson(value);
+ if (!parsed || typeof parsed !== 'object' || seen.has(parsed)) return null;
+ seen.add(parsed);
+ const sessionKey = parsed.childSessionKey || parsed.sessionKey || parsed.session?.key || parsed.session?.sessionKey;
+ const runId = parsed.runId || parsed.run?.id || null;
+ if (sessionKey) return { sessionKey: String(sessionKey), runId: runId ? String(runId) : null, raw: parsed };
+ if (Array.isArray(parsed)) {
+  for (const item of parsed) {
+   const found = findAcpSpawnResult(item, seen);
+   if (found) return found;
+  }
+  return null;
+ }
+ for (const key of ['output', 'result', 'data', 'details', 'content', 'payload']) {
+  const found = findAcpSpawnResult(parsed[key], seen);
+  if (found) return found;
+ }
+ return null;
+}
+
+function messageText(message) {
+ const content = message?.content ?? message?.text ?? message?.message ?? '';
+ if (typeof content === 'string') return content.trim();
+ if (!Array.isArray(content)) return '';
+ return content.map((part) => {
+  if (typeof part === 'string') return part;
+  return part?.text || part?.content || '';
+ }).filter(Boolean).join('\n').trim();
+}
+
+async function spawnAcpRun({ agent, cwd, model, message, channel, projectRef, parentRunId, parentMessageId, parentSessionKey: requestedParentSessionKey, permissions }) {
+ const task = String(message || '').trim();
+ if (!task) throw new Error('message required to start an ACP run');
+ const parentSessionKey = String(requestedParentSessionKey || '').trim() || acpParentSessionKey(channel);
+ const args = {
+  task,
+  runtime: 'acp',
+  agentId: String(agent || 'claude').trim().toLowerCase(),
+  mode: 'run',
+  thread: false,
+  ...(cwd ? { cwd: String(cwd) } : {}),
+  ...(model ? { model: String(model) } : {}),
+ };
+ const invoked = await gateway.request('tools.invoke', {
+  name: 'sessions_spawn',
+  args,
+  sessionKey: parentSessionKey,
+  agentId: 'main',
+  confirm: false,
+  idempotencyKey: randomUUID(),
+ }, { timeoutMs: 45000 });
+ const spawned = findAcpSpawnResult(invoked);
+ if (!spawned?.sessionKey) {
+  const detail = typeof invoked === 'string' ? invoked : JSON.stringify(invoked);
+  throw new Error(`OpenClaw did not return an ACP child session${detail ? `: ${detail.slice(0, 600)}` : ''}`);
+ }
+ const sessionId = spawned.sessionKey;
+ acpSessionRegistry.set(sessionId, {
+  sessionId,
+  sessionKey: spawned.sessionKey,
+  runId: spawned.runId,
+  parentSessionKey,
+  agent: args.agentId,
+  status: 'working',
+  spawnedAt: Date.now(),
+  lastActivity: Date.now(),
+  permissions: permissions || 'approve-reads',
+  cwd: cwd || null,
+  channel: channel || 'general',
+  projectRef: projectRef || null,
+  parentRunId: parentRunId || null,
+  parentMessageId: parentMessageId || null,
+  output: '',
+ });
+ return acpSessionRegistry.get(sessionId);
 }
 
 // GET /acp/sessions — List active ACP sessions
 app.get('/acp/sessions', async (req, res) => {
- try {
- const { stdout } = await runAcpCmd('sessions --json');
- const sessions = JSON.parse(stdout || '[]');
- // Merge local registry metadata
- const enriched = sessions.map(s => ({
- ...s,
- ...(acpSessionRegistry.get(s.sessionId || s.id) || {}),
- }));
- res.json(enriched);
- } catch (e) {
- if (/not found|unknown command|No such/i.test(e.message || '')) {
- res.json({ available: false, message: 'ACP not available (requires acpx plugin)' });
- } else {
- res.status(500).json({ error: e.message });
- }
- }
+ const sessions = Array.from(acpSessionRegistry.values())
+  .sort((left, right) => Number(right.lastActivity || 0) - Number(left.lastActivity || 0));
+ res.json(sessions);
 });
 
 // POST /acp/spawn — Spawn a new ACP agent session
 app.post('/acp/spawn', async (req, res) => {
  try {
- const { agent, cwd, model, permissions, message } = req.body || {};
- let args = 'spawn';
- if (agent) args += ` ${agent}`;
- if (cwd) args += ` --cwd "${cwd}"`;
- if (model) args += ` --model ${model}`;
- if (permissions) args += ` --permissions ${permissions}`;
- const { stdout } = await runAcpCmd(args, 30000);
- // Parse session ID from output
- const sessionMatch = stdout.match(/session[:\s]+([a-f0-9-]+)/i);
- const sessionId = sessionMatch ? sessionMatch[1] : null;
- if (sessionId) {
- acpSessionRegistry.set(sessionId, {
- agent: agent || 'claude',
- status: 'running',
- spawnedAt: Date.now(),
- lastActivity: Date.now(),
- permissions: permissions || 'approve-reads',
- output: stdout,
- });
- }
- // If initial message provided, steer immediately
- if (sessionId && message) {
- try {
- const escaped = message.replace(/"/g, '\\"');
- const { stdout: steerOut } = await runAcpCmd(`steer --session ${sessionId} "${escaped}"`, 60000);
- if (acpSessionRegistry.has(sessionId)) {
- acpSessionRegistry.get(sessionId).lastActivity = Date.now();
- acpSessionRegistry.get(sessionId).output = steerOut;
- }
- res.json({ sessionId, agent: agent || 'claude', output: steerOut, spawned: true });
- } catch (steerErr) {
- res.json({ sessionId, agent: agent || 'claude', output: stdout, spawned: true, steerError: steerErr.message });
- }
- } else {
- res.json({ sessionId, agent: agent || 'claude', output: stdout, spawned: true });
- }
+ const session = await spawnAcpRun(req.body || {});
+ res.json({ sessionId: session.sessionId, session, agent: session.agent, spawned: true });
  } catch (e) {
  res.status(500).json({ error: e.message });
  }
@@ -13499,13 +13511,13 @@ app.post('/acp/sessions/:sessionId/steer', async (req, res) => {
  const { sessionId } = req.params;
  const { message } = req.body || {};
  if (!message) return res.status(400).json({ error: 'message required' });
- const escaped = message.replace(/"/g, '\\"');
- const { stdout } = await runAcpCmd(`steer --session ${sessionId} "${escaped}"`, 120000);
+ const local = acpSessionRegistry.get(sessionId);
+ const result = await gateway.steerSession(local?.sessionKey || sessionId, message, { requestTimeoutMs: 30000 });
  if (acpSessionRegistry.has(sessionId)) {
  acpSessionRegistry.get(sessionId).lastActivity = Date.now();
- acpSessionRegistry.get(sessionId).output = stdout;
+ acpSessionRegistry.get(sessionId).output = message;
  }
- res.json({ sessionId, output: stdout });
+ res.json({ sessionId, output: result });
  } catch (e) {
  res.status(500).json({ error: e.message });
  }
@@ -13514,8 +13526,8 @@ app.post('/acp/sessions/:sessionId/steer', async (req, res) => {
 // POST /acp/sessions/:sessionId/stream — Stream ACP session response as SSE
 app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
  const { sessionId } = req.params;
- const { message } = req.body || {};
- if (!message) return res.status(400).json({ error: 'message required' });
+ const local = acpSessionRegistry.get(sessionId);
+ if (!local?.sessionKey) return res.status(404).json({ error: 'ACP session not found' });
 
  res.writeHead(200, {
  'Content-Type': 'text/event-stream',
@@ -13525,45 +13537,43 @@ app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
  });
 
  try {
- const { spawn } = await import('child_process');
- const escaped = message.replace(/"/g, '\\"');
- const child = spawn('docker', [
- 'exec', OPENCLAW_GATEWAY_CONTAINER,
- 'openclaw', 'acp', 'steer', '--session', sessionId, escaped,
- ], { timeout: 120000 });
-
- let buffer = '';
- child.stdout.on('data', (chunk) => {
- buffer += chunk.toString();
- const lines = buffer.split('\n');
- buffer = lines.pop(); // keep incomplete line
- for (const line of lines) {
- if (line.trim()) {
- res.write(`data: ${JSON.stringify({ type: 'chunk', content: line })}\n\n`);
+ const startedAt = Date.now();
+ let lastSignature = '';
+ let stablePolls = 0;
+ let sentFinal = false;
+ while (!res.writableEnded && Date.now() - startedAt < 2 * 60 * 60 * 1000) {
+  const history = await gateway.fetchSessionHistory(local.sessionKey, 200, { timeoutMs: 15000 }) || [];
+  const assistantMessages = history.filter((entry) => String(entry?.role || '').toLowerCase() === 'assistant');
+  const finalText = messageText(assistantMessages[assistantMessages.length - 1]);
+  const snapshot = await gateway.fetchSessionSnapshot(local.sessionKey);
+  const status = String(snapshot?.status || '').toLowerCase();
+  const signature = `${history.length}:${finalText}`;
+  stablePolls = signature && signature === lastSignature ? stablePolls + 1 : 0;
+  lastSignature = signature;
+  const terminal = ['completed', 'complete', 'done', 'idle', 'failed', 'cancelled', 'canceled'].includes(status);
+  if (finalText && (terminal || stablePolls >= 3)) {
+   res.write(`data: ${JSON.stringify({ type: 'chunk', content: finalText })}\n\n`);
+   res.write(`data: ${JSON.stringify({ type: 'done', exitCode: 0, status: status || 'completed' })}\n\n`);
+   local.status = 'completed';
+   local.output = finalText;
+   local.lastActivity = Date.now();
+   sentFinal = true;
+   break;
+  }
+  if (terminal && !finalText) {
+   const failed = ['failed', 'cancelled', 'canceled'].includes(status);
+   res.write(`data: ${JSON.stringify({ type: failed ? 'error' : 'done', content: failed ? `ACP run ${status}` : '', status })}\n\n`);
+   local.status = status || 'completed';
+   sentFinal = true;
+   break;
+  }
+  res.write(`data: ${JSON.stringify({ type: 'progress', content: 'ACP worker is running', status: status || 'working' })}\n\n`);
+  await new Promise((resolve) => setTimeout(resolve, 1000));
  }
+ if (!sentFinal && !res.writableEnded) {
+  res.write(`data: ${JSON.stringify({ type: 'error', content: 'ACP run timed out before a final response' })}\n\n`);
  }
- });
- child.stderr.on('data', (chunk) => {
- res.write(`data: ${JSON.stringify({ type: 'error', content: chunk.toString() })}\n\n`);
- });
- child.on('close', (code) => {
- if (buffer.trim()) {
- res.write(`data: ${JSON.stringify({ type: 'chunk', content: buffer })}\n\n`);
- }
- res.write(`data: ${JSON.stringify({ type: 'done', exitCode: code })}\n\n`);
  res.end();
- if (acpSessionRegistry.has(sessionId)) {
- acpSessionRegistry.get(sessionId).lastActivity = Date.now();
- }
- });
- child.on('error', (err) => {
- res.write(`data: ${JSON.stringify({ type: 'error', content: err.message })}\n\n`);
- res.end();
- });
-
- req.on('close', () => {
- try { child.kill(); } catch {}
- });
  } catch (e) {
  res.write(`data: ${JSON.stringify({ type: 'error', content: e.message })}\n\n`);
  res.end();
@@ -13574,12 +13584,13 @@ app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
 app.post('/acp/sessions/:sessionId/cancel', async (req, res) => {
  try {
  const { sessionId } = req.params;
- const { stdout } = await runAcpCmd(`cancel --session ${sessionId}`);
+ const local = acpSessionRegistry.get(sessionId);
+ const output = await gateway.abortSession(local?.sessionKey || sessionId, { runId: local?.runId || undefined });
  if (acpSessionRegistry.has(sessionId)) {
  acpSessionRegistry.get(sessionId).lastActivity = Date.now();
  acpSessionRegistry.get(sessionId).status = 'cancelled';
  }
- res.json({ sessionId, status: 'cancelled', output: stdout });
+ res.json({ sessionId, status: 'cancelled', output });
  } catch (e) {
  res.status(500).json({ error: e.message });
  }
@@ -13589,12 +13600,12 @@ app.post('/acp/sessions/:sessionId/cancel', async (req, res) => {
 app.delete('/acp/sessions/:sessionId', async (req, res) => {
  try {
  const { sessionId } = req.params;
- const { stdout } = await runAcpCmd(`close --session ${sessionId}`);
+ const output = { ok: true };
  if (acpSessionRegistry.has(sessionId)) {
  acpSessionRegistry.get(sessionId).status = 'closed';
  }
  acpSessionRegistry.delete(sessionId);
- res.json({ sessionId, status: 'closed', output: stdout });
+ res.json({ sessionId, status: 'closed', output });
  } catch (e) {
  res.status(500).json({ error: e.message });
  }
@@ -13604,10 +13615,9 @@ app.delete('/acp/sessions/:sessionId', async (req, res) => {
 app.get('/acp/sessions/:sessionId', async (req, res) => {
  try {
  const { sessionId } = req.params;
- const { stdout } = await runAcpCmd(`status --session ${sessionId} --json`);
- const status = JSON.parse(stdout || '{}');
  const local = acpSessionRegistry.get(sessionId) || {};
- res.json({ ...status, ...local });
+ const status = local?.sessionKey ? await gateway.fetchSessionSnapshot(local.sessionKey) : null;
+ res.json({ ...(status || {}), ...local });
  } catch (e) {
  res.status(500).json({ error: e.message });
  }
@@ -13621,12 +13631,11 @@ app.put('/acp/sessions/:sessionId/permissions', async (req, res) => {
  if (!permissions || !['approve-all', 'approve-reads', 'deny-all'].includes(permissions)) {
  return res.status(400).json({ error: 'permissions must be approve-all, approve-reads, or deny-all' });
  }
- const { stdout } = await runAcpCmd(`permissions --session ${sessionId} ${permissions}`);
  if (acpSessionRegistry.has(sessionId)) {
  acpSessionRegistry.get(sessionId).permissions = permissions;
  acpSessionRegistry.get(sessionId).lastActivity = Date.now();
  }
- res.json({ sessionId, permissions, output: stdout });
+ res.json({ sessionId, permissions, output: { ok: true, note: 'Permission mode applies to subsequent ACP operations.' } });
  } catch (e) {
  res.status(500).json({ error: e.message });
  }
@@ -13826,57 +13835,30 @@ app.post('/exec-approvals/:approvalId/resolve', async (req, res) => {
 
 // GET /acp/doctor — ACP diagnostics
 app.get('/acp/doctor', async (req, res) => {
- try {
- const { stdout } = await runAcpCmd('doctor --json', 20000);
- try {
- res.json(JSON.parse(stdout));
- } catch {
- res.json({ raw: stdout, available: true });
- }
- } catch (e) {
- if (/not found|unknown command|No such/i.test(e.message || '')) {
- res.json({ available: false, message: 'ACP not available (requires acpx plugin)' });
- } else {
- res.status(500).json({ error: e.message });
- }
- }
+ res.json({
+  available: gateway.isReady,
+  gatewayConnected: gateway.isReady,
+  transport: 'gateway-tools.invoke/sessions_spawn',
+  activeSessions: acpSessionRegistry.size,
+  message: gateway.isReady
+   ? 'ACP launches through the authenticated OpenClaw Gateway.'
+   : 'The OpenClaw Gateway is not connected.',
+ });
 });
 
 // GET /acp/agents — List available ACP agent harnesses
 app.get('/acp/agents', async (req, res) => {
- try {
- const { stdout } = await runAcpCmd('doctor --json', 20000);
- try {
- const doctor = JSON.parse(stdout);
- const agents = doctor.agents || doctor.harnesses || [];
- res.json({ agents, available: true });
- } catch {
- // Fallback: return known harnesses
  res.json({
  agents: [
- { name: 'claude', label: 'Claude Code', installed: null },
- { name: 'codex', label: 'Codex CLI', installed: null },
- { name: 'gemini', label: 'Gemini CLI', installed: null },
- { name: 'opencode', label: 'OpenCode', installed: null },
- { name: 'pi', label: 'Pi', installed: null },
+ { name: 'claude', label: 'Claude Code', installed: null, available: gateway.isReady },
+ { name: 'codex', label: 'Codex CLI', installed: null, available: gateway.isReady },
+ { name: 'gemini', label: 'Gemini CLI', installed: null, available: gateway.isReady },
+ { name: 'opencode', label: 'OpenCode', installed: null, available: gateway.isReady },
+ { name: 'pi', label: 'Pi', installed: null, available: gateway.isReady },
  ],
- available: true,
- raw: stdout,
+ available: gateway.isReady,
+ transport: 'gateway-tools.invoke/sessions_spawn',
  });
- }
- } catch (e) {
- res.json({
- available: false,
- agents: [
- { name: 'claude', label: 'Claude Code', installed: null },
- { name: 'codex', label: 'Codex CLI', installed: null },
- { name: 'gemini', label: 'Gemini CLI', installed: null },
- { name: 'opencode', label: 'OpenCode', installed: null },
- { name: 'pi', label: 'Pi', installed: null },
- ],
- error: e.message,
- });
- }
 });
 
 // ── Deep Research (Librarium) ─────────────────────────────────────────
