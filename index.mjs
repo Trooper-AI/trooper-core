@@ -13288,6 +13288,7 @@ app.put('/config/provider-settings', (req, res) => {
 	  if (chatThinkingLevel !== undefined) writeConfigKey('chatThinkingLevel', chatThinkingLevel || 'auto');
 	  if (localModelUrl !== undefined) writeConfigKey('localModelUrl', String(localModelUrl || '').trim().replace(/\/+$/, ''));
 	  if (ollamaBaseUrl !== undefined) writeConfigKey('ollamaBaseUrl', String(ollamaBaseUrl || '').trim().replace(/\/+$/, ''));
+  let gatewayReloadExpected = false;
   if (
    localModelUrl !== undefined ||
    ollamaBaseUrl !== undefined ||
@@ -13298,7 +13299,7 @@ app.put('/config/provider-settings', (req, res) => {
    modelRoutingFallbacks !== undefined
   ) {
    try {
-    syncStoredLocalProviderConfigToOpenClaw('provider-settings-write');
+    gatewayReloadExpected = syncStoredLocalProviderConfigToOpenClaw('provider-settings-write') === true;
    } catch (e) {
     console.warn(`[bridge] Local provider settings sync failed during provider-settings write: ${e.message}`);
    }
@@ -13310,7 +13311,15 @@ app.put('/config/provider-settings', (req, res) => {
 	    console.warn(`[bridge] Media generation routing sync failed during provider-settings write: ${e.message}`);
 	   }
   }
-  res.json({ ok: true });
+  // Most provider-setting writes only update the bridge's durable SQLite state and
+  // do not restart OpenClaw. A reload is expected only when the local-provider
+  // projection actually changed openclaw.json. The caller uses this explicit
+  // signal to show restart UX instead of treating every settings write as one.
+  res.json({
+   ok: true,
+   gatewayReloadExpected,
+   applyState: gatewayReloadExpected ? 'reload_expected' : 'applied',
+  });
  } catch (err) {
   res.status(500).json({ error: err.message });
  }
