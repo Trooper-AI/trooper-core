@@ -565,6 +565,10 @@ ${HTTPS_DOMAIN} {
  handle /api/api-keys {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
+ # Video editor → org-runtime sidecar (not trooper-server :3001)
+ handle /api/video* {
+ reverse_proxy 127.0.0.1:${TROOPER_RUNTIME_PORT}
+ }
  handle /api/* {
  reverse_proxy 127.0.0.1:3001
  }
@@ -648,6 +652,10 @@ ${SSLIP_DOMAIN} {
  }
  handle /api/api-keys {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ # Video editor → org-runtime sidecar (not trooper-server :3001)
+ handle /api/video* {
+ reverse_proxy 127.0.0.1:${TROOPER_RUNTIME_PORT}
  }
  handle /api/* {
  reverse_proxy 127.0.0.1:3001
