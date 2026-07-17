@@ -531,6 +531,11 @@ if [ -n "$SERVER_PUBLIC_IP" ]; then
 # Primary: CF-proxied domain (self-signed cert — CF terminates external SSL)
 ${HTTPS_DOMAIN} {
  tls /etc/caddy/certs/cf-origin.crt /etc/caddy/certs/cf-origin.key
+ # Stable public Trooper Core control plane. Namespacing avoids collisions with
+ # OpenClaw's own /gateway and /api routes while keeping raw :3002 private.
+ handle_path /core/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
  handle /ws {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
@@ -619,6 +624,9 @@ ${HTTPS_DOMAIN} {
 
 # Fallback: sslip.io (direct HTTPS via Let's Encrypt, no CF dependency)
 ${SSLIP_DOMAIN} {
+ handle_path /core/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
  handle /ws {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
