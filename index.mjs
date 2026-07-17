@@ -4177,7 +4177,12 @@ function extractPatchFilePaths(patchText = '') {
  await waitForSteerCompletion();
  }
 
- if (pendingSubAgentSpawn || activeSubAgents.size > 0) {
+ // Normal Trooper runs stay open until their native child agents drain so the
+ // parent transcript can include every child event. ACP dispatch is different:
+ // the caller needs the accepted child session immediately and follows that
+ // durable session through /acp/sessions/:id/stream. Waiting here deadlocks the
+ // HTTP spawn request for the entire lifetime of the ACP child.
+ if (opts.detachSpawnedChildren !== true && (pendingSubAgentSpawn || activeSubAgents.size > 0)) {
  console.log(`[OpenClaw] Main agent response finished but ${activeSubAgents.size} sub-agent(s) are still active${pendingSubAgentSpawn ? ' (pending spawn detected)' : ''}; keeping stream open for child activity`);
  await new Promise((resolve) => {
  subagentDrainResolve = resolve;
@@ -13412,11 +13417,28 @@ function parseMaybeJson(value) {
 
 function findAcpSpawnResult(value, seen = new Set()) {
  const parsed = parseMaybeJson(value);
+ if (typeof parsed === 'string') {
+  const fenced = parsed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) {
+   const found = findAcpSpawnResult(fenced[1], seen);
+   if (found) return found;
+  }
+  const sessionMatch = parsed.match(/["']?childSessionKey["']?\s*[:=]\s*["']([^"'\s,}]+)["']/i)
+   || parsed.match(/["']?sessionKey["']?\s*[:=]\s*["'](agent:[^"'\s,}]+:acp:[^"'\s,}]+)["']/i);
+  if (sessionMatch?.[1]) {
+   const runMatch = parsed.match(/["']?runId["']?\s*[:=]\s*["']([^"'\s,}]+)["']/i);
+   return { sessionKey: sessionMatch[1], runId: runMatch?.[1] || null, raw: value };
+  }
+ }
  if (!parsed || typeof parsed !== 'object' || seen.has(parsed)) return null;
  seen.add(parsed);
- const sessionKey = parsed.childSessionKey || parsed.sessionKey || parsed.session?.key || parsed.session?.sessionKey;
  const runId = parsed.runId || parsed.run?.id || null;
- if (sessionKey) return { sessionKey: String(sessionKey), runId: runId ? String(runId) : null, raw: parsed };
+ // Prefer the explicit child identity. The dispatcher result itself also has a
+ // sessionKey, but that is the parent bridge session and must never be exposed
+ // as the ACP session that clients should stream.
+ if (parsed.childSessionKey) {
+  return { sessionKey: String(parsed.childSessionKey), runId: runId ? String(runId) : null, raw: parsed };
+ }
  if (Array.isArray(parsed)) {
   for (const item of parsed) {
    const found = findAcpSpawnResult(item, seen);
@@ -13425,8 +13447,12 @@ function findAcpSpawnResult(value, seen = new Set()) {
   return null;
  }
  for (const key of ['output', 'result', 'data', 'details', 'content', 'payload']) {
-  const found = findAcpSpawnResult(parsed[key], seen);
-  if (found) return found;
+ const found = findAcpSpawnResult(parsed[key], seen);
+ if (found) return found;
+ }
+ const nestedSessionKey = parsed.session?.key || parsed.session?.sessionKey || parsed.sessionKey;
+ if (nestedSessionKey && /^agent:[^:]+:acp:[^:]+$/i.test(String(nestedSessionKey))) {
+  return { sessionKey: String(nestedSessionKey), runId: runId ? String(runId) : null, raw: parsed };
  }
  return null;
 }
@@ -13441,50 +13467,171 @@ function messageText(message) {
  }).filter(Boolean).join('\n').trim();
 }
 
+function acpCommandToken(value) {
+ const token = String(value ?? '').trim();
+ if (!token || /[\r\n\0]/.test(token)) throw new Error('Invalid ACP command value');
+ // OpenClaw's /acp parser does not shell-unquote JSON/string literals; quote
+ // characters become part of values such as --cwd. ACP identifiers, profiles,
+ // models, labels, session keys, and canonical VPS paths are whitespace-free.
+ if (/\s/.test(token)) throw new Error(`ACP command value cannot contain whitespace: ${token}`);
+ return token;
+}
+
+function acpCommandReplyIdentity(message) {
+ const explicit = message?.id || message?.messageId || message?.runId || message?.idempotencyKey;
+ if (explicit) return String(explicit);
+ return [
+  String(message?.role || ''),
+  String(message?.timestamp || message?.createdAt || message?.created_at || ''),
+  messageText(message),
+ ].join(':');
+}
+
+async function runGatewaySlashCommand(command, sessionKey, { timeoutMs = 30000 } = {}) {
+ const message = String(command || '').trim();
+ if (!message.startsWith('/')) throw new Error('OpenClaw control command must start with /');
+ const before = await gateway.fetchSessionHistory(sessionKey, 100, { timeoutMs: 5000 }) || [];
+ const beforeIds = new Set(before.map(acpCommandReplyIdentity));
+ const started = await startGatewaySlashCommand(message, sessionKey, { timeoutMs });
+ const { idempotencyKey, startedAt } = started;
+
+ while (Date.now() - startedAt < timeoutMs) {
+  const history = await gateway.fetchSessionHistory(sessionKey, 150, { timeoutMs: 5000 }) || [];
+  const freshAssistant = history.filter((entry) =>
+   String(entry?.role || '').toLowerCase() === 'assistant'
+   && !beforeIds.has(acpCommandReplyIdentity(entry))
+   && messageText(entry)
+  );
+  if (freshAssistant.length > 0) {
+   return {
+    text: messageText(freshAssistant[freshAssistant.length - 1]),
+    message: freshAssistant[freshAssistant.length - 1],
+    idempotencyKey,
+   };
+  }
+  await new Promise((resolve) => setTimeout(resolve, 200));
+ }
+ throw new Error(`OpenClaw command timed out: ${message.split(/\s+/).slice(0, 3).join(' ')}`);
+}
+
+async function startGatewaySlashCommand(command, sessionKey, { timeoutMs = 30000 } = {}) {
+ const message = String(command || '').trim();
+ if (!message.startsWith('/')) throw new Error('OpenClaw control command must start with /');
+ const idempotencyKey = randomUUID();
+ const startedAt = Date.now();
+ const output = await gateway.request('chat.send', {
+  message,
+  sessionKey,
+  idempotencyKey,
+  agentId: 'main',
+  deliver: false,
+  timeoutMs,
+ }, { timeoutMs: Math.min(timeoutMs, 15000) });
+ return { output, idempotencyKey, startedAt };
+}
+
+function parseAcpSessionKey(value) {
+ const text = typeof value === 'string' ? value : JSON.stringify(value || '');
+ return text.match(/\bagent:[a-z0-9_-]+:acp:[a-z0-9-]+\b/i)?.[0] || null;
+}
+
 async function spawnAcpRun({ agent, cwd, model, message, channel, projectRef, parentRunId, parentMessageId, parentSessionKey: requestedParentSessionKey, permissions }) {
  const task = String(message || '').trim();
  if (!task) throw new Error('message required to start an ACP run');
  const parentSessionKey = String(requestedParentSessionKey || '').trim() || acpParentSessionKey(channel);
- const args = {
-  task,
-  runtime: 'acp',
-  agentId: String(agent || 'claude').trim().toLowerCase(),
-  mode: 'run',
-  thread: false,
-  ...(cwd ? { cwd: String(cwd) } : {}),
-  ...(model ? { model: String(model) } : {}),
- };
- const invoked = await gateway.request('tools.invoke', {
-  name: 'sessions_spawn',
-  args,
-  sessionKey: parentSessionKey,
-  agentId: 'main',
-  confirm: false,
-  idempotencyKey: randomUUID(),
- }, { timeoutMs: 45000 });
- const spawned = findAcpSpawnResult(invoked);
- if (!spawned?.sessionKey) {
-  const detail = typeof invoked === 'string' ? invoked : JSON.stringify(invoked);
-  throw new Error(`OpenClaw did not return an ACP child session${detail ? `: ${detail.slice(0, 600)}` : ''}`);
+ const harness = String(agent || 'claude').trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '');
+ if (!harness) throw new Error('ACP harness is required');
+ const label = `trooper-${harness}-${randomUUID().slice(0, 8)}`;
+ const spawnParts = [
+  '/acp spawn',
+  harness,
+  '--mode persistent',
+  '--thread off',
+  '--bind off',
+  '--label',
+  acpCommandToken(label),
+ ];
+ if (cwd) spawnParts.push('--cwd', acpCommandToken(cwd));
+ const spawnReply = await runGatewaySlashCommand(spawnParts.join(' '), parentSessionKey, { timeoutMs: 45000 });
+ const childSessionKey = parseAcpSessionKey(spawnReply.text);
+ if (!childSessionKey) {
+  throw new Error(`OpenClaw did not return an ACP child session: ${spawnReply.text.slice(0, 600)}`);
  }
- const sessionId = spawned.sessionKey;
+ let permissionWarning = null;
+ try {
+  if (model) {
+   const modelReply = await runGatewaySlashCommand(
+    `/acp model ${acpCommandToken(model)} ${acpCommandToken(childSessionKey)}`,
+    parentSessionKey,
+    { timeoutMs: 30000 },
+   );
+   if (/\b(error|failed|unsupported|not found)\b/i.test(modelReply.text)) {
+    throw new Error(`ACP model configuration failed: ${modelReply.text}`);
+   }
+  }
+  const permissionMode = permissions || 'approve-reads';
+  if (permissionMode) {
+   const permissionReply = await runGatewaySlashCommand(
+    `/acp permissions ${acpCommandToken(permissionMode)} ${acpCommandToken(childSessionKey)}`,
+    parentSessionKey,
+    { timeoutMs: 30000 },
+   );
+   if (/ACP_BACKEND_UNSUPPORTED_CONTROL|does not accept config key/i.test(permissionReply.text)) {
+    permissionWarning = permissionReply.text;
+   } else if (/\b(error|failed|unsupported|not found)\b/i.test(permissionReply.text)) {
+    throw new Error(`ACP permission configuration failed: ${permissionReply.text}`);
+   }
+  }
+ } catch (error) {
+  try {
+   await runGatewaySlashCommand(
+    `/acp close ${acpCommandToken(childSessionKey)}`,
+    parentSessionKey,
+    { timeoutMs: 15000 },
+   );
+  } catch {}
+  throw error;
+ }
+ const sessionId = childSessionKey;
+ const permissionMode = permissions || 'approve-reads';
  acpSessionRegistry.set(sessionId, {
   sessionId,
-  sessionKey: spawned.sessionKey,
-  runId: spawned.runId,
+  sessionKey: childSessionKey,
+  runId: null,
   parentSessionKey,
-  agent: args.agentId,
+  agent: harness,
   status: 'working',
   spawnedAt: Date.now(),
   lastActivity: Date.now(),
-  permissions: permissions || 'approve-reads',
+  permissions: permissionMode,
   cwd: cwd || null,
   channel: channel || 'general',
   projectRef: projectRef || null,
   parentRunId: parentRunId || null,
   parentMessageId: parentMessageId || null,
+  permissionWarning,
   output: '',
  });
+ const steerCommand = `/acp steer --session ${acpCommandToken(childSessionKey)} ${task}`;
+ void runGatewaySlashCommand(steerCommand, parentSessionKey, { timeoutMs: 2 * 60 * 60 * 1000 })
+  .then((reply) => {
+   const local = acpSessionRegistry.get(sessionId);
+   if (!local) return;
+   const text = stripAnsi(reply.text).trim();
+   local.lastActivity = Date.now();
+   local.steerResponse = text;
+   if (/\b(ACP_TURN_FAILED|Authentication required|Quota exceeded|UsageLimitExceeded)\b/i.test(text)) {
+    local.status = 'failed';
+    local.output = text;
+   }
+  })
+  .catch((error) => {
+   const local = acpSessionRegistry.get(sessionId);
+   if (!local) return;
+   local.status = 'failed';
+   local.output = stripAnsi(error?.message || String(error)).trim();
+   local.lastActivity = Date.now();
+  });
  return acpSessionRegistry.get(sessionId);
 }
 
@@ -13512,12 +13659,21 @@ app.post('/acp/sessions/:sessionId/steer', async (req, res) => {
  const { message } = req.body || {};
  if (!message) return res.status(400).json({ error: 'message required' });
  const local = acpSessionRegistry.get(sessionId);
- const result = await gateway.steerSession(local?.sessionKey || sessionId, message, { requestTimeoutMs: 30000 });
+ if (!local?.sessionKey) return res.status(404).json({ error: 'ACP session not found' });
+ const result = await runGatewaySlashCommand(
+  `/acp steer --session ${acpCommandToken(local.sessionKey)} ${String(message).trim()}`,
+  local.parentSessionKey || acpParentSessionKey(local.channel),
+  { timeoutMs: 45000 },
+ );
+ if (/\b(error|failed|unsupported|not found)\b/i.test(result.text)) {
+  throw new Error(`ACP steer failed: ${result.text}`);
+ }
  if (acpSessionRegistry.has(sessionId)) {
  acpSessionRegistry.get(sessionId).lastActivity = Date.now();
  acpSessionRegistry.get(sessionId).output = message;
+ acpSessionRegistry.get(sessionId).status = 'working';
  }
- res.json({ sessionId, output: result });
+ res.json({ sessionId, output: result.text });
  } catch (e) {
  res.status(500).json({ error: e.message });
  }
@@ -13541,7 +13697,15 @@ app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
  let lastSignature = '';
  let stablePolls = 0;
  let sentFinal = false;
+ let lastProgressAt = 0;
  while (!res.writableEnded && Date.now() - startedAt < 2 * 60 * 60 * 1000) {
+  if (local.status === 'failed') {
+   const content = stripAnsi(local.output || 'ACP run failed').trim();
+   res.write(`data: ${JSON.stringify({ type: 'error', content, status: 'failed' })}\n\n`);
+   local.lastActivity = Date.now();
+   sentFinal = true;
+   break;
+  }
   const history = await gateway.fetchSessionHistory(local.sessionKey, 200, { timeoutMs: 15000 }) || [];
   const assistantMessages = history.filter((entry) => String(entry?.role || '').toLowerCase() === 'assistant');
   const finalText = messageText(assistantMessages[assistantMessages.length - 1]);
@@ -13562,12 +13726,18 @@ app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
   }
   if (terminal && !finalText) {
    const failed = ['failed', 'cancelled', 'canceled'].includes(status);
-   res.write(`data: ${JSON.stringify({ type: failed ? 'error' : 'done', content: failed ? `ACP run ${status}` : '', status })}\n\n`);
+   const content = failed ? stripAnsi(local.output || `ACP run ${status}`).trim() : '';
+   res.write(`data: ${JSON.stringify({ type: failed ? 'error' : 'done', content, status })}\n\n`);
    local.status = status || 'completed';
    sentFinal = true;
    break;
   }
-  res.write(`data: ${JSON.stringify({ type: 'progress', content: 'ACP worker is running', status: status || 'working' })}\n\n`);
+  if (Date.now() - lastProgressAt >= 10000) {
+   res.write(`data: ${JSON.stringify({ type: 'progress', content: 'ACP worker is running', status: status || 'working' })}\n\n`);
+   lastProgressAt = Date.now();
+  } else {
+   res.write(': keepalive\n\n');
+  }
   await new Promise((resolve) => setTimeout(resolve, 1000));
  }
  if (!sentFinal && !res.writableEnded) {
@@ -13631,11 +13801,21 @@ app.put('/acp/sessions/:sessionId/permissions', async (req, res) => {
  if (!permissions || !['approve-all', 'approve-reads', 'deny-all'].includes(permissions)) {
  return res.status(400).json({ error: 'permissions must be approve-all, approve-reads, or deny-all' });
  }
- if (acpSessionRegistry.has(sessionId)) {
- acpSessionRegistry.get(sessionId).permissions = permissions;
- acpSessionRegistry.get(sessionId).lastActivity = Date.now();
+ const local = acpSessionRegistry.get(sessionId);
+ if (!local?.sessionKey) return res.status(404).json({ error: 'ACP session not found' });
+ const output = await runGatewaySlashCommand(
+  `/acp permissions ${acpCommandToken(permissions)} ${acpCommandToken(local.sessionKey)}`,
+  local.parentSessionKey || acpParentSessionKey(local.channel),
+  { timeoutMs: 30000 },
+ );
+ const unsupported = /ACP_BACKEND_UNSUPPORTED_CONTROL|does not accept config key/i.test(output.text);
+ if (!unsupported && /\b(error|failed|unsupported|not found)\b/i.test(output.text)) {
+  throw new Error(`ACP permission update failed: ${output.text}`);
  }
- res.json({ sessionId, permissions, output: { ok: true, note: 'Permission mode applies to subsequent ACP operations.' } });
+ local.permissions = permissions;
+ local.lastActivity = Date.now();
+ local.permissionWarning = unsupported ? output.text : null;
+ res.json({ sessionId, permissions, output: { ok: true, supported: !unsupported, message: output.text } });
  } catch (e) {
  res.status(500).json({ error: e.message });
  }
