@@ -13535,6 +13535,45 @@ function parseAcpSessionKey(value) {
  return text.match(/\bagent:[a-z0-9_-]+:acp:[a-z0-9-]+\b/i)?.[0] || null;
 }
 
+function parseAcpSessionKeys(value) {
+ const text = typeof value === 'string' ? value : JSON.stringify(value || '');
+ return [...new Set(text.match(/\bagent:[a-z0-9_-]+:acp:[a-z0-9-]+\b/gi) || [])];
+}
+
+async function closeGatewayAcpSession(sessionKey, parentSessionKey) {
+ const key = String(sessionKey || '').trim();
+ if (!key) return { ok: false, skipped: true };
+ const result = await runGatewaySlashCommand(
+  `/acp close ${acpCommandToken(key)}`,
+  parentSessionKey,
+  { timeoutMs: 15000 },
+ );
+ return { ok: !/\b(error|failed|not found)\b/i.test(result.text), message: result.text };
+}
+
+async function reapTerminalGatewayAcpSessions(parentSessionKey) {
+ const listed = await runGatewaySlashCommand('/acp sessions', parentSessionKey, { timeoutMs: 30000 });
+ const keys = parseAcpSessionKeys(listed.text);
+ const reaped = [];
+ for (const key of keys) {
+  const tracked = acpSessionRegistry.get(key);
+  let terminal = tracked && ['completed', 'failed', 'cancelled', 'canceled', 'closed'].includes(String(tracked.status).toLowerCase());
+  if (!terminal) {
+   try {
+    const snapshot = await gateway.fetchSessionSnapshot(key);
+    terminal = ['completed', 'complete', 'done', 'idle', 'failed', 'cancelled', 'canceled', 'closed']
+     .includes(String(snapshot?.status || '').toLowerCase());
+   } catch {}
+  }
+  if (!terminal) continue;
+  try {
+   await closeGatewayAcpSession(key, tracked?.parentSessionKey || parentSessionKey);
+   reaped.push(key);
+  } catch {}
+ }
+ return reaped;
+}
+
 async function spawnAcpRun({ agent, cwd, model, message, channel, projectRef, parentRunId, parentMessageId, parentSessionKey: requestedParentSessionKey, permissions }) {
  const task = String(message || '').trim();
  if (!task) throw new Error('message required to start an ACP run');
@@ -13552,7 +13591,13 @@ async function spawnAcpRun({ agent, cwd, model, message, channel, projectRef, pa
   acpCommandToken(label),
  ];
  if (cwd) spawnParts.push('--cwd', acpCommandToken(cwd));
- const spawnReply = await runGatewaySlashCommand(spawnParts.join(' '), parentSessionKey, { timeoutMs: 45000 });
+ let spawnReply = await runGatewaySlashCommand(spawnParts.join(' '), parentSessionKey, { timeoutMs: 45000 });
+ if (/max concurrent sessions reached/i.test(spawnReply.text)) {
+  const reaped = await reapTerminalGatewayAcpSessions(parentSessionKey).catch(() => []);
+  if (reaped.length > 0) {
+   spawnReply = await runGatewaySlashCommand(spawnParts.join(' '), parentSessionKey, { timeoutMs: 45000 });
+  }
+ }
  const childSessionKey = parseAcpSessionKey(spawnReply.text);
  if (!childSessionKey) {
   throw new Error(`OpenClaw did not return an ACP child session: ${spawnReply.text.slice(0, 600)}`);
@@ -13614,15 +13659,16 @@ async function spawnAcpRun({ agent, cwd, model, message, channel, projectRef, pa
  });
  const steerCommand = `/acp steer --session ${acpCommandToken(childSessionKey)} ${task}`;
  void runGatewaySlashCommand(steerCommand, parentSessionKey, { timeoutMs: 2 * 60 * 60 * 1000 })
-  .then((reply) => {
+ .then((reply) => {
    const local = acpSessionRegistry.get(sessionId);
    if (!local) return;
    const text = stripAnsi(reply.text).trim();
    local.lastActivity = Date.now();
    local.steerResponse = text;
    if (/\b(ACP_TURN_FAILED|Authentication required|Quota exceeded|UsageLimitExceeded)\b/i.test(text)) {
-    local.status = 'failed';
-    local.output = text;
+   local.status = 'failed';
+   local.output = text;
+    void closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {});
    }
   })
   .catch((error) => {
@@ -13631,6 +13677,7 @@ async function spawnAcpRun({ agent, cwd, model, message, channel, projectRef, pa
    local.status = 'failed';
    local.output = stripAnsi(error?.message || String(error)).trim();
    local.lastActivity = Date.now();
+   void closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {});
   });
  return acpSessionRegistry.get(sessionId);
 }
@@ -13704,6 +13751,7 @@ app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
    res.write(`data: ${JSON.stringify({ type: 'error', content, status: 'failed' })}\n\n`);
    local.lastActivity = Date.now();
    sentFinal = true;
+   void closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {});
    break;
   }
   const history = await gateway.fetchSessionHistory(local.sessionKey, 200, { timeoutMs: 15000 }) || [];
@@ -13722,6 +13770,7 @@ app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
    local.output = finalText;
    local.lastActivity = Date.now();
    sentFinal = true;
+   void closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {});
    break;
   }
   if (terminal && !finalText) {
@@ -13730,6 +13779,7 @@ app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
    res.write(`data: ${JSON.stringify({ type: failed ? 'error' : 'done', content, status })}\n\n`);
    local.status = status || 'completed';
    sentFinal = true;
+   void closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {});
    break;
   }
   if (Date.now() - lastProgressAt >= 10000) {
@@ -13760,6 +13810,9 @@ app.post('/acp/sessions/:sessionId/cancel', async (req, res) => {
  acpSessionRegistry.get(sessionId).lastActivity = Date.now();
  acpSessionRegistry.get(sessionId).status = 'cancelled';
  }
+ if (local?.sessionKey) {
+  await closeGatewayAcpSession(local.sessionKey, local.parentSessionKey || acpParentSessionKey(local.channel)).catch(() => {});
+ }
  res.json({ sessionId, status: 'cancelled', output });
  } catch (e) {
  res.status(500).json({ error: e.message });
@@ -13770,7 +13823,10 @@ app.post('/acp/sessions/:sessionId/cancel', async (req, res) => {
 app.delete('/acp/sessions/:sessionId', async (req, res) => {
  try {
  const { sessionId } = req.params;
- const output = { ok: true };
+ const local = acpSessionRegistry.get(sessionId);
+ const output = local?.sessionKey
+  ? await closeGatewayAcpSession(local.sessionKey, local.parentSessionKey || acpParentSessionKey(local.channel))
+  : { ok: true, skipped: true };
  if (acpSessionRegistry.has(sessionId)) {
  acpSessionRegistry.get(sessionId).status = 'closed';
  }
