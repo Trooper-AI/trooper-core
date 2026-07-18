@@ -27,7 +27,16 @@ import { EventEmitter } from 'events';
 import { execFile, execFileSync, execSync, spawn } from 'child_process';
 import { Worker } from 'worker_threads';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, lstatSync, rmSync, cpSync } from 'fs';
-import { readFile, writeFile, readdir } from 'fs/promises';
+import {
+  cp as copyTree,
+  mkdir as mkdirAsync,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename as renameAsync,
+  rm as rmAsync,
+  writeFile,
+} from 'fs/promises';
 import { db, sqlite, DB_PATH } from './db/index.mjs';
 import { migrate } from './db/migrate.mjs';
 
@@ -87,6 +96,12 @@ import {
   resolveManagedBackupPath,
   validateTarEntryNames,
 } from './lib/local-backup.mjs';
+import {
+  beginRuntimeUpgradeState,
+  isRuntimeUpgradeActive,
+  patchRuntimeUpgradeState,
+  readRuntimeUpgradeState,
+} from './lib/runtime-upgrade-journal.mjs';
 import { startSlotRuntime } from './lib/shared-slot-runtime.mjs';
 import {
   DEFAULT_SHARED_STATE_DIR,
@@ -8389,19 +8404,16 @@ app.post('/admin/restart-services', async (req, res) => {
  }
 });
 
-// POST /admin/backup — create a local backup tarball of all user data
-app.post('/admin/backup', async (req, res) => {
- if (!requireBridgeAuth(req, res)) return;
+async function createManagedBackup({ reason = 'manual' } = {}) {
+ const backupDir = LOCAL_BACKUP_DIR;
+ const timestamp = Date.now();
+ const backupFile = resolveManagedBackupPath(`backup-${timestamp}.tar.gz`, backupDir);
+ const partialFile = `${backupFile}.partial`;
+ await mkdirAsync(backupDir, { recursive: true, mode: 0o700 });
+ const stagingDir = await mkdtemp(path.join(backupDir, '.staging-'));
+
  try {
-   const backupDir = LOCAL_BACKUP_DIR;
-   const timestamp = Date.now();
-   const backupFile = resolveManagedBackupPath(`backup-${timestamp}.tar.gz`, backupDir);
-
-   // Ensure backup directory exists
-   mkdirSync(backupDir, { recursive: true, mode: 0o700 });
-
-   // Build list of paths to back up (only include existing ones)
-   const paths = [
+   const sources = [
      '/opt/openclaw-data/bridge.db',
      '/opt/openclaw-bridge/bridge.db',
      '/opt/openclaw-data/workspace',
@@ -8413,40 +8425,83 @@ app.post('/admin/backup', async (req, res) => {
      '/home/node/.openclaw/cron',
      '/home/node/.openclaw/devices',
      '/home/node/.openclaw/memory',
-   ].filter(p => existsSync(p));
+   ].filter(source => source !== DB_PATH && existsSync(source));
 
-   if (paths.length === 0) {
-     return res.status(400).json({ error: 'No data paths found to back up' });
+   for (const source of sources) {
+     const destination = path.join(stagingDir, source.replace(/^\/+/, ''));
+     await mkdirAsync(path.dirname(destination), { recursive: true });
+     await copyTree(source, destination, {
+       recursive: true,
+       force: true,
+       preserveTimestamps: true,
+       dereference: false,
+     });
    }
 
-   execFileSync('tar', ['-czf', backupFile, ...paths], {
-     timeout: 120000,
-     stdio: ['ignore', 'ignore', 'ignore'],
+   if (existsSync(DB_PATH)) {
+     const databaseDestination = path.join(stagingDir, DB_PATH.replace(/^\/+/, ''));
+     await mkdirAsync(path.dirname(databaseDestination), { recursive: true });
+     // better-sqlite3's online backup API produces a transactionally consistent
+     // database without racing the live WAL file.
+     await sqlite.backup(databaseDestination);
+   }
+
+   if (sources.length === 0 && !existsSync(DB_PATH)) {
+     const error = new Error('No data paths found to back up');
+     error.statusCode = 400;
+     throw error;
+   }
+
+   const manifestPath = path.join(stagingDir, 'opt/openclaw-data/trooper-backup-manifest.json');
+   await mkdirAsync(path.dirname(manifestPath), { recursive: true });
+   await writeFile(manifestPath, `${JSON.stringify({
+     schemaVersion: 1,
+     createdAt: new Date(timestamp).toISOString(),
+     reason,
+     database: existsSync(DB_PATH) ? DB_PATH : null,
+     sources,
+   }, null, 2)}\n`, { mode: 0o600 });
+
+   await runUpgradeCommand('tar', ['-czf', partialFile, '-C', stagingDir, '.'], {
+     timeout: 180000,
    });
+   const listing = await runUpgradeCommand('tar', ['-tzf', partialFile], { timeout: 120000 });
+   validateTarEntryNames(listing);
+   await renameAsync(partialFile, backupFile);
 
    const stats = statSync(backupFile);
    console.log(`[admin] Backup created: ${backupFile} (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
 
-   // Clean up old backups (keep last 5)
    try {
      const files = readdirSync(backupDir)
-       .filter(f => f.startsWith('backup-') && f.endsWith('.tar.gz'))
+       .filter(isManagedBackupName)
        .sort()
        .reverse();
-     for (const f of files.slice(5)) {
-       rmSync(resolveManagedBackupPath(f, backupDir), { force: true });
+     for (const file of files.slice(5)) {
+       rmSync(resolveManagedBackupPath(file, backupDir), { force: true });
      }
    } catch {}
 
-   res.json({
+   return {
      ok: true,
      path: backupFile,
      size: stats.size,
      sizeMB: (stats.size / 1024 / 1024).toFixed(2),
      timestamp,
-   });
+   };
+ } finally {
+   await rmAsync(stagingDir, { recursive: true, force: true }).catch(() => {});
+   await rmAsync(partialFile, { force: true }).catch(() => {});
+ }
+}
+
+// POST /admin/backup — create an atomic local backup of all user data.
+app.post('/admin/backup', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+   res.json(await createManagedBackup({ reason: req.body?.reason || 'manual' }));
  } catch (err) {
-   res.status(500).json({ error: err.message });
+   res.status(err.statusCode || 500).json({ error: err.message });
  }
 });
 
@@ -9337,11 +9392,21 @@ app.post('/admin/diagnostics/snapshot', (req, res) => {
 });
 
 function runUpgradeCommand(command, args, options = {}) {
-  return execFileSync(command, args, {
-    encoding: 'utf8',
-    maxBuffer: 16 * 1024 * 1024,
-    ...options,
-  }).trim();
+  return new Promise((resolve, reject) => {
+    execFile(command, args, {
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+      ...options,
+    }, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+      resolve(String(stdout || '').trim());
+    });
+  });
 }
 
 async function waitForGatewayUpgradeHealth({ timeoutMs = 90000 } = {}) {
@@ -9366,21 +9431,51 @@ async function waitForGatewayUpgradeHealth({ timeoutMs = 90000 } = {}) {
   throw new Error(`Gateway did not become healthy after upgrade: ${lastError}`);
 }
 
-function scheduleManagedRuntimeServiceRestart(scope) {
-  if (!['all', 'bridge'].includes(scope)) return;
-  setTimeout(() => {
-    try {
-      runUpgradeCommand('systemctl', [
-        'restart',
-        'trooper-org-runtime',
-        'trooper-server',
-        'openclaw-bridge',
-        'trooper-shared-node-manager',
-      ], { timeout: 30000 });
-    } catch (error) {
-      console.error('[upgrade] Managed service restart failed:', error.message);
-    }
-  }, 1000).unref?.();
+async function scheduleManagedRuntimeServiceRestart(scope, operationId) {
+  if (!['all', 'bridge'].includes(scope)) return null;
+  const script = '/opt/openclaw-bridge/scripts/verify-managed-upgrade.sh';
+  const unit = `trooper-upgrade-${String(operationId || Date.now()).replace(/[^a-zA-Z0-9_.-]/g, '-')}`;
+  patchRuntimeUpgradeState({
+    status: 'restart_scheduled',
+    phase: 'external_verifier',
+    verifier: { unit, script, scheduledAt: new Date().toISOString() },
+  });
+  try {
+    await runUpgradeCommand('systemd-run', [
+      '--quiet',
+      '--collect',
+      '--on-active=2s',
+      `--unit=${unit}`,
+      '/bin/bash',
+      script,
+      scope,
+      operationId,
+    ], { timeout: 10000 });
+    return { type: 'systemd', unit, scheduled: true };
+  } catch (error) {
+    console.warn('[upgrade] systemd verifier scheduling failed; using detached verifier:', error.message);
+    patchRuntimeUpgradeState({
+      verifier: { unit: null, script, scheduledAt: new Date().toISOString(), fallback: 'detached' },
+    });
+    setTimeout(() => {
+      try {
+        const child = spawn('/bin/bash', [script, scope, operationId], {
+          detached: true,
+          stdio: 'ignore',
+          env: process.env,
+        });
+        child.unref();
+      } catch (spawnError) {
+        patchRuntimeUpgradeState({
+          status: 'failed',
+          phase: 'verifier_spawn_failed',
+          error: spawnError.message,
+          completedAt: new Date().toISOString(),
+        });
+      }
+    }, 1500).unref?.();
+    return { type: 'detached', scheduled: true };
+  }
 }
 
 async function restartReadySharedWorkspaceSlots({ scope, target, step }) {
@@ -9431,7 +9526,10 @@ async function restartReadySharedWorkspaceSlots({ scope, target, step }) {
 }
 
 async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots = false } = {}) {
-  if (performManagedRuntimeUpgrade.inProgress) {
+  const previousState = readRuntimeUpgradeState();
+  const previousUpdatedAt = Date.parse(previousState?.updatedAt || '') || 0;
+  const previousStateIsFresh = previousUpdatedAt > Date.now() - (15 * 60 * 1000);
+  if (performManagedRuntimeUpgrade.inProgress || (isRuntimeUpgradeActive(previousState) && previousStateIsFresh)) {
     const error = new Error('A runtime upgrade is already in progress');
     error.statusCode = 409;
     error.code = 'runtime_upgrade_in_progress';
@@ -9439,8 +9537,10 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
   }
   performManagedRuntimeUpgrade.inProgress = true;
   let bridgeActivated = false;
+  let operationId = `upgrade-${Date.now()}-${randomBytes(4).toString('hex')}`;
   try {
   const { scope, target } = validateRuntimeUpgradeRequest(request);
+  beginRuntimeUpgradeState({ operationId, scope, target });
   const log = [];
   const step = (msg) => {
     log.push({ t: Date.now(), msg });
@@ -9463,16 +9563,18 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
   }
 
   const preflight = assertRuntimeUpgradePreflight({ scope, includeSharedSlots });
+  patchRuntimeUpgradeState({ phase: 'preflight_complete', preflight });
   step(
     `Upgrade preflight passed: ${preflight.checks.length} checks, `
     + `${Math.floor(preflight.checks.find((check) => check.name === 'disk')?.value / 1024 / 1024)} MiB free`,
   );
 
   if (['all', 'gateway'].includes(scope)) {
+    patchRuntimeUpgradeState({ phase: 'gateway_upgrade' });
     step(`Pulling promoted gateway image ${target.gatewayImage}`);
-    runUpgradeCommand('docker', ['pull', target.gatewayImage], { timeout: 180000 });
-    runUpgradeCommand('docker', ['tag', target.gatewayImage, 'openclaw:local'], { timeout: 15000 });
-    runUpgradeCommand('docker', ['compose', 'up', '-d', '--force-recreate'], {
+    await runUpgradeCommand('docker', ['pull', target.gatewayImage], { timeout: 180000 });
+    await runUpgradeCommand('docker', ['tag', target.gatewayImage, 'openclaw:local'], { timeout: 15000 });
+    await runUpgradeCommand('docker', ['compose', 'up', '-d', '--force-recreate'], {
       cwd: '/opt/openclaw',
       timeout: 90000,
     });
@@ -9481,18 +9583,19 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
   }
 
   if (['all', 'bridge'].includes(scope)) {
-    const beforeSha = runUpgradeCommand('git', ['-C', '/opt/openclaw-bridge', 'rev-parse', 'HEAD'], {
+    patchRuntimeUpgradeState({ phase: 'bridge_upgrade' });
+    const beforeSha = await runUpgradeCommand('git', ['-C', '/opt/openclaw-bridge', 'rev-parse', 'HEAD'], {
       timeout: 10000,
     });
     step(`Staging promoted bridge commit ${target.openclawBridgeCommit}`);
-    runUpgradeCommand('bash', ['/opt/openclaw-bridge/scripts/update-bridge.sh', 'activate'], {
+    await runUpgradeCommand('bash', ['/opt/openclaw-bridge/scripts/update-bridge.sh', 'activate'], {
       env: {
         ...process.env,
         TROOPER_BRIDGE_COMMIT: target.openclawBridgeCommit,
       },
       timeout: 240000,
     });
-    const afterSha = runUpgradeCommand('git', ['-C', '/opt/openclaw-bridge', 'rev-parse', 'HEAD'], {
+    const afterSha = await runUpgradeCommand('git', ['-C', '/opt/openclaw-bridge', 'rev-parse', 'HEAD'], {
       timeout: 10000,
     });
     if (afterSha !== target.openclawBridgeCommit) {
@@ -9504,7 +9607,7 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
     bridgeActivated = beforeSha !== afterSha;
 
     step('Staging promoted Trooper runtime bundle...');
-    runUpgradeCommand('bash', ['/opt/openclaw-bridge/scripts/update-org-runtime.sh'], {
+    await runUpgradeCommand('bash', ['/opt/openclaw-bridge/scripts/update-org-runtime.sh'], {
       env: {
         ...process.env,
         TROOPER_RUNTIME_TARBALL_URL: target.runtimeTarballUrl,
@@ -9531,19 +9634,29 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
   }
 
   step('Immutable upgrade commands completed');
+  const restartRequired = ['all', 'bridge'].includes(scope);
+  patchRuntimeUpgradeState(restartRequired
+    ? { status: 'staging', phase: 'restart_pending', log }
+    : {
+        status: 'completed',
+        phase: 'verified',
+        completedAt: new Date().toISOString(),
+        log,
+      });
   return {
     success: true,
+    operationId,
     scope,
     target,
     sharedSlots,
     preflight,
     log,
-    restartRequired: ['all', 'bridge'].includes(scope),
+    restartRequired,
   };
   } catch (error) {
     if (bridgeActivated) {
       try {
-        runUpgradeCommand('bash', ['/opt/openclaw-bridge/scripts/update-bridge.sh', 'rollback'], {
+        await runUpgradeCommand('bash', ['/opt/openclaw-bridge/scripts/update-bridge.sh', 'rollback'], {
           timeout: 30000,
         });
         console.warn('[upgrade] Restored previous bridge checkout after upgrade failure');
@@ -9552,6 +9665,13 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
         error.message = `${error.message}; bridge rollback also failed: ${rollbackError.message}`;
       }
     }
+    patchRuntimeUpgradeState({
+      operationId,
+      status: bridgeActivated ? 'rolled_back' : 'failed',
+      phase: bridgeActivated ? 'staging_rollback' : 'staging_failed',
+      error: error.message,
+      completedAt: new Date().toISOString(),
+    });
     throw error;
   } finally {
     performManagedRuntimeUpgrade.inProgress = false;
@@ -9571,8 +9691,8 @@ app.post('/admin/upgrade', async (req, res) => {
       scope: result.scope,
       slots: result.sharedSlots.map((slot) => slot.slotId),
     });
-    res.json(result);
-    scheduleManagedRuntimeServiceRestart(result.scope);
+    const verifier = await scheduleManagedRuntimeServiceRestart(result.scope, result.operationId);
+    res.json({ ...result, verifier });
   } catch (error) {
     captureLog('error', `Shared runtime upgrade failed: ${error.message}`, { stack: error.stack });
     res.status(error.statusCode || 500).json({
@@ -12136,8 +12256,8 @@ app.post('/upgrade', async (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
  try {
    const result = await performManagedRuntimeUpgrade({ request: req.body || {} });
-   res.json(result);
-   scheduleManagedRuntimeServiceRestart(result.scope);
+   const verifier = await scheduleManagedRuntimeServiceRestart(result.scope, result.operationId);
+   res.json({ ...result, verifier });
  } catch (err) {
    captureLog('error', `Runtime upgrade failed: ${err.message}`, { stack: err.stack });
    res.status(err.statusCode || 500).json({
@@ -12165,7 +12285,8 @@ app.get('/upgrade/status', (req, res) => {
    } catch { versions.gatewayStatus = 'unknown'; }
    res.json({
     ...versions,
-    updateInProgress,
+    updateInProgress: performManagedRuntimeUpgrade.inProgress || isRuntimeUpgradeActive(readRuntimeUpgradeState()),
+    operation: readRuntimeUpgradeState(),
     current,
     target,
     upgrade: buildLocalUpgradeSummary(current, target),
