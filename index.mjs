@@ -24,7 +24,8 @@ import {
 import { ensureXvnc } from './lib/xvnc.mjs';
 import cors from 'cors';
 import { EventEmitter } from 'events';
-import { execFileSync, execSync, spawn } from 'child_process';
+import { execFile, execFileSync, execSync, spawn } from 'child_process';
+import { Worker } from 'worker_threads';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, lstatSync, rmSync, cpSync } from 'fs';
 import { readFile, writeFile, readdir } from 'fs/promises';
 import { db, sqlite, DB_PATH } from './db/index.mjs';
@@ -120,11 +121,7 @@ import {
   writeTimestampedBackup,
 } from './lib/file-write-guards.mjs';
 import {
-  installOpenClawNpmPlugin,
-  installOpenClawPlugin,
   isOpenClawPluginHostPath,
-  runAllowlistedGatewayExec,
-  syncGatewayPlugin,
   writePluginFilesFromAbsolutePaths,
 } from './lib/gateway-plugins.mjs';
 
@@ -1943,7 +1940,7 @@ function upsertBridgePairedDevice({ force = false, reason = 'repair' } = {}) {
  if (changed) {
   paired[deviceIdentity.deviceId] = desired;
   writeFileSync(OPENCLAW_PAIRED_JSON_PATH, JSON.stringify(paired, null, 2), { mode: 0o600 });
-  try { execSync(`chown -R 1000:1000 ${OPENCLAW_DEVICES_DIR} 2>/dev/null || true`, { timeout: 5000 }); } catch {}
+  execFile('chown', ['-R', '1000:1000', OPENCLAW_DEVICES_DIR], () => {});
   const action = Object.keys(existing).length ? 'repaired' : 'added';
   console.log(`[OpenClaw] Bridge device ${action} in paired.json (${reason}${force ? ', forced-check' : ''})`);
  } else {
@@ -7652,24 +7649,68 @@ app.get('/deploy-logs-raw', (req, res) => {
  }
 });
 
+const GATEWAY_CONTAINER_STATUS_TTL_MS = 2_000;
+let gatewayContainerStatusRefreshInFlight = false;
+let gatewayContainerStatusCache = {
+ status: 'unknown',
+ running: false,
+ restartCount: 0,
+ inspectError: null,
+ refreshedAt: 0,
+ lastAttemptAt: 0,
+};
+
+function refreshGatewayContainerStatus() {
+ const now = Date.now();
+ if (gatewayContainerStatusRefreshInFlight
+   || now - gatewayContainerStatusCache.lastAttemptAt < GATEWAY_CONTAINER_STATUS_TTL_MS) return;
+ gatewayContainerStatusRefreshInFlight = true;
+ gatewayContainerStatusCache.lastAttemptAt = now;
+ execFile(
+  'docker',
+  ['inspect', '--format={{.State.Status}}:{{.State.Running}}:{{.RestartCount}}', OPENCLAW_GATEWAY_CONTAINER],
+  { timeout: 2500, maxBuffer: 256 * 1024, encoding: 'utf8' },
+  (err, stdout) => {
+   gatewayContainerStatusRefreshInFlight = false;
+   if (err) {
+    // Preserve the last known-good state. A slow Docker daemon must not make the
+    // bridge event loop unavailable or turn a healthy websocket into a false outage.
+    gatewayContainerStatusCache = {
+     ...gatewayContainerStatusCache,
+     inspectError: err.message,
+     lastAttemptAt: Date.now(),
+    };
+    return;
+   }
+   const [state, running, restarts] = String(stdout || '').trim().split(':');
+   gatewayContainerStatusCache = {
+    status: state || 'unknown',
+    running: running === 'true',
+    restartCount: parseInt(restarts, 10) || 0,
+    inspectError: null,
+    refreshedAt: Date.now(),
+    lastAttemptAt: Date.now(),
+   };
+  },
+ );
+}
+
 function readGatewayContainerStatus({ includeLogs = false } = {}) {
- const result = {
-  status: 'unknown',
-  running: false,
-  restartCount: 0,
-  recentLogs: '',
-  inspectError: null,
- };
- try {
-  const raw = execSync(`docker inspect --format="{{.State.Status}}:{{.State.Running}}:{{.RestartCount}}" ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 2500 }).toString().trim();
-  const [state, running, restarts] = raw.split(':');
-  result.status = state || 'unknown';
-  result.running = running === 'true';
-  result.restartCount = parseInt(restarts, 10) || 0;
- } catch (err) {
-  result.status = 'missing';
-  result.inspectError = err.message;
+ const now = Date.now();
+ if (now - gatewayContainerStatusCache.refreshedAt >= GATEWAY_CONTAINER_STATUS_TTL_MS) {
+  refreshGatewayContainerStatus();
  }
+ const hasCachedInspection = gatewayContainerStatusCache.refreshedAt > 0;
+ const result = {
+  status: hasCachedInspection
+   ? gatewayContainerStatusCache.status
+   : gateway.isReady ? 'running' : 'unknown',
+  running: hasCachedInspection ? gatewayContainerStatusCache.running : !!gateway.isReady,
+  restartCount: gatewayContainerStatusCache.restartCount,
+  recentLogs: '',
+  inspectError: gatewayContainerStatusCache.inspectError,
+  inspectedAt: gatewayContainerStatusCache.refreshedAt || null,
+ };
  if (includeLogs) {
   try {
    result.recentLogs = execSync(`docker logs --tail 80 --timestamps ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 3500 }).toString();
@@ -7679,6 +7720,9 @@ function readGatewayContainerStatus({ includeLogs = false } = {}) {
  }
  return result;
 }
+
+// Warm the cache without delaying startup or any request handler.
+refreshGatewayContainerStatus();
 
 let gatewayOutageState = {
  active: false,
@@ -7798,6 +7842,63 @@ function getActiveRuntimeOperation() {
  return activeRuntimeOperation;
 }
 
+function runGatewayPluginWorker(operation, payload = {}, timeoutMs = 180000) {
+ return new Promise((resolve, reject) => {
+  const worker = new Worker(new URL('./lib/gateway-plugin-worker.mjs', import.meta.url), {
+   workerData: { operation, payload },
+  });
+  let settled = false;
+  const finish = (callback, value) => {
+   if (settled) return;
+   settled = true;
+   clearTimeout(timer);
+   callback(value);
+  };
+  const timer = setTimeout(() => {
+   worker.terminate().catch(() => {});
+   const error = new Error(`Gateway ${operation} timed out`);
+   error.code = 'GATEWAY_PLUGIN_WORKER_TIMEOUT';
+   finish(reject, error);
+  }, timeoutMs);
+  timer.unref?.();
+  worker.once('message', (message) => {
+   if (message?.ok) {
+    finish(resolve, message.result);
+    return;
+   }
+   const error = new Error(message?.error?.message || `Gateway ${operation} failed`);
+   error.code = message?.error?.code || 'GATEWAY_PLUGIN_WORKER_FAILED';
+   error.stdout = message?.error?.stdout || '';
+   error.stderr = message?.error?.stderr || '';
+   finish(reject, error);
+  });
+  worker.once('error', (error) => finish(reject, error));
+  worker.once('exit', (code) => {
+   if (!settled && code !== 0) {
+    finish(reject, new Error(`Gateway ${operation} worker exited with code ${code}`));
+   }
+  });
+ });
+}
+
+function runExecFileAsync(file, args = [], options = {}) {
+ return new Promise((resolve, reject) => {
+  execFile(file, args, {
+   encoding: 'utf8',
+   maxBuffer: 4 * 1024 * 1024,
+   ...options,
+  }, (error, stdout = '', stderr = '') => {
+   if (error) {
+    error.stdout = stdout;
+    error.stderr = stderr;
+    reject(error);
+    return;
+   }
+   resolve({ stdout, stderr });
+  });
+ });
+}
+
 function normalizeGatewayState(runtimeState, { setupDone = true, activeOperation = null } = {}) {
  if (!setupDone) return 'installing';
  if (activeOperation) return 'reconciling';
@@ -7886,7 +7987,7 @@ function buildGatewayRuntimeStatus({ includeLogs = false } = {}) {
 let lastAutomaticDiagnosticSnapshotAt = 0;
 let automaticDiagnosticSnapshotInFlight = false;
 
-function collectDiagnosticSnapshot(reason = 'manual', { heavy = false } = {}) {
+function collectDiagnosticSnapshot(reason = 'manual', { heavy = false, includeCommands = true } = {}) {
  const generatedAt = new Date().toISOString();
  const safeReason = String(reason || 'manual').replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 80) || 'manual';
  const snapshot = {
@@ -7903,16 +8004,16 @@ function collectDiagnosticSnapshot(reason = 'manual', { heavy = false } = {}) {
   },
   gateway: buildGatewayRuntimeStatus({ includeLogs: false }),
   env: readRuntimeEnvSummary(),
-  commands: {
+  commands: includeCommands ? {
    dockerPs: safeDiagnosticExec('docker ps -a --no-trunc 2>&1', { timeout: 6000 }),
    composePs: safeDiagnosticExec('cd /opt/openclaw && docker compose ps 2>&1', { timeout: 6000 }),
    bridgeStatus: safeDiagnosticExec('systemctl status openclaw-bridge --no-pager 2>&1', { timeout: 6000 }),
    gatewayStatus: safeDiagnosticExec('docker inspect --format="{{json .State}}" ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 6000 }),
    disk: safeDiagnosticExec('df -h / /opt /root 2>&1', { timeout: 5000 }),
    memory: safeDiagnosticExec('free -m 2>&1', { timeout: 5000 }),
-  },
+  } : {},
  };
- if (heavy) {
+ if (heavy && includeCommands) {
   snapshot.commands.bridgeLogs = safeDiagnosticExec('journalctl -u openclaw-bridge --no-pager -n 400 --output=short-iso 2>&1', { timeout: 12000, maxBuffer: 8 * 1024 * 1024 });
   snapshot.commands.pollerLogs = safeDiagnosticExec('journalctl -u openclaw-poller --no-pager -n 200 --output=short-iso 2>&1', { timeout: 8000, maxBuffer: 4 * 1024 * 1024 });
   snapshot.commands.gatewayLogs = safeDiagnosticExec('docker logs ${OPENCLAW_GATEWAY_CONTAINER} --tail 400 --timestamps 2>&1', { timeout: 15000, maxBuffer: 8 * 1024 * 1024 });
@@ -7934,19 +8035,19 @@ function collectDiagnosticSnapshot(reason = 'manual', { heavy = false } = {}) {
   `gateway.reason=${snapshot.gateway.stateReason || ''}`,
   '',
   '## docker ps',
-  snapshot.commands.dockerPs.output || snapshot.commands.dockerPs.error || '',
+  snapshot.commands.dockerPs?.output || snapshot.commands.dockerPs?.error || '(not captured)',
   '',
   '## compose ps',
-  snapshot.commands.composePs.output || snapshot.commands.composePs.error || '',
+  snapshot.commands.composePs?.output || snapshot.commands.composePs?.error || '(not captured)',
   '',
   '## bridge status',
-  snapshot.commands.bridgeStatus.output || snapshot.commands.bridgeStatus.error || '',
+  snapshot.commands.bridgeStatus?.output || snapshot.commands.bridgeStatus?.error || '(not captured)',
   '',
   '## gateway logs',
   snapshot.commands.gatewayLogs?.output || snapshot.commands.gatewayLogs?.error || '(not captured; request heavy=true)',
  ].join('\n');
  writeFileSync(textPath, redactDiagnosticText(text), { mode: 0o600 });
- appendDiagnosticEvent('info', `Diagnostic snapshot captured: ${safeReason}`, { latestPath, snapshotPath, heavy });
+ appendDiagnosticEvent('info', `Diagnostic snapshot captured: ${safeReason}`, { latestPath, snapshotPath, heavy, includeCommands });
  return { ...redacted, latestPath, snapshotPath, textPath };
 }
 
@@ -7956,7 +8057,10 @@ function maybeCaptureGatewayProblemSnapshot(reason) {
  lastAutomaticDiagnosticSnapshotAt = now;
  automaticDiagnosticSnapshotInFlight = true;
  setTimeout(() => {
-  try { collectDiagnosticSnapshot(reason, { heavy: true }); } catch {}
+  // Health polling must never launch docker logs, doctor, systemctl, or other
+  // synchronous subprocesses. Those diagnostics are available from the explicit
+  // admin action, while automatic snapshots remain lightweight and non-blocking.
+  try { collectDiagnosticSnapshot(reason, { heavy: false, includeCommands: false }); } catch {}
   finally { automaticDiagnosticSnapshotInFlight = false; }
  }, 0);
 }
@@ -11155,19 +11259,25 @@ function listContainerSkillAliases() {
  return aliases;
 }
 
-function readHostSkillMd(alias) {
+function readHostSkillMdEntry(alias) {
  for (const root of [...HOST_RUNTIME_SKILL_ROOTS, ...HOST_RUNTIME_SKILL_FALLBACK_ROOTS]) {
   for (const fileName of ['SKILL.md', 'skill.md']) {
    const target = path.join(root, alias, fileName);
    try {
     if (existsSync(target)) {
      const content = readFileSync(target, 'utf8');
-     if (content.trim()) return content;
+     if (content.trim()) {
+      return { alias, root, content, files: { [fileName]: content } };
+     }
     }
    } catch {}
   }
  }
- return '';
+ return null;
+}
+
+function readHostSkillMd(alias) {
+ return readHostSkillMdEntry(alias)?.content || '';
 }
 
 function readContainerSkillMd(alias) {
@@ -11263,10 +11373,19 @@ function writeContainerSkillFiles(alias, files = {}) {
 function readRuntimeSkillFiles(slug) {
  const aliases = buildSkillLookupAliases({ slug });
  for (const alias of aliases) {
-  const candidates = [readHostSkillFiles(alias), readContainerSkillFiles(alias)]
-   .filter((runtime) => runtime?.files && Object.keys(runtime.files).length > 0)
-   .sort((a, b) => Object.keys(b.files || {}).length - Object.keys(a.files || {}).length);
-  if (candidates.length > 0) return candidates[0];
+  // Host skills are the canonical, persisted copy on Trooper VPSes. Do not
+  // eagerly run a synchronous `docker exec` when the host copy exists: the
+  // installed-skills endpoint calls this once per skill, and the old eager
+  // lookup could block the entire Core event loop (including /health and
+  // /logs) for minutes.
+  const hostRuntime = readHostSkillFiles(alias);
+  if (hostRuntime?.files && Object.keys(hostRuntime.files).length > 0) {
+   return hostRuntime;
+  }
+  const containerRuntime = readContainerSkillFiles(alias);
+  if (containerRuntime?.files && Object.keys(containerRuntime.files).length > 0) {
+   return containerRuntime;
+  }
  }
  return null;
 }
@@ -11530,9 +11649,30 @@ app.delete('/skills/:slug', async (req, res) => {
  }
 });
 
-// List skills installed on OpenClaw (from filesystem, not registry)
+const INSTALLED_SKILLS_CACHE_TTL_MS = 30000;
+let installedSkillsCache = null;
+
+function getCachedInstalledSkills() {
+ if (!installedSkillsCache || installedSkillsCache.expiresAt <= Date.now()) return null;
+ return installedSkillsCache.payload;
+}
+
+function cacheInstalledSkills(payload) {
+ installedSkillsCache = {
+  payload,
+  expiresAt: Date.now() + INSTALLED_SKILLS_CACHE_TTL_MS,
+ };
+ return payload;
+}
+
+// List skills installed on OpenClaw (from filesystem, not registry).
+// This route intentionally inventories persisted host roots only. Container
+// roots mirror those locations and previously caused an N x docker-exec scan
+// that starved all Core endpoints whenever the UI refreshed this list.
 app.get('/skills/installed', (req, res) => {
  try {
+ const cached = getCachedInstalledSkills();
+ if (cached) return res.json(cached);
  const skills = [];
  const seen = new Set();
  const lockPath = '/home/node/.openclaw/skills-lock.json';
@@ -11545,13 +11685,15 @@ app.get('/skills/installed', (req, res) => {
  const aliases = new Set([
   ...Object.keys(lock.skills || {}),
   ...Array.from(listHostSkillAliases()),
-  ...Array.from(listContainerSkillAliases()),
  ]);
 
  for (const dir of aliases) {
   if (!dir || seen.has(dir)) continue;
-  const runtime = readRuntimeSkillFiles(dir);
-  const skillMd = getSkillMdFromPayload({ files: runtime?.files || {} });
+  // The list view needs metadata, not every script/reference/asset in every
+  // skill. Reading only SKILL.md keeps this route bounded; the per-skill file
+  // endpoints still provide the complete tree on demand.
+  const runtime = readHostSkillMdEntry(dir);
+  const skillMd = runtime?.content || '';
   if (!skillMd) continue;
   const nameMatch = skillMd.match(/^#\s+(.+)/m);
   const descMatch = skillMd.match(/^(?:>|description:)\s*(.+)/mi);
@@ -11584,7 +11726,7 @@ app.get('/skills/installed', (req, res) => {
    files: runtime?.files || { 'SKILL.md': skillMd },
   });
  }
- res.json({ skills, total: skills.length });
+ res.json(cacheInstalledSkills({ skills, total: skills.length }));
  } catch (err) {
  res.status(500).json({ error: err.message });
  }
@@ -11617,15 +11759,19 @@ app.all('/desktop-api/*', async (req, res) => {
 // ── Gateway Management ───────────────────────────────────────────────
 
 // Patch: fix device-identity ownership and ensure paired.json has our device, then restart gateway
-app.post('/gateway/patch-auth', (req, res) => {
+app.post('/gateway/patch-auth', async (req, res) => {
  try {
  const repair = syncGatewayAuthTokenInConfig();
  if (repair.updated) {
  console.log('[bridge] Repaired gateway auth token in openclaw.json before restart');
  }
  // Fix identity file ownership so bridge can read it (uses ES module import from top of file)
- execSync('chown node:node /opt/openclaw-bridge/device-identity.json 2>/dev/null || chown 1000:1000 /opt/openclaw-bridge/device-identity.json 2>/dev/null || true', { timeout: 5000 });
- execSync('chmod 600 /opt/openclaw-bridge/device-identity.json 2>/dev/null || true', { timeout: 5000 });
+ try {
+  await runExecFileAsync('chown', ['node:node', '/opt/openclaw-bridge/device-identity.json'], { timeout: 5000 });
+ } catch {
+  await runExecFileAsync('chown', ['1000:1000', '/opt/openclaw-bridge/device-identity.json'], { timeout: 5000 }).catch(() => {});
+ }
+ await runExecFileAsync('chmod', ['600', '/opt/openclaw-bridge/device-identity.json'], { timeout: 5000 }).catch(() => {});
  const pairedRepair = upsertBridgePairedDevice({ force: true, reason: 'patch-auth' });
  const composeRepair = ensureOpenClawComposeOverride({ reason: 'patch-auth' });
  gateway.token = getDesiredGatewayToken() || gateway.token;
@@ -11643,7 +11789,7 @@ app.post('/gateway/patch-auth', (req, res) => {
  }
  // Restart gateway to apply paired.json changes. Use a generous settle window so
  // external repair loops do not restart it again before the websocket re-pairs.
- execSync(`docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 30000 });
+ await runExecFileAsync('docker', ['restart', OPENCLAW_GATEWAY_CONTAINER], { timeout: 30000 });
  gateway.forceReconnect(30000, 'patch-auth');
  res.json({ success: true, message: 'Identity fixed, gateway auth synced, paired.json repaired, compose/startup checked, and gateway restarted', authRepair: repair, pairedRepair, composeRepair });
  } catch (err) {
@@ -11651,7 +11797,7 @@ app.post('/gateway/patch-auth', (req, res) => {
  }
 });
 
-app.post('/gateway/restart', (req, res) => {
+app.post('/gateway/restart', async (req, res) => {
  try {
  const alreadySettling = gateway.expectedReconnectUntil && Date.now() < gateway.expectedReconnectUntil;
  if (alreadySettling && req.body?.force !== true) {
@@ -11664,14 +11810,19 @@ app.post('/gateway/restart', (req, res) => {
  }
  console.log('Restarting OpenClaw gateway container...');
  appendDiagnosticEvent('info', 'Gateway restart requested', { body: req.body || {} });
- collectDiagnosticSnapshot('before-gateway-restart', { heavy: true });
+ collectDiagnosticSnapshot('before-gateway-restart', { heavy: false, includeCommands: false });
  const configRepair = repairOpenClawConfigForGatewayStart('gateway-restart');
  const pairedRepair = upsertBridgePairedDevice({ force: true, reason: 'gateway-restart' });
- execSync(`docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 30000 });
+ await runExecFileAsync('docker', ['restart', OPENCLAW_GATEWAY_CONTAINER], { timeout: 30000 });
  gateway.forceReconnect(30000, 'gateway-restart');
  // Re-approve device and reconnect after restart
  setTimeout(async () => {
- try { execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null; docker exec ${OPENCLAW_GATEWAY_CONTAINER} chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null`, { timeout: 15000 }); } catch {}
+ try {
+  await runExecFileAsync('docker', ['exec', OPENCLAW_GATEWAY_CONTAINER, 'openclaw', 'devices', 'approve', deviceIdentity.deviceId], { timeout: 15000 });
+ } catch {
+  await runExecFileAsync('docker', ['exec', OPENCLAW_GATEWAY_CONTAINER, 'openclaw', 'device', 'approve', deviceIdentity.deviceId], { timeout: 15000 }).catch(() => {});
+ }
+ await runExecFileAsync('docker', ['exec', OPENCLAW_GATEWAY_CONTAINER, 'chown', '-R', '1000:1000', '/home/node/.openclaw/identity'], { timeout: 15000 }).catch(() => {});
  gateway.token = getDesiredGatewayToken() || gateway.token;
  }, 5000);
  res.json({ success: true, message: 'Gateway container restarted', configRepair, pairedRepair });
@@ -11681,18 +11832,15 @@ app.post('/gateway/restart', (req, res) => {
  }
 });
 
-app.post('/gateway/plugins/sync', (req, res) => {
+app.post('/gateway/plugins/sync', async (req, res) => {
  const endOperation = beginRuntimeOperation('plugin_sync', { pluginId: req.body?.pluginId || null }, 120000);
  try {
   const { pluginId, files, install = true } = req.body || {};
-  const result = syncGatewayPlugin({
+  const result = await runGatewayPluginWorker('sync', {
    pluginId,
    files,
    install: install !== false,
-   mkdirSync,
-   writeFileSync,
-   execSync,
-  });
+  }, 180000);
   console.log(`📦 Synced OpenClaw plugin ${result.pluginId} (${result.written} files${result.installed ? ', installed' : ''})`);
   res.json({ success: true, ...result });
  } catch (err) {
@@ -11702,12 +11850,12 @@ app.post('/gateway/plugins/sync', (req, res) => {
  }
 });
 
-app.post('/gateway/plugins/install', (req, res) => {
+app.post('/gateway/plugins/install', async (req, res) => {
  const endOperation = beginRuntimeOperation('plugin_install', { pluginId: req.body?.pluginId || null }, 120000);
  try {
   const pluginPath = String(req.body?.path || '').trim();
   const pluginId = req.body?.pluginId;
-  const result = installOpenClawPlugin({ pluginPath, pluginId, execSync });
+  const result = await runGatewayPluginWorker('install', { pluginPath, pluginId }, 180000);
   console.log(`📦 Installed OpenClaw plugin from ${result.pluginPath}`);
   res.json({ success: true, ...result });
  } catch (err) {
@@ -11717,10 +11865,10 @@ app.post('/gateway/plugins/install', (req, res) => {
  }
 });
 
-app.post('/gateway/plugins/install-package', (req, res) => {
+app.post('/gateway/plugins/install-package', async (req, res) => {
  const endOperation = beginRuntimeOperation('plugin_install_package', { packageName: req.body?.packageName || null }, 180000);
  try {
-  const result = installOpenClawNpmPlugin({ packageName: req.body?.packageName, execSync });
+  const result = await runGatewayPluginWorker('install-package', { packageName: req.body?.packageName }, 180000);
   console.log(`📦 Installed OpenClaw plugin package ${result.packageName}`);
   res.json({ success: true, ...result });
  } catch (err) {
@@ -11730,13 +11878,12 @@ app.post('/gateway/plugins/install-package', (req, res) => {
  }
 });
 
-app.post('/gateway/exec', (req, res) => {
+app.post('/gateway/exec', async (req, res) => {
  try {
-  const result = runAllowlistedGatewayExec({
+  const result = await runGatewayPluginWorker('exec', {
    command: req.body?.command,
    cwd: req.body?.cwd,
-   execSync,
-  });
+  }, 180000);
   res.json({ success: true, ...result });
  } catch (err) {
   res.status(/required|allowlisted/i.test(err.message) ? 400 : 500).json({ error: err.message });

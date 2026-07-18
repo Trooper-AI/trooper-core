@@ -343,7 +343,7 @@ if [ "$FROM_SNAPSHOT" != "1" ]; then
 dlog "Installing Docker, Node.js, Caddy..."
 
 run_cmd apt-get update -qq
-run_cmd apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg unattended-upgrades debian-keyring debian-archive-keyring apt-transport-https
+run_cmd apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg jq unattended-upgrades debian-keyring debian-archive-keyring apt-transport-https
 echo 'Unattended-Upgrade::Automatic-Reboot "false";' > /etc/apt/apt.conf.d/51auto-upgrades
 
 # Add Docker repo
