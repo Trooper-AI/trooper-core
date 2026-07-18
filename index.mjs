@@ -3506,7 +3506,14 @@ class OpenClawGateway {
  pendingSubAgentSpawn = null;
  pendingSpawnRunId = null;
  resetSubagentDrainWait();
- if (onEvent) onEvent('subagent_start', { subAgentRunId: runId, parentRunId, depth: parentDepth + 1, name: info.name, task: info.task });
+ if (onEvent) onEvent('subagent_start', {
+   subAgentRunId: runId,
+   parentRunId,
+   depth: parentDepth + 1,
+   name: info.name,
+   task: info.task,
+   profile: info.profile || null,
+ });
  }
 
  // Forward sub-agent events with subAgent tagging (includes parent/depth for tree rendering)
@@ -3829,9 +3836,16 @@ function extractPatchFilePaths(patchText = '') {
  const toolLower = (entry.tool || '').toLowerCase();
  if (toolLower === 'sessions_spawn' || toolLower === 'task' || toolLower === 'spawn' || toolLower.includes('subagent')) {
  const params = entry.params || {};
+ const rawTask = params.task || params.prompt || params.message || params.description || '';
+ // Detect typed profile from task brief (profile: explore|plan|...) without hard tool fencing
+ const profileMatch = String(rawTask).match(/^\s*profile\s*:\s*([a-zA-Z0-9_-]+)/im)
+   || String(rawTask).match(/\[(?:profile|subagent_type)\s*[:=]\s*([a-zA-Z0-9_-]+)\]/i);
+ const detectedProfile = (params.profile || profileMatch?.[1] || '').toLowerCase() || null;
+ const nameMatch = String(rawTask).match(/^\s*name\s*:\s*(.+)$/im);
  pendingSubAgentSpawn = {
- name: params.name || params.agentName || params.description?.substring(0, 40) || 'Sub-agent',
- task: params.task || params.prompt || params.message || params.description || '',
+ name: params.name || nameMatch?.[1]?.trim() || params.agentName || params.description?.substring(0, 40) || (detectedProfile ? `${detectedProfile}` : 'Sub-agent'),
+ task: rawTask,
+ profile: detectedProfile,
  };
  pendingSpawnRunId = runId; // Track which runId initiated this spawn for parent→child tree
  resetSubagentDrainWait();
