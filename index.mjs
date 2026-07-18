@@ -15507,20 +15507,28 @@ function readEnvValue(name) {
 
 function buildVoiceCapabilitiesPayload() {
  const openaiKey = readEnvValue('OPENAI_API_KEY');
+ const openRouterKey = readEnvValue('OPENROUTER_API_KEY');
  const geminiKey = readEnvValue('GEMINI_API_KEY') || readEnvValue('GOOGLE_API_KEY');
  const elevenLabsKey = readEnvValue('ELEVENLABS_API_KEY');
  return {
   tts: Boolean(openaiKey || geminiKey || elevenLabsKey),
-  stt: Boolean(openaiKey),
+  // STT works with OpenAI Whisper and/or OpenRouter STT (Trooper/OpenClaw credits).
+  stt: Boolean(openaiKey || openRouterKey),
+  sttProvider: openaiKey ? 'openai' : (openRouterKey ? 'openrouter' : null),
+  sttProviders: {
+   openai: Boolean(openaiKey),
+   openrouter: Boolean(openRouterKey),
+  },
   fullAgentVoice: true,
   providers: {
    openai: Boolean(openaiKey),
+   openrouter: Boolean(openRouterKey),
    gemini: Boolean(geminiKey),
    elevenlabs: Boolean(elevenLabsKey),
   },
   ttsModel: process.env.OPENAI_TTS_MODEL || 'gpt-4o-mini-tts',
   fallbackTtsModel: 'tts-1',
-  note: 'Trooper can proxy OpenAI STT/TTS today; native OpenClaw full-agent voice is available through the gateway capability layer.',
+  note: 'STT: OpenRouter whisper first when OPENROUTER_API_KEY is set (Trooper credits), then OpenAI Whisper. TTS still uses OpenAI/Gemini/ElevenLabs when configured.',
  };
 }
 
@@ -15569,37 +15577,101 @@ app.post('/tts', async (req, res) => {
  }
 });
 
-// ── STT Endpoint (OpenAI Whisper API) ────────────────────────────────
+// ── STT Endpoint (OpenRouter Whisper first → OpenAI Whisper) ─────────
+// Prefer OpenRouter so Trooper/OpenClaw OpenRouter credits are used instead of
+// a bare OpenAI key that may be out of Whisper quota.
 app.post('/stt', express.raw({ type: '*/*', limit: '25mb' }), async (req, res) => {
  try {
-  // Read OpenAI API key
   const openaiKey = readEnvValue('OPENAI_API_KEY');
-  if (!openaiKey) return res.status(500).json({ error: 'OpenAI API key not configured' });
+  const openRouterKey = readEnvValue('OPENROUTER_API_KEY');
+  if (!openaiKey && !openRouterKey) {
+   return res.status(500).json({ error: 'No STT provider configured (need OPENROUTER_API_KEY or OPENAI_API_KEY)' });
+  }
 
   const audioBuffer = req.body;
   if (!audioBuffer || audioBuffer.length === 0) return res.status(400).json({ error: 'No audio data received' });
 
-  // Build multipart form data using native Node FormData + Blob
   const contentType = req.headers['x-audio-content-type'] || 'audio/webm';
-  const ext = contentType.includes('webm') ? 'webm' : contentType.includes('mp4') ? 'mp4' : contentType.includes('wav') ? 'wav' : 'webm';
-  const blob = new Blob([audioBuffer], { type: contentType });
-  const formData = new FormData();
-  formData.append('file', blob, `recording.${ext}`);
-  formData.append('model', 'whisper-1');
+  const format = contentType.includes('webm') ? 'webm'
+   : contentType.includes('mp4') || contentType.includes('m4a') ? 'm4a'
+   : contentType.includes('wav') ? 'wav'
+   : contentType.includes('mpeg') || contentType.includes('mp3') ? 'mp3'
+   : contentType.includes('ogg') ? 'ogg'
+   : 'webm';
+  const errors = [];
 
-  const sttRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-   method: 'POST',
-   headers: { 'Authorization': `Bearer ${openaiKey}` },
-   body: formData,
-  });
-
-  if (!sttRes.ok) {
-   const err = await sttRes.text().catch(() => 'Unknown error');
-   return res.status(sttRes.status).json({ error: `OpenAI STT failed: ${err}` });
+  // 1) OpenRouter STT (Trooper credits / platform OR key on the gateway)
+  if (openRouterKey) {
+   try {
+    const model = String(process.env.OPENROUTER_STT_MODEL || process.env.TROOPER_OR_STT_MODEL || 'openai/whisper-1').trim();
+    const orRes = await fetch('https://openrouter.ai/api/v1/audio/transcriptions', {
+     method: 'POST',
+     headers: {
+      Authorization: `Bearer ${openRouterKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': process.env.TROOPER_PUBLIC_URL || 'https://app.trooper.so',
+      'X-Title': 'Trooper Bridge',
+     },
+     body: JSON.stringify({
+      model,
+      input_audio: {
+       data: Buffer.from(audioBuffer).toString('base64'),
+       format,
+      },
+     }),
+     signal: AbortSignal.timeout(45000),
+    });
+    const orText = await orRes.text().catch(() => '');
+    if (orRes.ok) {
+     let payload = {};
+     try { payload = orText ? JSON.parse(orText) : {}; } catch { payload = { text: orText }; }
+     return res.json({
+      text: String(payload.text || '').trim(),
+      provider: 'openrouter',
+      model,
+     });
+    }
+    errors.push(`openrouter: ${orText.slice(0, 200) || orRes.status}`);
+    console.warn('[bridge] OpenRouter STT failed; trying OpenAI:', orText.slice(0, 160));
+   } catch (orErr) {
+    errors.push(`openrouter: ${orErr.message}`);
+    console.warn('[bridge] OpenRouter STT error; trying OpenAI:', orErr.message);
+   }
   }
 
-  const result = await sttRes.json();
-  res.json({ text: result.text || '' });
+  // 2) Direct OpenAI Whisper
+  if (openaiKey) {
+   const blob = new Blob([audioBuffer], { type: contentType });
+   const formData = new FormData();
+   formData.append('file', blob, `recording.${format}`);
+   formData.append('model', process.env.OPENAI_STT_MODEL || 'whisper-1');
+   formData.append('response_format', 'json');
+
+   const sttRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${openaiKey}` },
+    body: formData,
+    signal: AbortSignal.timeout(30000),
+   });
+
+   if (sttRes.ok) {
+    const result = await sttRes.json();
+    return res.json({
+     text: result.text || '',
+     provider: 'openai',
+     model: process.env.OPENAI_STT_MODEL || 'whisper-1',
+    });
+   }
+   const err = await sttRes.text().catch(() => 'Unknown error');
+   errors.push(`openai: ${err.slice(0, 200)}`);
+  }
+
+  return res.status(502).json({
+   error: errors.join(' · ') || 'STT failed',
+   providersTried: ['openrouter', 'openai'].filter((p) => (
+    (p === 'openrouter' && openRouterKey) || (p === 'openai' && openaiKey)
+   )),
+  });
  } catch (err) {
   console.error('[bridge] STT error:', err.message);
   res.status(500).json({ error: err.message });
