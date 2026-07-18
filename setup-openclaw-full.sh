@@ -3032,6 +3032,8 @@ cat > /etc/systemd/system/openclaw-bridge.service << BSVC
 Description=OpenClaw Bridge
 After=network.target openclaw-docker.service
 Requires=openclaw-docker.service
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -3042,8 +3044,8 @@ User=root
 Group=root
 WorkingDirectory=/opt/openclaw-bridge
 ExecStart=/usr/bin/node /opt/openclaw-bridge/index.mjs
-Restart=always
-RestartSec=5
+Restart=on-failure
+RestartSec=10
 Environment=BRIDGE_PORT=${BRIDGE_PORT}
 Environment=BRIDGE_AUTH_TOKEN=${BRIDGE_AUTH_TOKEN}
 Environment=OPENCLAW_URL=http://127.0.0.1:${GATEWAY_PORT}
@@ -3074,6 +3076,8 @@ Description=Trooper Shared Workspace Manager
 After=network-online.target docker.service openclaw-bridge.service
 Requires=docker.service
 Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -3081,8 +3085,8 @@ User=root
 Group=root
 WorkingDirectory=/opt/openclaw-bridge
 ExecStart=/usr/bin/node /opt/openclaw-bridge/shared-node-manager.mjs
-Restart=always
-RestartSec=5
+Restart=on-failure
+RestartSec=10
 Environment=SHARED_NODE_MANAGER_PORT=${SHARED_NODE_MANAGER_PORT}
 Environment=BRIDGE_AUTH_TOKEN=${BRIDGE_AUTH_TOKEN}
 Environment=RUNTIME_AUTH_SECRET=${RUNTIME_AUTH_SECRET}
@@ -3106,14 +3110,16 @@ cat > /etc/systemd/system/trooper-org-runtime.service << CRUNTIME
 Description=Trooper Org Runtime
 After=network-online.target openclaw-bridge.service
 Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
 WorkingDirectory=/opt/trooper-org-runtime/server
 EnvironmentFile=/etc/default/trooper-org-runtime
 ExecStart=/usr/bin/node /opt/trooper-org-runtime/server/org-runtime/index.js
-Restart=always
-RestartSec=5
+Restart=on-failure
+RestartSec=10
 User=root
 Group=root
 StandardOutput=append:/var/log/trooper-org-runtime.log
@@ -3150,14 +3156,16 @@ cat > /etc/systemd/system/trooper-server.service << CSSVC
 Description=Trooper Server (local API + task runner)
 After=network-online.target openclaw-bridge.service openclaw-docker.service
 Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
 WorkingDirectory=/opt/trooper-org-runtime/server
 EnvironmentFile=/etc/default/trooper-server
 ExecStart=/usr/bin/node /opt/trooper-org-runtime/server/index.js
-Restart=always
-RestartSec=5
+Restart=on-failure
+RestartSec=10
 User=root
 Group=root
 StandardOutput=append:/var/log/trooper-server.log
