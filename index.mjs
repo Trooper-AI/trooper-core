@@ -93,6 +93,7 @@ import {
   buildVideoExecutionContinuation,
   evaluateVideoExecutionCompletion,
   inferVideoExecutionContract,
+  reconcileVideoToolLogWithHistory,
 } from './lib/openclaw-video-execution.mjs';
 import {
   assertRuntimeUpgradeCompatibility,
@@ -2930,7 +2931,7 @@ class OpenClawGateway {
  const toolLog = toolCalls.map(t => ({
  tool: t.tool,
  params: t.params && Object.keys(t.params).length > 0 ? t.params : undefined,
- success: t.status !== 'failed',
+ success: t.status === 'ok',
  summary: t.summary || undefined
  }));
  response += `\n\n `;
@@ -3708,6 +3709,7 @@ function extractPatchFilePaths(patchText = '') {
    const raw = typeof data.content === 'string' ? data.content : JSON.stringify(data.content || data.result || data, null, 2).slice(0, 4000);
    const structuredResult = extractStructuredToolResult(data.result ?? data.content);
    const summary = summarizeToolResult(last.tool, last.params, raw || data.summary || '', !data.is_error);
+   last.result = structuredResult;
    last.summary = summary;
   if (_projectFolder) {
     const toolLower = String(last.tool || '').toLowerCase();
@@ -4312,7 +4314,8 @@ const formattedToolLog = toolLog.map(t => ({
  toolCallId: t.toolCallId || undefined,
  skillName: t.skillName || undefined,
  params: t.params && Object.keys(t.params).length > 0 ? t.params : undefined,
- success: t.status !== 'failed',
+ success: t.status === 'ok',
+ result: t.result ?? undefined,
  summary: t.summary || undefined,
  textBefore: t.textBefore || undefined,
  }));
@@ -7054,6 +7057,36 @@ const emitViewportScreenshotFrame = ({
  }, streamingCallback));
 
  if (videoExecutionContract.enabled) {
+  const reconcileCompletionHistory = async (currentToolLog) => {
+   const historySessionKey = resolvedSessionKey || sessionKey;
+   const historyLimit = 500;
+   try {
+    // Completion is security-sensitive: bypass the short-lived history cache so
+    // post-compaction tool results cannot be hidden by a stale transcript read.
+    gateway._historyCache?.delete(`${String(historySessionKey || '').trim()}\0${historyLimit}`);
+    const historyMessages = await gateway.fetchSessionHistory(historySessionKey, historyLimit, { timeoutMs: 10000 });
+    if (!Array.isArray(historyMessages) || historyMessages.length === 0) return currentToolLog;
+    const historyEvents = extractHistoryToolEvents(historyMessages, {
+     runId: gatewayRunId || null,
+     sessionKey: historySessionKey,
+     source: 'video_completion_reconcile',
+     cutoffMs: requestStartedAt,
+     maxSummaryLength: 4000,
+    });
+    const reconciled = reconcileVideoToolLogWithHistory(currentToolLog, historyEvents);
+    const recoveredSuccesses = reconciled.filter((entry) => entry?.success === true).length
+     - (Array.isArray(currentToolLog) ? currentToolLog.filter((entry) => entry?.success === true).length : 0);
+    if (recoveredSuccesses > 0) {
+     console.log(`[OpenClaw] Reconciled ${recoveredSuccesses} successful video tool result(s) from session history`);
+    }
+    return reconciled;
+   } catch (historyErr) {
+    console.warn(`[OpenClaw] Video completion history reconciliation failed: ${historyErr.message}`);
+    return currentToolLog;
+   }
+  };
+
+  toolLog = await reconcileCompletionHistory(toolLog);
   let completion = evaluateVideoExecutionCompletion(toolLog, videoExecutionContract);
   const maxContinuationAttempts = 2;
   for (let attempt = 1; !completion.complete && attempt <= maxContinuationAttempts; attempt += 1) {
@@ -7085,6 +7118,7 @@ const emitViewportScreenshotFrame = ({
    gatewayRunId = continuation.runId || gatewayRunId;
    resolvedSessionKey = continuation.sessionKey || resolvedSessionKey;
    gatewayRunUsage = continuation.usage || gatewayRunUsage;
+   toolLog = await reconcileCompletionHistory(toolLog);
    completion = evaluateVideoExecutionCompletion(toolLog, videoExecutionContract);
   }
 
