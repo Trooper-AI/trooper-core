@@ -88,6 +88,13 @@ import {
   shouldRecoverAssistantTranscriptBoundary,
 } from './lib/run-lifecycle-policy.mjs';
 import {
+  OPENCLAW_VIDEO_EXECUTION_RULES,
+  appendOpenClawVideoExecutionRules,
+  buildVideoExecutionContinuation,
+  evaluateVideoExecutionCompletion,
+  inferVideoExecutionContract,
+} from './lib/openclaw-video-execution.mjs';
+import {
   assertRuntimeUpgradeCompatibility,
   validateRuntimeUpgradeRequest,
 } from './lib/runtime-upgrade-target.mjs';
@@ -779,6 +786,20 @@ function openclawConfigPath(...segments) {
 function openclawWorkspacePath(...segments) {
  return path.join(OPENCLAW_WORKSPACE_HOST_ROOT, ...segments.filter(Boolean));
 }
+
+function ensureOpenClawVideoExecutionRules() {
+ const agentsPath = openclawWorkspacePath('AGENTS.md');
+ try {
+  mkdirSync(path.dirname(agentsPath), { recursive: true });
+  const existing = existsSync(agentsPath) ? readFileSync(agentsPath, 'utf8') : '# Team Lead\n';
+  return writeTextFileIfChanged(agentsPath, appendOpenClawVideoExecutionRules(existing));
+ } catch (error) {
+  console.warn(`[OpenClaw] Could not persist video execution completion rules: ${error.message}`);
+  return false;
+ }
+}
+
+ensureOpenClawVideoExecutionRules();
 
 function cloneJson(value) {
 	 return value && typeof value === 'object' ? JSON.parse(JSON.stringify(value)) : {};
@@ -6850,6 +6871,16 @@ const emitViewportScreenshotFrame = ({
   ? `${resolvedSystemPrompt}\n\n${buildPlanModeRuntimeGuard()}`
   : buildPlanModeRuntimeGuard();
  }
+ const videoExecutionContract = inferVideoExecutionContract({
+  task: fullTask,
+  systemPrompt: resolvedSystemPrompt,
+  context,
+ });
+ if (videoExecutionContract.enabled) {
+  resolvedSystemPrompt = resolvedSystemPrompt
+   ? `${resolvedSystemPrompt}\n\n${OPENCLAW_VIDEO_EXECUTION_RULES}`
+   : OPENCLAW_VIDEO_EXECUTION_RULES;
+ }
 
  // ── Project folder enforcement ──
  // Server passes a deterministic projectFolder (title-slug + id-hash).
@@ -6931,7 +6962,13 @@ const emitViewportScreenshotFrame = ({
 	 const streamedData = isBrowserTool(data?.tool) || (event === 'screenshot_frame' && isBrowserTask)
 	  ? { ...(data || {}), browserMode: runtimeBrowserMode, provider: runtimeBrowserMode }
 	  : data;
-	 sendSSE(event, streamedData);
+	 // runAgentStreaming emits its own terminal events before this handler has
+	 // validated deliverables or attached the final result/tool log. Forwarding
+	 // those events makes Trooper stop listening too early. This handler emits
+	 // exactly one model_done + done after validation below.
+	 if (event !== 'done' && event !== 'model_done') {
+	  sendSSE(event, streamedData);
+	 }
 
  // Start desktop recording when exec/desktop tools are used
  const isDesktopTool = (t) => t && ['exec', 'bash', 'write', 'edit'].includes(String(t).toLowerCase());
@@ -7004,6 +7041,46 @@ const emitViewportScreenshotFrame = ({
  steer: req.body?.steer === true || context?.steer === true,
  steerTimeoutMs: inactivityMs,
  }, streamingCallback));
+
+ if (videoExecutionContract.enabled) {
+  let completion = evaluateVideoExecutionCompletion(toolLog, videoExecutionContract);
+  const maxContinuationAttempts = 2;
+  for (let attempt = 1; !completion.complete && attempt <= maxContinuationAttempts; attempt += 1) {
+   const continuationTask = buildVideoExecutionContinuation({ evaluation: completion, attempt });
+   console.warn(`[OpenClaw] Video execution incomplete after agent finalization; continuing attempt ${attempt}/${maxContinuationAttempts} (missing: ${completion.missing.join(', ')})`);
+   sendSSE('continuation_recovery', {
+    reason: 'video_execution_incomplete',
+    attempt,
+    missing: completion.missing,
+    message: 'Analysis finished, but the video deliverable is incomplete. OpenClaw is continuing with the edit and render.',
+    sessionKey: resolvedSessionKey || sessionKey,
+    runId: gatewayRunId || undefined,
+   });
+
+   const continuation = await gateway.runAgentStreaming(continuationTask, {
+    agentId,
+    agentName: agentName || 'default',
+    sessionKey: resolvedSessionKey || sessionKey,
+    thinking: thinking || undefined,
+    model: streamingExplicitModel || undefined,
+    extraSystemPrompt: resolvedSystemPrompt,
+    timeoutMs: inactivityMs,
+    projectFolder,
+    steer: false,
+   }, streamingCallback);
+
+   response = continuation.response || response;
+   toolLog = [...(toolLog || []), ...(continuation.toolLog || [])];
+   gatewayRunId = continuation.runId || gatewayRunId;
+   resolvedSessionKey = continuation.sessionKey || resolvedSessionKey;
+   gatewayRunUsage = continuation.usage || gatewayRunUsage;
+   completion = evaluateVideoExecutionCompletion(toolLog, videoExecutionContract);
+  }
+
+  if (!completion.complete) {
+   throw new Error(`OpenClaw video execution stopped before the deliverable was complete (missing: ${completion.missing.join(', ')}). The run was not marked complete.`);
+  }
+ }
 
 // Stop all screen recordings and get video paths before sending done event
 const recordingPath = stopBrowserRecording();
