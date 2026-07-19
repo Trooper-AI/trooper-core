@@ -26,7 +26,8 @@ import cors from 'cors';
 import { EventEmitter } from 'events';
 import { execFile, execFileSync, execSync, spawn } from 'child_process';
 import { Worker } from 'worker_threads';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, lstatSync, rmSync, cpSync } from 'fs';
+import { createReadStream, createWriteStream, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, lstatSync, rmSync, cpSync } from 'fs';
+import { pipeline as streamPipeline } from 'stream/promises';
 import {
   cp as copyTree,
   mkdir as mkdirAsync,
@@ -39,6 +40,8 @@ import {
 } from 'fs/promises';
 import { db, sqlite, DB_PATH } from './db/index.mjs';
 import { migrate } from './db/migrate.mjs';
+import { parseSingleByteRange } from './lib/byte-range.mjs';
+import { buildWeakFileEtag, getFileContentType, ifRangeAllowsRange } from './lib/file-http.mjs';
 
 // Run DB migrations on startup
 migrate(sqlite);
@@ -7265,27 +7268,6 @@ function workspaceUiPathFromReal(realPath = '') {
  return rel ? `/${rel}` : '/';
 }
 
-function getFileContentType(filePath = '') {
- const ext = String(filePath || '').split('.').pop().toLowerCase();
- const types = {
-  png: 'image/png',
-  jpg: 'image/jpeg',
-  jpeg: 'image/jpeg',
-  gif: 'image/gif',
-  webp: 'image/webp',
-  svg: 'image/svg+xml',
-  pdf: 'application/pdf',
-  json: 'application/json',
-  txt: 'text/plain',
-  md: 'text/markdown',
-  html: 'text/html',
-  mp4: 'video/mp4',
-  webm: 'video/webm',
-  mkv: 'video/x-matroska',
- };
- return types[ext] || 'application/octet-stream';
-}
-
 function hostEntryStat(fullPath) {
  try {
   const stat = statSync(fullPath);
@@ -7337,25 +7319,49 @@ function listHostDir(dirPath, { virtualBase = null } = {}) {
 }
 
 function listContainerDir(dirPath, { virtualBase = null } = {}) {
- const out = execSync(
-  `docker exec ${OPENCLAW_GATEWAY_CONTAINER} ls -1 "${escapeDockerPath(dirPath)}" 2>/dev/null || true`,
-  { encoding: 'utf8', timeout: 5000 }
- );
- const names = out.trim() ? out.trim().split('\n') : [];
+ let rows = [];
+ try {
+  // One container round-trip instead of `ls` plus one `docker exec stat` per file.
+  const out = execFileSync('docker', [
+   'exec', OPENCLAW_GATEWAY_CONTAINER,
+   'find', dirPath, '-mindepth', '1', '-maxdepth', '1',
+   '-printf', '%f\0%y\0%s\0%T@\0',
+  ], { encoding: 'utf8', timeout: 5000 });
+  const fields = out.split('\0');
+  rows = [];
+  for (let index = 0; index + 3 < fields.length; index += 4) {
+   const [name, kind, size, modified] = fields.slice(index, index + 4);
+   rows.push({
+    name,
+    type: kind === 'd' ? 'dir' : 'file',
+    size: Number(size) || 0,
+    modified: Number(modified) ? Number(modified) * 1000 : null,
+   });
+  }
+ } catch {
+  const out = execSync(
+   `docker exec ${OPENCLAW_GATEWAY_CONTAINER} ls -1 "${escapeDockerPath(dirPath)}" 2>/dev/null || true`,
+   { encoding: 'utf8', timeout: 5000 }
+  );
+  rows = (out.trim() ? out.trim().split('\n') : []).map((name) => ({
+   name,
+   ...(containerEntryStat(dirPath.endsWith('/') ? dirPath + name : dirPath + '/' + name) || {}),
+  }));
+ }
  const entries = [];
- for (const name of names) {
+ for (const row of rows) {
+  const name = row.name;
   if (!name || name === '.' || name === '..') continue;
   const fullPath = dirPath.endsWith('/') ? dirPath + name : dirPath + '/' + name;
-  const stat = containerEntryStat(fullPath) || {};
   const entryPath = virtualBase
    ? `${virtualBase.replace(/\/$/, '')}/${name}`
    : workspaceUiPathFromReal(fullPath);
   entries.push({
    name,
-   type: stat.type || 'file',
+   type: row.type || 'file',
    path: entryPath,
-   size: stat.size || 0,
-   modified: stat.modified || null,
+   size: row.size || 0,
+   modified: row.modified || null,
   });
  }
  return entries;
@@ -7635,14 +7641,130 @@ app.get('/files/*', (req, res) => {
  return res.status(403).json({ error: 'Path not allowed' });
  }
  try {
- const data = resolved.kind === 'host'
-  ? readFileSync(resolved.realPath)
-  : execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} cat "${escapeDockerPath(resolved.realPath)}"`, { maxBuffer: 50 * 1024 * 1024, timeout: 10000 });
- res.set('Content-Type', getFileContentType(resolved.displayPath || resolved.realPath));
- res.set('Cache-Control', 'public, max-age=3600');
- res.send(data);
+ if (resolved.kind === 'host') {
+  const stat = statSync(resolved.realPath);
+  if (!stat.isFile()) return res.status(404).json({ error: 'File not found' });
+  const contentType = getFileContentType(resolved.displayPath || resolved.realPath);
+  const modifiedMs = stat.mtimeMs || 0;
+  const etag = buildWeakFileEtag(stat.size, modifiedMs);
+  const rangeAllowed = ifRangeAllowsRange(req.headers['if-range'], { etag, modifiedMs });
+  const requestedRange = rangeAllowed ? parseSingleByteRange(req.headers.range, stat.size) : null;
+  const range = requestedRange;
+  const headers = {
+   'Content-Type': contentType,
+   'Accept-Ranges': 'bytes',
+   'Cache-Control': 'private, max-age=300',
+   'ETag': etag,
+   'Last-Modified': new Date(modifiedMs).toUTCString(),
+  };
+  if (requestedRange?.invalid) {
+   res.writeHead(416, { ...headers, 'Content-Range': `bytes */${stat.size}` });
+   return res.end();
+  }
+  if (range) {
+   res.writeHead(206, {
+    ...headers,
+    'Content-Range': `bytes ${range.start}-${range.end}/${stat.size}`,
+    'Content-Length': range.length,
+   });
+   if (req.method === 'HEAD') return res.end();
+   const stream = createReadStream(resolved.realPath, { start: range.start, end: range.end });
+   stream.on('error', () => { if (!res.destroyed) res.destroy(); });
+   return stream.pipe(res);
+  }
+  res.writeHead(200, { ...headers, 'Content-Length': stat.size });
+  if (req.method === 'HEAD') return res.end();
+  const stream = createReadStream(resolved.realPath);
+  stream.on('error', () => { if (!res.destroyed) res.destroy(); });
+  return stream.pipe(res);
+ }
+ // Container media must also stream. The previous execSync(cat) buffered the
+ // entire file, capped it at 50 MB, and made the event loop unavailable.
+ const statOutput = execFileSync(
+  'docker', ['exec', OPENCLAW_GATEWAY_CONTAINER, 'stat', '-c', '%s|%Y', resolved.realPath],
+  { encoding: 'utf8', timeout: 5000 },
+ );
+ const [sizeValue, modifiedSeconds] = String(statOutput || '').trim().split('|');
+ const size = Number(sizeValue);
+ if (!Number.isFinite(size) || size < 0) return res.status(404).json({ error: 'File not found' });
+ const modifiedMs = Math.max(0, Number(modifiedSeconds) || 0) * 1000;
+ const etag = buildWeakFileEtag(size, modifiedMs);
+ const contentType = getFileContentType(resolved.displayPath || resolved.realPath);
+ const rangeAllowed = ifRangeAllowsRange(req.headers['if-range'], { etag, modifiedMs });
+ const requestedRange = rangeAllowed ? parseSingleByteRange(req.headers.range, size) : null;
+ const range = requestedRange;
+ const headers = {
+  'Content-Type': contentType,
+  'Accept-Ranges': 'bytes',
+  'Cache-Control': 'private, max-age=300',
+  'ETag': etag,
+  'Last-Modified': new Date(modifiedMs).toUTCString(),
+ };
+ if (requestedRange?.invalid) {
+  res.writeHead(416, { ...headers, 'Content-Range': `bytes */${size}` });
+  return res.end();
+ }
+ if (range) {
+  res.writeHead(206, {
+   ...headers,
+   'Content-Range': `bytes ${range.start}-${range.end}/${size}`,
+   'Content-Length': range.length,
+  });
+ } else {
+  res.writeHead(200, { ...headers, 'Content-Length': size });
+ }
+ if (req.method === 'HEAD') return res.end();
+ const dockerArgs = range
+  ? [
+    'exec', OPENCLAW_GATEWAY_CONTAINER,
+    'dd', `if=${resolved.realPath}`, 'iflag=skip_bytes,count_bytes',
+    `skip=${range.start}`, `count=${range.length}`, 'status=none',
+   ]
+  : ['exec', OPENCLAW_GATEWAY_CONTAINER, 'cat', resolved.realPath];
+ const child = spawn('docker', dockerArgs, { stdio: ['ignore', 'pipe', 'ignore'] });
+ child.on('error', () => { if (!res.destroyed) res.destroy(); });
+ res.on('close', () => { if (!child.killed) child.kill('SIGTERM'); });
+ child.stdout.pipe(res);
+ return undefined;
  } catch (e) {
  res.status(404).json({ error: 'File not found' });
+ }
+});
+
+// Stream large generic workspace uploads directly to disk. The control plane
+// sends an authenticated octet stream and a base64url path header, avoiding
+// multipart/base64 copies in the bridge process.
+app.put('/files/upload', async (req, res) => {
+ const maxBytes = 512 * 1024 * 1024;
+ const expectedBytes = Number(req.headers['content-length']);
+ if (!Number.isFinite(expectedBytes) || expectedBytes < 0 || expectedBytes > maxBytes) {
+  return res.status(413).json({ error: 'File must be 512 MB or smaller and include Content-Length' });
+ }
+ let relativePath = '';
+ try {
+  relativePath = Buffer.from(String(req.headers['x-file-path-b64'] || ''), 'base64url').toString('utf8');
+ } catch {}
+ if (!relativePath || relativePath.includes('\0')) return res.status(400).json({ error: 'Valid file path required' });
+
+ const basePath = getAgentWorkspacePath('main');
+ const targetPath = resolveContainedPath(basePath, relativePath);
+ if (!targetPath) return res.status(400).json({ error: 'File path is outside the workspace' });
+ const tempPath = `${targetPath}.upload-${randomUUID()}.part`;
+ try {
+  await mkdirAsync(path.dirname(targetPath), { recursive: true });
+  await streamPipeline(req, createWriteStream(tempPath, { flags: 'wx' }));
+  const written = statSync(tempPath).size;
+  if (written !== expectedBytes) {
+   await rmAsync(tempPath, { force: true });
+   return res.status(400).json({ error: 'Uploaded byte count does not match Content-Length' });
+  }
+  await renameAsync(tempPath, targetPath);
+  try { execFileSync('chown', ['1000:1000', targetPath], { timeout: 5000 }); } catch {}
+  return res.json({ success: true, written: 1, path: relativePath, size: written });
+ } catch (error) {
+  await rmAsync(tempPath, { force: true }).catch(() => {});
+  if (req.aborted) return undefined;
+  return res.status(500).json({ error: error.message });
  }
 });
 
