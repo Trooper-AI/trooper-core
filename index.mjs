@@ -6615,19 +6615,30 @@ async function handleIncomingTask(req, res) {
 
  // Fail fast when no AI credentials are configured (local Mac BYO host).
  // Avoids opaque 30s openai 401 / "fetch failed" for empty auth-profiles.
+ let _authProfileReadError = null;
+ let _hasAuthProfileCredential = false;
  try {
   const _authPre = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
   const _profiles = _authPre?.profiles || {};
-  const _hasAny = Object.values(_profiles).some((p) => p && (p.access || p.key || p.token));
-  if (!_hasAny) {
+  _hasAuthProfileCredential = Object.values(_profiles).some((p) => p && (p.access || p.key || p.token));
+ } catch (error) {
+  _authProfileReadError = error;
+ }
+ const _hasRuntimeCredential = _hasAuthProfileCredential || hasConfiguredProviderKey();
+ if (!_hasRuntimeCredential) {
+  if (_authProfileReadError) {
+   const msg = 'Could not read AI auth profiles on this host. Connect ChatGPT/Codex in Settings → Connections.';
+   console.warn(`[${id}] auth preflight failed: ${_authProfileReadError.message}`);
+   return res.status(401).json({ error: msg, code: 'auth_profiles_unreadable', requestId: id, isAuthError: true });
+  }
+  {
    const msg = 'No AI provider is connected on this Mac. Open Trooper → Settings → Connections and connect ChatGPT/Codex (or paste an API key). Auth profiles are empty.';
    console.warn(`[${id}] ${msg}`);
    return res.status(401).json({ error: msg, code: 'auth_profiles_empty', requestId: id, isAuthError: true });
   }
- } catch (e) {
-  const msg = 'Could not read AI auth profiles on this host. Connect ChatGPT/Codex in Settings → Connections.';
-  console.warn(`[${id}] auth preflight failed: ${e.message}`);
-  return res.status(401).json({ error: msg, code: 'auth_profiles_unreadable', requestId: id, isAuthError: true });
+ }
+ if (_authProfileReadError) {
+  console.warn(`[${id}] Auth profiles are unreadable; continuing with an existing runtime provider credential (${_authProfileReadError.message})`);
  }
 
  if (!gateway.isReady) {

@@ -12,11 +12,36 @@ mark() {
   node "$JOURNAL" "$1" "${2:-$1}" "${3:-}" >/dev/null 2>&1 || true
 }
 
+required_health_endpoints() {
+  printf '%s\n' \
+    'bridge|http://127.0.0.1:3002/healthz' \
+    'gateway|http://127.0.0.1:18789/health'
+
+  # A bridge-only deployment must not be rolled back because an unrelated
+  # Trooper application service is degraded. Full upgrades still verify the
+  # complete managed runtime before promotion is accepted.
+  if [[ "$SCOPE" != "bridge" ]]; then
+    printf '%s\n' \
+      'org-runtime|http://127.0.0.1:3101/health' \
+      'trooper-server|http://127.0.0.1:3001/health'
+  fi
+}
+
 healthy() {
-  curl -fsS --max-time 3 http://127.0.0.1:3002/healthz >/dev/null 2>&1 \
-    && curl -fsS --max-time 3 http://127.0.0.1:3101/health >/dev/null 2>&1 \
-    && curl -fsS --max-time 3 http://127.0.0.1:3001/health >/dev/null 2>&1 \
-    && curl -fsS --max-time 3 http://127.0.0.1:18789/health >/dev/null 2>&1
+  local name url
+  while IFS='|' read -r name url; do
+    curl -fsS --max-time 3 "$url" >/dev/null 2>&1 || return 1
+  done < <(required_health_endpoints)
+}
+
+failed_health_endpoints() {
+  local name url
+  local failed=()
+  while IFS='|' read -r name url; do
+    curl -fsS --max-time 3 "$url" >/dev/null 2>&1 || failed+=("$name")
+  done < <(required_health_endpoints)
+  local IFS=,
+  printf '%s' "${failed[*]}"
 }
 
 restart_managed_services() {
@@ -41,7 +66,8 @@ else
     fi
     sleep "$SLEEP_SECONDS"
   done
-  mark rolling_back health_timeout "managed services did not become healthy after upgrade"
+  failed_endpoints="$(failed_health_endpoints)"
+  mark rolling_back health_timeout "${SCOPE} health checks failed after upgrade: ${failed_endpoints:-unknown}"
 fi
 
 rollback_error=""
