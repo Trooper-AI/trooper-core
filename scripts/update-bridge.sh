@@ -68,8 +68,8 @@ fi
 
 trap cleanup_next EXIT
 
-BEFORE_SHA="$(git -C "$INSTALL_DIR" rev-parse HEAD)"
-REMOTE_URL="$(git -C "$INSTALL_DIR" remote get-url origin)"
+BEFORE_SHA="$(git -c safe.directory="$INSTALL_DIR" -C "$INSTALL_DIR" rev-parse HEAD)"
+REMOTE_URL="$(git -c safe.directory="$INSTALL_DIR" -C "$INSTALL_DIR" remote get-url origin)"
 if [ "$BEFORE_SHA" = "$TARGET_COMMIT" ]; then
   echo "[update-bridge] Bridge already at $TARGET_COMMIT"
   exit 0

@@ -8463,7 +8463,7 @@ app.get('/admin/health', async (req, res) => {
  // Bridge version (from git)
  let bridgeVersion = null;
  try {
-   bridgeVersion = execSync("git -C /opt/openclaw-bridge rev-parse --short HEAD 2>/dev/null", { timeout: 3000 }).toString().trim();
+   bridgeVersion = execSync("git -c safe.directory=/opt/openclaw-bridge -C /opt/openclaw-bridge rev-parse --short HEAD 2>/dev/null", { timeout: 3000 }).toString().trim();
  } catch {}
 
  res.json({
@@ -9783,7 +9783,7 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
 
   if (['all', 'bridge'].includes(scope)) {
     patchRuntimeUpgradeState({ phase: 'bridge_upgrade' });
-    const beforeSha = await runUpgradeCommand('git', ['-C', '/opt/openclaw-bridge', 'rev-parse', 'HEAD'], {
+    const beforeSha = await runUpgradeCommand('git', ['-c', 'safe.directory=/opt/openclaw-bridge', '-C', '/opt/openclaw-bridge', 'rev-parse', 'HEAD'], {
       timeout: 10000,
     });
     step(`Staging promoted bridge commit ${target.openclawBridgeCommit}`);
@@ -9794,7 +9794,7 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
       },
       timeout: 240000,
     });
-    const afterSha = await runUpgradeCommand('git', ['-C', '/opt/openclaw-bridge', 'rev-parse', 'HEAD'], {
+    const afterSha = await runUpgradeCommand('git', ['-c', 'safe.directory=/opt/openclaw-bridge', '-C', '/opt/openclaw-bridge', 'rev-parse', 'HEAD'], {
       timeout: 10000,
     });
     if (afterSha !== target.openclawBridgeCommit) {
@@ -12476,8 +12476,8 @@ app.get('/upgrade/status', (req, res) => {
    const versions = {};
    try { versions.gatewayImage = execSync("docker inspect openclaw:local --format='{{.Id}}' 2>/dev/null").toString().trim().slice(7, 19); } catch {}
    try { versions.gatewayCreated = execSync("docker inspect openclaw:local --format='{{.Created}}' 2>/dev/null").toString().trim(); } catch {}
-   try { versions.bridgeGitHash = execSync('git -C /opt/openclaw-bridge rev-parse --short HEAD 2>/dev/null').toString().trim(); } catch {}
-   try { versions.bridgeGitDate = execSync('git -C /opt/openclaw-bridge log -1 --format=%ci 2>/dev/null').toString().trim(); } catch {}
+   try { versions.bridgeGitHash = execSync('git -c safe.directory=/opt/openclaw-bridge -C /opt/openclaw-bridge rev-parse --short HEAD 2>/dev/null').toString().trim(); } catch {}
+   try { versions.bridgeGitDate = execSync('git -c safe.directory=/opt/openclaw-bridge -C /opt/openclaw-bridge log -1 --format=%ci 2>/dev/null').toString().trim(); } catch {}
    try {
      const containerStatus = execSync(`docker inspect ${OPENCLAW_GATEWAY_CONTAINER} --format='{{.State.Status}}' 2>/dev/null`).toString().trim();
      versions.gatewayStatus = containerStatus;
@@ -12711,7 +12711,7 @@ app.get('/diagnostics/export', async (req, res) => {
  const doctor = safeExec('docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw doctor --json 2>&1', 25000);
  const version = safeExec('docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw --version 2>&1', 10000);
  const gatewayImage = safeExec("docker inspect openclaw:local --format='{{.Id}} {{.Created}}' 2>/dev/null", 10000);
- const bridgeGit = safeExec('git -C /opt/openclaw-bridge log -1 --format="%h %ci" 2>/dev/null', 5000);
+ const bridgeGit = safeExec('git -c safe.directory=/opt/openclaw-bridge -C /opt/openclaw-bridge log -1 --format="%h %ci" 2>/dev/null', 5000);
  res.json({
   ok: true,
   generatedAt: new Date().toISOString(),
