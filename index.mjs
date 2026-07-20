@@ -97,6 +97,7 @@ import {
   evaluateVideoExecutionCompletion,
   inferVideoExecutionContract,
   reconcileVideoToolLogWithHistory,
+  responseRequestsUserDecision,
 } from './lib/openclaw-video-execution.mjs';
 import {
   OPENCLAW_WORKFLOW_EXECUTION_RULES,
@@ -7194,7 +7195,20 @@ const emitViewportScreenshotFrame = ({
   toolLog = await reconcileCompletionHistory(toolLog);
   let completion = evaluateVideoExecutionCompletion(toolLog, videoExecutionContract);
   const maxContinuationAttempts = 2;
-  if (videoExecutionContract.enabled) {
+  // The agent asking the human a real question (plan approval, option choice,
+  // missing constraint) is a legitimate end state — never bulldoze it with a
+  // continuation or fail the run for incomplete tool evidence.
+  let awaitingUserDecision = responseRequestsUserDecision(response);
+  if (awaitingUserDecision && (videoExecutionContract.enabled || workflowExecutionContract.enabled)) {
+   console.log('[OpenClaw] Completion contract deferred: agent is asking the user a question');
+   sendSSE('continuation_deferred', {
+    reason: 'awaiting_user_decision',
+    message: 'The agent is waiting on your answer before executing further.',
+    sessionKey: resolvedSessionKey || sessionKey,
+    runId: gatewayRunId || undefined,
+   });
+  }
+  if (videoExecutionContract.enabled && !awaitingUserDecision) {
   for (let attempt = 1; !completion.complete && attempt <= maxContinuationAttempts; attempt += 1) {
    const continuationTask = buildVideoExecutionContinuation({ evaluation: completion, attempt });
    console.warn(`[OpenClaw] Video execution incomplete after agent finalization; continuing attempt ${attempt}/${maxContinuationAttempts} (missing: ${completion.missing.join(', ')})`);
@@ -7226,9 +7240,15 @@ const emitViewportScreenshotFrame = ({
    gatewayRunUsage = continuation.usage || gatewayRunUsage;
    toolLog = await reconcileCompletionHistory(toolLog);
    completion = evaluateVideoExecutionCompletion(toolLog, videoExecutionContract);
+   // A continuation attempt may legitimately surface a blocking question
+   // (e.g. a paid-generation approval) — stop pushing and hand back to the user.
+   if (responseRequestsUserDecision(response)) {
+    awaitingUserDecision = true;
+    break;
+   }
   }
 
-  if (!completion.complete) {
+  if (!completion.complete && !awaitingUserDecision) {
    throw new Error(`OpenClaw video execution stopped before the deliverable was complete (missing: ${completion.missing.join(', ')}). The run was not marked complete.`);
   }
   }
@@ -7239,7 +7259,7 @@ const emitViewportScreenshotFrame = ({
   if (workflowExecutionContract.enabled) {
    const videoEvaluation = videoExecutionContract.enabled ? completion : null;
    let wfCompletion = evaluateWorkflowExecutionCompletion(toolLog, workflowExecutionContract, { videoEvaluation });
-   for (let attempt = 1; !wfCompletion.complete && attempt <= maxContinuationAttempts; attempt += 1) {
+   for (let attempt = 1; !wfCompletion.complete && !awaitingUserDecision && attempt <= maxContinuationAttempts; attempt += 1) {
     const continuationTask = buildWorkflowExecutionContinuation({ evaluation: wfCompletion, attempt });
     const missingLabels = wfCompletion.missing.map((step) => step.label).join(', ');
     console.warn(`[OpenClaw] Workflow execution incomplete after agent finalization; continuing attempt ${attempt}/${maxContinuationAttempts} (missing: ${missingLabels})`);
@@ -7274,9 +7294,13 @@ const emitViewportScreenshotFrame = ({
      ? evaluateVideoExecutionCompletion(toolLog, videoExecutionContract)
      : null;
     wfCompletion = evaluateWorkflowExecutionCompletion(toolLog, workflowExecutionContract, { videoEvaluation: refreshedVideo });
+    if (responseRequestsUserDecision(response)) {
+     awaitingUserDecision = true;
+     break;
+    }
    }
 
-   if (!wfCompletion.complete) {
+   if (!wfCompletion.complete && !awaitingUserDecision) {
     const missingLabels = wfCompletion.missing.map((step) => `Step ${step.index} "${step.label}"`).join(', ');
     throw new Error(`OpenClaw workflow execution stopped before all steps were completed (missing: ${missingLabels}). The run was not marked complete.`);
    }
