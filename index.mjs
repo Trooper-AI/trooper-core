@@ -52,6 +52,9 @@ const { dirname } = path;
 import WebSocket from 'ws';
 import { createServer } from 'http';
 import { initFirebaseAuth, firebaseRestAuth } from './lib/firebase-auth.mjs';
+import { isOrgMember, writeOrgMembers, readOrgMembers } from './lib/org-members.mjs';
+import { applyRuntimeEnvOverrides, loadRuntimeEnvOverridesAtBoot } from './lib/runtime-env-overrides.mjs';
+import { verifyDirectFileAccessToken } from './lib/file-access-token.mjs';
 import { BridgeWSServer } from './lib/ws-server.mjs';
 import { handleChatMessage } from './lib/chat-handler.mjs';
 import { createTask, getTask, listTasks, updateTask, deleteTask, addComment, addSubtask, toggleSubtask, deleteSubtask, executeTaskWork, checkoutTask, releaseTask, createProject, listProjects, updateProject, createGoal, listGoals } from './lib/task-handler.mjs';
@@ -757,7 +760,17 @@ const app = express();
 const PORT = parseInt(process.env.BRIDGE_PORT || '3002');
 const server = createServer(app);
 const BRIDGE_AUTH_TOKEN = process.env.BRIDGE_AUTH_TOKEN || '';
-const bridgeWS = new BridgeWSServer({ server, path: '/ws', bridgeAuthToken: BRIDGE_AUTH_TOKEN });
+// Control-plane-pushed env overrides (e.g. FIREBASE_PROJECT_ID backfill) must
+// load before Firebase init so direct browser auth works without an upgrade.
+loadRuntimeEnvOverridesAtBoot();
+// Direct browser clients must be verified Firebase identities AND org members
+// (fail-closed until the control plane has synced the member list).
+const bridgeWS = new BridgeWSServer({
+  server,
+  path: '/ws',
+  bridgeAuthToken: BRIDGE_AUTH_TOKEN,
+  memberCheck: (uid) => isOrgMember(uid),
+});
 initFirebaseAuth();
 const MISSION_CONTROL_URL = process.env.MISSION_CONTROL_URL || process.env.TROOPER_CALLBACK_URL || '';
 const RUNTIME_AUTH_SECRET = process.env.RUNTIME_AUTH_SECRET || '';
@@ -2160,6 +2173,20 @@ app.use((req, res, next) => {
  if (req.path.startsWith('/api/')) return next();
  // Desktop API is localhost-only (bound to 127.0.0.1), safe to skip here
  if (req.path.startsWith('/desktop-api/')) return next();
+ // Direct media lane: short-lived signed tokens (minted by the control plane
+ // from the shared bridge-token-derived key) allow the browser to fetch file
+ // bytes directly instead of proxying them through Railway. Read-only GETs.
+ if (req.method === 'GET' && req.path.startsWith('/files') && typeof req.query?.fat === 'string') {
+   const grant = verifyDirectFileAccessToken(req.query.fat, {
+     bridgeAuthToken: BRIDGE_AUTH_TOKEN,
+     path: req.path,
+   });
+   if (grant) {
+     req.directFileGrant = grant;
+     return next();
+   }
+   return res.status(401).json({ error: 'invalid_file_token' });
+ }
  // Everything else (including /admin/*, /debug/*, /gateway/*, /agents/*, /config/*,
  // /webhook/*, /cron/*, /skills/*, /recording/*) requires bridge auth token
  if (!BRIDGE_AUTH_TOKEN) return next();
@@ -2177,8 +2204,52 @@ app.use((req, res, next) => {
      return row ? JSON.parse(row.value).filter(k => k.active !== false) : [];
    } catch { return []; }
  };
- app.use('/api', firebaseRestAuth(BRIDGE_AUTH_TOKEN, getApiKeys));
+ app.use('/api', firebaseRestAuth(BRIDGE_AUTH_TOKEN, getApiKeys, (uid) => isOrgMember(uid)));
 }
+
+// ── Control-plane pushed configuration (bridge-token-auth'd) ─────────
+
+// Full org member list so direct browser clients can be authorized locally.
+app.post('/org/members', (req, res) => {
+  if (!requireBridgeAuth(req, res)) return;
+  try {
+    const result = writeOrgMembers({
+      orgId: req.body?.orgId || ORG_ID || null,
+      members: req.body?.members || [],
+      revision: req.body?.revision || 0,
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/org/members', (req, res) => {
+  if (!requireBridgeAuth(req, res)) return;
+  const state = readOrgMembers();
+  res.json({
+    orgId: state?.orgId || null,
+    revision: state?.revision || 0,
+    count: state?.members.length || 0,
+    updatedAt: state?.updatedAt || null,
+  });
+});
+
+// Allowlisted runtime env backfill (e.g. FIREBASE_PROJECT_ID) — applies
+// immediately (projectId-only Firebase init needs no restart) and persists
+// across restarts. Never a generic env writer: see RUNTIME_ENV_ALLOWLIST.
+app.post('/config/runtime-env', (req, res) => {
+  if (!requireBridgeAuth(req, res)) return;
+  try {
+    const result = applyRuntimeEnvOverrides(req.body?.values || {});
+    if (result.applied.includes('FIREBASE_PROJECT_ID')) {
+      initFirebaseAuth();
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ── OpenClaw Gateway WebSocket Client ────────────────────────────────
 // Maintains a persistent connection using the native OpenClaw protocol.
@@ -6828,6 +6899,22 @@ async function handleIncomingTaskStream(req, res) {
    } else if (event === 'text') {
     logDebugEvent('sse_to_trooper', { event, chars: payload?.text?.length || 0 });
    }
+   // Direct stream lane: mirror chunk-class events to local WS clients so a
+   // browser on the direct bridge socket gets tokens without the Railway hop.
+   // Text is progressive (each event = full text so far) and dedupe-keyed on
+   // the client, so dual delivery via Railway relay is safe.
+   if (event === 'text' && payload?.text) {
+    try {
+     bridgeWS.broadcast('agent:chunk', {
+      text: payload.text,
+      agentId,
+      agentName: agentName || 'default',
+      runId: payload.runId || null,
+      sessionKey: payload.sessionKey || sessionKey || null,
+      channel,
+     });
+    } catch { /* direct lane is best-effort */ }
+   }
  },
  });
 
@@ -9850,7 +9937,12 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
   }
   performManagedRuntimeUpgrade.inProgress = true;
   let bridgeActivated = false;
-  let operationId = `upgrade-${Date.now()}-${randomBytes(4).toString('hex')}`;
+  // Delegated upgrades (control plane dispatches, VPS executes) supply their
+  // own operationId so the caller can correlate the journal across restarts.
+  const requestedOperationId = String(request.operationId || '').trim();
+  let operationId = /^[A-Za-z0-9_-]{8,80}$/.test(requestedOperationId)
+    ? requestedOperationId
+    : `upgrade-${Date.now()}-${randomBytes(4).toString('hex')}`;
   try {
   const { scope, target } = validateRuntimeUpgradeRequest(request);
   beginRuntimeUpgradeState({ operationId, scope, target });
@@ -12567,8 +12659,50 @@ app.get('/version', (req, res) => {
 // ── Upgrade — apply the exact promoted runtime target ──────────────
 app.post('/upgrade', async (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
+ const request = req.body || {};
+ // Delegated mode: validate + reject conflicts synchronously, then accept with
+ // 202 and execute detached. The VPS-local journal (runtime-upgrade-journal)
+ // is the source of truth the control plane polls via GET /upgrade/status —
+ // a control-plane restart can no longer strand the upgrade.
+ if (request.async === true) {
+   try {
+     validateRuntimeUpgradeRequest(request);
+     // Same freshness window as performManagedRuntimeUpgrade's inner guard so
+     // a stale crashed journal never wedges delegated upgrades.
+     const journalState = readRuntimeUpgradeState();
+     const journalUpdatedAt = Date.parse(journalState?.updatedAt || '') || 0;
+     const journalIsFresh = journalUpdatedAt > Date.now() - (15 * 60 * 1000);
+     if (performManagedRuntimeUpgrade.inProgress || (isRuntimeUpgradeActive(journalState) && journalIsFresh)) {
+       const conflict = new Error('A runtime upgrade is already in progress');
+       conflict.statusCode = 409;
+       conflict.code = 'runtime_upgrade_in_progress';
+       throw conflict;
+     }
+   } catch (err) {
+     res.status(err.statusCode || 400).json({
+       success: false,
+       accepted: false,
+       error: err.message,
+       code: err.code || 'runtime_upgrade_invalid',
+     });
+     return;
+   }
+   const acceptedOperationId = String(request.operationId || '').trim()
+     || `upgrade-${Date.now()}-${randomBytes(4).toString('hex')}`;
+   res.status(202).json({ accepted: true, operationId: acceptedOperationId });
+   (async () => {
+     const result = await performManagedRuntimeUpgrade({
+       request: { ...request, operationId: acceptedOperationId },
+     });
+     await scheduleManagedRuntimeServiceRestart(result.scope, result.operationId);
+   })().catch((err) => {
+     // performManagedRuntimeUpgrade already journals failed/rolled_back state.
+     captureLog('error', `Delegated runtime upgrade failed: ${err.message}`, { stack: err.stack });
+   });
+   return;
+ }
  try {
-   const result = await performManagedRuntimeUpgrade({ request: req.body || {} });
+   const result = await performManagedRuntimeUpgrade({ request });
    const verifier = await scheduleManagedRuntimeServiceRestart(result.scope, result.operationId);
    res.json({ ...result, verifier });
  } catch (err) {
@@ -12669,6 +12803,7 @@ function buildOpenClawCapabilitiesPayload() {
    missionControlStream: true,
    missionControlStop: true,
    missionControlSteer: true,
+   delegatedUpgrade: true,
    nativeNodes: true,
    nativeNodeRemove: true,
    nativeNodePresence: true,
