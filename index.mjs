@@ -96,6 +96,12 @@ import {
   reconcileVideoToolLogWithHistory,
 } from './lib/openclaw-video-execution.mjs';
 import {
+  OPENCLAW_WORKFLOW_EXECUTION_RULES,
+  buildWorkflowExecutionContinuation,
+  evaluateWorkflowExecutionCompletion,
+  inferWorkflowExecutionContract,
+} from './lib/openclaw-workflow-execution.mjs';
+import {
   assertRuntimeUpgradeCompatibility,
   validateRuntimeUpgradeRequest,
 } from './lib/runtime-upgrade-target.mjs';
@@ -6348,6 +6354,9 @@ function buildTaskMessage(body) {
  if (String(context?.executionLane || '').toLowerCase() === 'media') {
   taskParts.push('[Execution Lane: media-first native generation; do not substitute HTML/canvas/frontend output for plain media requests.]');
  }
+ if (String(context?.executionLane || '').toLowerCase() === 'workflow') {
+  taskParts.push('[Execution Lane: workflow — execute the saved workflow steps with real tool calls; step completion requires tool evidence.]');
+ }
  return taskParts.join('\n');
 }
 
@@ -6895,6 +6904,15 @@ const emitViewportScreenshotFrame = ({
    ? `${resolvedSystemPrompt}\n\n${OPENCLAW_VIDEO_EXECUTION_RULES}`
    : OPENCLAW_VIDEO_EXECUTION_RULES;
  }
+ const workflowExecutionContract = inferWorkflowExecutionContract({
+  task: fullTask,
+  context,
+ });
+ if (workflowExecutionContract.enabled) {
+  resolvedSystemPrompt = resolvedSystemPrompt
+   ? `${resolvedSystemPrompt}\n\n${OPENCLAW_WORKFLOW_EXECUTION_RULES}`
+   : OPENCLAW_WORKFLOW_EXECUTION_RULES;
+ }
 
  // ── Project folder enforcement ──
  // Server passes a deterministic projectFolder (title-slug + id-hash).
@@ -7056,7 +7074,7 @@ const emitViewportScreenshotFrame = ({
  steerTimeoutMs: inactivityMs,
  }, streamingCallback));
 
- if (videoExecutionContract.enabled) {
+ if (videoExecutionContract.enabled || workflowExecutionContract.enabled) {
   const reconcileCompletionHistory = async (currentToolLog) => {
    const historySessionKey = resolvedSessionKey || sessionKey;
    const historyLimit = 500;
@@ -7089,6 +7107,7 @@ const emitViewportScreenshotFrame = ({
   toolLog = await reconcileCompletionHistory(toolLog);
   let completion = evaluateVideoExecutionCompletion(toolLog, videoExecutionContract);
   const maxContinuationAttempts = 2;
+  if (videoExecutionContract.enabled) {
   for (let attempt = 1; !completion.complete && attempt <= maxContinuationAttempts; attempt += 1) {
    const continuationTask = buildVideoExecutionContinuation({ evaluation: completion, attempt });
    console.warn(`[OpenClaw] Video execution incomplete after agent finalization; continuing attempt ${attempt}/${maxContinuationAttempts} (missing: ${completion.missing.join(', ')})`);
@@ -7124,6 +7143,56 @@ const emitViewportScreenshotFrame = ({
 
   if (!completion.complete) {
    throw new Error(`OpenClaw video execution stopped before the deliverable was complete (missing: ${completion.missing.join(', ')}). The run was not marked complete.`);
+  }
+  }
+
+  // Saved-workflow step contract: every tool-backed step needs successful tool
+  // evidence. Runs after the (stricter) video loop so workflow video steps can
+  // delegate to the final video completion evaluation.
+  if (workflowExecutionContract.enabled) {
+   const videoEvaluation = videoExecutionContract.enabled ? completion : null;
+   let wfCompletion = evaluateWorkflowExecutionCompletion(toolLog, workflowExecutionContract, { videoEvaluation });
+   for (let attempt = 1; !wfCompletion.complete && attempt <= maxContinuationAttempts; attempt += 1) {
+    const continuationTask = buildWorkflowExecutionContinuation({ evaluation: wfCompletion, attempt });
+    const missingLabels = wfCompletion.missing.map((step) => step.label).join(', ');
+    console.warn(`[OpenClaw] Workflow execution incomplete after agent finalization; continuing attempt ${attempt}/${maxContinuationAttempts} (missing: ${missingLabels})`);
+    sendSSE('continuation_recovery', {
+     reason: 'workflow_execution_incomplete',
+     attempt,
+     missing: wfCompletion.missing,
+     message: 'The saved workflow still has unexecuted steps. OpenClaw is continuing the run.',
+     sessionKey: resolvedSessionKey || sessionKey,
+     runId: gatewayRunId || undefined,
+    });
+
+    const continuation = await gateway.runAgentStreaming(continuationTask, {
+     agentId,
+     agentName: agentName || 'default',
+     sessionKey: resolvedSessionKey || sessionKey,
+     thinking: thinking || undefined,
+     model: streamingExplicitModel || undefined,
+     extraSystemPrompt: resolvedSystemPrompt,
+     timeoutMs: inactivityMs,
+     projectFolder,
+     steer: false,
+    }, streamingCallback);
+
+    response = continuation.response || response;
+    toolLog = [...(toolLog || []), ...(continuation.toolLog || [])];
+    gatewayRunId = continuation.runId || gatewayRunId;
+    resolvedSessionKey = continuation.sessionKey || resolvedSessionKey;
+    gatewayRunUsage = continuation.usage || gatewayRunUsage;
+    toolLog = await reconcileCompletionHistory(toolLog);
+    const refreshedVideo = videoExecutionContract.enabled
+     ? evaluateVideoExecutionCompletion(toolLog, videoExecutionContract)
+     : null;
+    wfCompletion = evaluateWorkflowExecutionCompletion(toolLog, workflowExecutionContract, { videoEvaluation: refreshedVideo });
+   }
+
+   if (!wfCompletion.complete) {
+    const missingLabels = wfCompletion.missing.map((step) => `Step ${step.index} "${step.label}"`).join(', ');
+    throw new Error(`OpenClaw workflow execution stopped before all steps were completed (missing: ${missingLabels}). The run was not marked complete.`);
+   }
   }
  }
 
