@@ -9833,7 +9833,12 @@ function runUpgradeCommand(command, args, options = {}) {
   });
 }
 
-async function waitForGatewayUpgradeHealth({ timeoutMs = 90000 } = {}) {
+// 90s was not enough on a small, loaded VPS: a docker image pull + gateway
+// boot while a render/transcode is running routinely exceeds it, so upgrades
+// were marked "Gateway did not become healthy: fetch failed" even though the
+// gateway came up healthy a minute later (upgrade verdict failed, server
+// status healthy — confusing and triggers pointless rollbacks/retries).
+async function waitForGatewayUpgradeHealth({ timeoutMs = 300000 } = {}) {
   const startedAt = Date.now();
   let lastError = 'gateway health check did not complete';
   let healthUrl = 'http://127.0.0.1:18789/health';
