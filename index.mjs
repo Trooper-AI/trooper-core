@@ -8814,6 +8814,19 @@ app.post('/admin/restart-services', async (req, res) => {
      }
    }, 750).unref?.();
 
+   // Restart the Trooper org runtime — the service behind every video
+   // project/media surface. It was previously omitted here, so a dead
+   // runtime survived "Restart Server" and video stayed broken (observed
+   // live: runtime 502 while bridge/gateway healthy after a restart).
+   for (const unit of ['trooper-org-runtime', 'openclaw-poller']) {
+     try {
+       execSync(`systemctl restart ${unit} 2>/dev/null`, { timeout: 30000 });
+       results.push({ service: unit, action: 'restarted' });
+     } catch (e) {
+       results.push({ service: unit, action: 'restart-failed', error: e.message });
+     }
+   }
+
    // Restart Caddy
    try {
      execSync('systemctl restart caddy 2>/dev/null', { timeout: 10000 });
