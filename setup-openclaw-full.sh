@@ -34,6 +34,9 @@ ORG_ID="$(_resolve_input "${ORG_ID:-}" "{{ORG_ID}}")"
 SSH_PUBKEY="$(_resolve_input "${SSH_PUBKEY:-}" "{{SSH_PUBKEY}}")"
 OPENCLAW_DOCKER_IMAGE="$(_resolve_input "${OPENCLAW_DOCKER_IMAGE:-}" "{{OPENCLAW_DOCKER_IMAGE}}")"
 BRIDGE_AUTH_TOKEN="$(_resolve_input "${BRIDGE_AUTH_TOKEN:-}" "{{BRIDGE_AUTH_TOKEN}}")"
+# Public Firebase project id (not a secret): enables ID-token verification for
+# direct browser→bridge connections. Empty keeps direct sign-in disabled.
+FIREBASE_PROJECT_ID="$(_resolve_input "${FIREBASE_PROJECT_ID:-}" "{{FIREBASE_PROJECT_ID}}")"
 GATEWAY_PORT=18789
 MEDIA_PORT=18791
 API_URL="$(_resolve_input "${API_URL:-}" "{{API_URL}}")"
@@ -779,6 +782,7 @@ if [ -n "${CF_API_TOKEN:-}" ] && [ -n "${ORG_ID:-}" ]; then
        "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/cfd_tunnel/${TUNNEL_ID}/configurations" \
        -d "{\"config\":{\"ingress\":[
          {\"hostname\":\"${HTTPS_DOMAIN}\",\"path\":\"ws\",\"service\":\"http://localhost:${BRIDGE_PORT}\"},
+         {\"hostname\":\"${HTTPS_DOMAIN}\",\"path\":\"files*\",\"service\":\"http://localhost:${BRIDGE_PORT}\"},
          {\"hostname\":\"${HTTPS_DOMAIN}\",\"path\":\"vnc/*\",\"service\":\"http://localhost:6080\"},
          {\"hostname\":\"${HTTPS_DOMAIN}\",\"service\":\"http://localhost:${GATEWAY_PORT}\"},
          {\"service\":\"http_status:404\"}
@@ -3048,6 +3052,7 @@ Restart=on-failure
 RestartSec=10
 Environment=BRIDGE_PORT=${BRIDGE_PORT}
 Environment=BRIDGE_AUTH_TOKEN=${BRIDGE_AUTH_TOKEN}
+Environment=FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
 Environment=OPENCLAW_URL=http://127.0.0.1:${GATEWAY_PORT}
 Environment=OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
 Environment=OPENCLAW_HOOK_TOKEN=oc-hook-${HOOK_TOKEN}
