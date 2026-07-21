@@ -6371,12 +6371,30 @@ function resolveMissionControlSessionKey({ sessionKey, agentName, context } = {}
  if (typeof sessionKey === 'string' && sessionKey.trim()) return sessionKey.trim();
  const taskId = context?.taskId || null;
  const channel = context?.channel || 'general';
+ // Trooper UI chat sessions: rotate chatSessionId after context overflow /new.
+ // Without this, every message reuses channel:{name} forever (heavy transcripts).
+ const rawChatSessionId = context?.chatSessionId
+   || context?.conversationSessionId
+   || context?.sessionId
+   || null;
+ const chatSessionId = rawChatSessionId
+   ? String(rawChatSessionId)
+     .trim()
+     .toLowerCase()
+     .replace(/[^a-z0-9:_-]+/g, '-')
+     .replace(/^-+|-+$/g, '')
+     .slice(0, 96)
+   : '';
  const slug = agentSlug(agentName);
  const registered = agentRegistry.get(slug);
  const gatewayAgentId = resolveNativeGatewayAgentId(registered, slug);
- return taskId
-   ? `agent:${gatewayAgentId}:hook:trooper:${slug}:task:${taskId}`
-   : `agent:${gatewayAgentId}:hook:trooper:${slug}:channel:${channel}`;
+ if (taskId) {
+   return `agent:${gatewayAgentId}:hook:trooper:${slug}:task:${taskId}`;
+ }
+ if (chatSessionId) {
+   return `agent:${gatewayAgentId}:hook:trooper:${slug}:chat-session:${chatSessionId}`;
+ }
+ return `agent:${gatewayAgentId}:hook:trooper:${slug}:channel:${channel}`;
 }
 
 function extractAgentIdFromSessionKey(sessionKey) {
