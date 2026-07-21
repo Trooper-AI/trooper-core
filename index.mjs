@@ -3556,16 +3556,17 @@ class OpenClawGateway {
  const sanitizeVisibleAssistantText = (text = '') => stripInternalRunMetadataPrefix(text).trim();
 
  // Sub-agent tracking: tree-based for nested sub-agents
+ // OC-02: FIFO queue so burst sessions_spawn keeps name/profile/parent association
  let mainRunId = null;
  const activeSubAgents = new Map(); // runId → { name, task, startedAt, parentRunId, depth }
- let pendingSubAgentSpawn = null; // set when sessions_spawn tool_use is seen, consumed when new runId appears
- let pendingSpawnRunId = null; // which runId initiated the sessions_spawn
+ /** @type {Array<{ name: string, task: string, profile: string|null, parentRunId: string|null }>} */
+ const pendingSubAgentSpawns = [];
  let subagentDrainResolve = null;
  let subagentDrainTimer = null;
  const subagentDrainQuietMs = Math.max(30000, Math.min(timeoutMs, 180000));
  const resetSubagentDrainWait = () => {
  if (!subagentDrainResolve) return;
- if (!pendingSubAgentSpawn && activeSubAgents.size === 0) {
+ if (pendingSubAgentSpawns.length === 0 && activeSubAgents.size === 0) {
  const resolve = subagentDrainResolve;
  subagentDrainResolve = null;
  if (subagentDrainTimer) {
@@ -3578,7 +3579,7 @@ class OpenClawGateway {
  if (subagentDrainTimer) clearTimeout(subagentDrainTimer);
  subagentDrainTimer = setTimeout(() => {
  const remaining = activeSubAgents.size;
- const pending = pendingSubAgentSpawn ? 1 : 0;
+ const pending = pendingSubAgentSpawns.length;
  console.warn(`[OpenClaw] Sub-agent drain timed out after ${Math.round(subagentDrainQuietMs / 1000)}s of waiting (${remaining} active, ${pending} pending spawn)`);
  const resolve = subagentDrainResolve;
  subagentDrainResolve = null;
@@ -3615,14 +3616,13 @@ class OpenClawGateway {
  // Track main runId from first event
  if (!mainRunId && runId) mainRunId = runId;
 
- // Associate new runIds with pending sub-agent spawns (tree-based)
+ // Associate new runIds with pending sub-agent spawns (tree-based, FIFO)
  if (isSubAgent && !activeSubAgents.has(runId)) {
- const parentRunId = pendingSpawnRunId || mainRunId;
+ const claimed = pendingSubAgentSpawns.shift() || { name: 'Sub-agent', task: '', profile: null, parentRunId: mainRunId };
+ const parentRunId = claimed.parentRunId || mainRunId;
  const parentDepth = parentRunId === mainRunId ? 0 : (activeSubAgents.get(parentRunId)?.depth || 0);
- const info = pendingSubAgentSpawn || { name: 'Sub-agent', task: '' };
+ const info = { name: claimed.name, task: claimed.task, profile: claimed.profile || null };
  activeSubAgents.set(runId, { ...info, startedAt: Date.now(), toolCount: 0, parentRunId, depth: parentDepth + 1 });
- pendingSubAgentSpawn = null;
- pendingSpawnRunId = null;
  resetSubagentDrainWait();
  if (onEvent) onEvent('subagent_start', {
    subAgentRunId: runId,
@@ -3961,12 +3961,12 @@ function extractPatchFilePaths(patchText = '') {
    || String(rawTask).match(/\[(?:profile|subagent_type)\s*[:=]\s*([a-zA-Z0-9_-]+)\]/i);
  const detectedProfile = (params.profile || profileMatch?.[1] || '').toLowerCase() || null;
  const nameMatch = String(rawTask).match(/^\s*name\s*:\s*(.+)$/im);
- pendingSubAgentSpawn = {
+ pendingSubAgentSpawns.push({
  name: params.name || nameMatch?.[1]?.trim() || params.agentName || params.description?.substring(0, 40) || (detectedProfile ? `${detectedProfile}` : 'Sub-agent'),
  task: rawTask,
  profile: detectedProfile,
- };
- pendingSpawnRunId = runId; // Track which runId initiated this spawn for parent→child tree
+ parentRunId: runId || mainRunId, // parent→child tree for nested spawns
+ });
  resetSubagentDrainWait();
  }
  // Detect ACP agent spawn via tool name or exec command
@@ -3998,16 +3998,10 @@ function extractPatchFilePaths(patchText = '') {
  }
  }
  }
- // When sessions_spawn completes, emit subagent_done for any agents not already
- // cleaned up by lifecycle:end or task_completion events (fallback for older gateways)
+ // OC-02: Do NOT clear all active sub-agents when one sessions_spawn tool_result
+ // arrives — parallel children must stay live until lifecycle:end / task_completion.
+ // Older gateways without lifecycle still drain via the quiet timeout below.
  if (last?.tool === 'sessions_spawn' || last?.tool === 'Task') {
- for (const [subRunId, subInfo] of activeSubAgents) {
- console.log(`[SUBAGENT:fallback_done] ${subInfo.name} (runId=${subRunId}) — no lifecycle/task_completion received, using tool_result`);
- if (onEvent) onEvent('subagent_done', { subAgentRunId: subRunId, parentRunId: subInfo.parentRunId, depth: subInfo.depth, subAgentName: subInfo.name, summary: last?.summary || '' });
- }
- activeSubAgents.clear();
- pendingSubAgentSpawn = null;
- pendingSpawnRunId = null;
  resetSubagentDrainWait();
  }
  if (onEvent) onEvent('tool_result', {
@@ -4312,8 +4306,8 @@ function extractPatchFilePaths(patchText = '') {
  // the caller needs the accepted child session immediately and follows that
  // durable session through /acp/sessions/:id/stream. Waiting here deadlocks the
  // HTTP spawn request for the entire lifetime of the ACP child.
- if (opts.detachSpawnedChildren !== true && (pendingSubAgentSpawn || activeSubAgents.size > 0)) {
- console.log(`[OpenClaw] Main agent response finished but ${activeSubAgents.size} sub-agent(s) are still active${pendingSubAgentSpawn ? ' (pending spawn detected)' : ''}; keeping stream open for child activity`);
+ if (opts.detachSpawnedChildren !== true && (pendingSubAgentSpawns.length > 0 || activeSubAgents.size > 0)) {
+ console.log(`[OpenClaw] Main agent response finished but ${activeSubAgents.size} sub-agent(s) are still active${pendingSubAgentSpawns.length ? ` (${pendingSubAgentSpawns.length} pending spawn)` : ''}; keeping stream open for child activity`);
  await new Promise((resolve) => {
  subagentDrainResolve = resolve;
  resetSubagentDrainWait();
@@ -7194,7 +7188,10 @@ const emitViewportScreenshotFrame = ({
 
   toolLog = await reconcileCompletionHistory(toolLog);
   let completion = evaluateVideoExecutionCompletion(toolLog, videoExecutionContract);
-  const maxContinuationAttempts = 2;
+  // OC-01: tiered caps — production may re-enter twice; draft/standard once.
+  const maxContinuationAttempts = Number.isFinite(Number(videoExecutionContract?.maxContinuationAttempts))
+    ? Math.max(0, Math.min(2, Number(videoExecutionContract.maxContinuationAttempts)))
+    : 2;
   // The agent asking the human a real question (plan approval, option choice,
   // missing constraint) is a legitimate end state — never bulldoze it with a
   // continuation or fail the run for incomplete tool evidence.
