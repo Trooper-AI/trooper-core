@@ -10024,11 +10024,20 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
     );
   }
 
-  const preflight = assertRuntimeUpgradePreflight({ scope, includeSharedSlots });
+  // Disk floor is a near-full safety only (see runtime-upgrade-preflight.mjs).
+  // Request/env can lower further; we never reserve multi‑GB headroom — each
+  // org has its own VPS size and should use whatever free space it has.
+  const preflight = assertRuntimeUpgradePreflight({
+    scope,
+    includeSharedSlots,
+    minFreeDiskMb: request?.minFreeDiskMb,
+    minAvailableMemoryMb: request?.minAvailableMemoryMb,
+  });
   patchRuntimeUpgradeState({ phase: 'preflight_complete', preflight });
   step(
     `Upgrade preflight passed: ${preflight.checks.length} checks, `
-    + `${Math.floor(preflight.checks.find((check) => check.name === 'disk')?.value / 1024 / 1024)} MiB free`,
+    + `${Math.floor(preflight.checks.find((check) => check.name === 'disk')?.value / 1024 / 1024)} MiB free `
+    + `(min ${preflight.requiredDiskMb} MiB)`,
   );
 
   if (['all', 'gateway'].includes(scope)) {
