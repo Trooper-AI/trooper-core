@@ -6931,13 +6931,23 @@ async function handleIncomingTaskStream(req, res) {
  },
  });
 
- // Keep-alive to prevent proxy timeouts + typing indicator keepalive (v2026.3.1)
+ // Keep-alive to prevent proxy timeouts + Trooper Working UI. Must fire often
+ // enough that Railway/proxies and the client idle clock never mark the run
+ // dead while OpenClaw is mid-tool. Include identity so clients can re-bind.
+ let lastKeepaliveTool = null;
  const keepAlive = setInterval(() => {
  if (!res.writableEnded) {
  res.write(': keepalive\n\n');
- sendSSE('typing_keepalive', { timestamp: Date.now() });
+ sendSSE('typing_keepalive', {
+   timestamp: Date.now(),
+   agentId: agentId || null,
+   agentName: agentName || 'default',
+   sessionKey: sessionKey || null,
+   phase: 'working',
+   lastTool: lastKeepaliveTool,
+ });
  }
- }, 15000);
+ }, 8000);
 
  const requestStartedAt = Date.now();
  sendSSE('start', { requestId: id, agentId, agentName: agentName || 'default' });
@@ -7101,6 +7111,9 @@ const emitViewportScreenshotFrame = ({
 	 if (event !== 'done' && event !== 'model_done') {
 	  sendSSE(event, streamedData);
 	 }
+ if (event === 'tool_start' && data?.tool) {
+  lastKeepaliveTool = String(data.tool).slice(0, 80);
+ }
 
  // Start desktop recording when exec/desktop tools are used
  const isDesktopTool = (t) => t && ['exec', 'bash', 'write', 'edit'].includes(String(t).toLowerCase());
