@@ -7550,6 +7550,9 @@ const WORKSPACE_CONTAINER_ROOT = '/home/node/.openclaw/workspace';
 const WORKSPACE_HOST_ROOT = OPENCLAW_WORKSPACE_HOST_ROOT;
 const AGENTS_CONFIG_ROOT = OPENCLAW_AGENTS_CONFIG_ROOT;
 const MEDIA_CONTAINER_ROOT = '/home/node/.openclaw/media';
+// image_generate / tool media lands on host under config/media (not container media root).
+const MEDIA_HOST_ROOT = path.join(OPENCLAW_CONFIG_ROOT, 'media');
+const DATA_MEDIA_HOST_ROOT = path.join(OPENCLAW_DATA_ROOT, 'media');
 const SYSTEM_WORKSPACE_FILES = new Set([
  'AGENTS.md',
  'BOOT.md',
@@ -7567,7 +7570,15 @@ const SYSTEM_WORKSPACE_FILES = new Set([
 ]);
 const SYSTEM_WORKSPACE_DIRS = new Set(['memory', 'state']);
 const ROOT_VIRTUAL_DIRS = new Set(['System', 'Team', 'Channels', 'Media']);
-const ALLOWED_LIST_PATHS = ['/tmp', WORKSPACE_CONTAINER_ROOT, MEDIA_CONTAINER_ROOT, WORKSPACE_HOST_ROOT, AGENTS_CONFIG_ROOT];
+const ALLOWED_LIST_PATHS = [
+  '/tmp',
+  WORKSPACE_CONTAINER_ROOT,
+  MEDIA_CONTAINER_ROOT,
+  WORKSPACE_HOST_ROOT,
+  AGENTS_CONFIG_ROOT,
+  MEDIA_HOST_ROOT,
+  DATA_MEDIA_HOST_ROOT,
+];
 
 function cleanWorkspacePath(value = '/') {
  const raw = String(value || '/').trim() || '/';
@@ -7898,6 +7909,23 @@ function resolveWorkspacePathForFiles(rawPath = '/', { file = false } = {}) {
 
  if (virtualPath === '/Media' || virtualPath.startsWith('/Media/')) {
   const rel = virtualPath === '/Media' ? '' : virtualPath.slice('/Media/'.length);
+  // Prefer host config/media (image_generate) when present; fall back to container media.
+  if (rel && existsSync(path.join(MEDIA_HOST_ROOT, rel))) {
+   return {
+    kind: 'host',
+    realPath: path.join(MEDIA_HOST_ROOT, rel),
+    displayPath: virtualPath,
+    virtualBase: virtualPath,
+   };
+  }
+  if (!rel && existsSync(MEDIA_HOST_ROOT)) {
+   return {
+    kind: 'host',
+    realPath: MEDIA_HOST_ROOT,
+    displayPath: virtualPath,
+    virtualBase: virtualPath,
+   };
+  }
   return {
    kind: 'container',
    realPath: rel ? `${MEDIA_CONTAINER_ROOT}/${rel}` : MEDIA_CONTAINER_ROOT,
@@ -7908,6 +7936,11 @@ function resolveWorkspacePathForFiles(rawPath = '/', { file = false } = {}) {
 
  if (p.startsWith('/tmp') || p.startsWith(MEDIA_CONTAINER_ROOT)) {
   return { kind: 'container', realPath: p, displayPath: p };
+ }
+
+ // Host media from image_generate / tool-image-generation (absolute paths from recent scan).
+ if (p.startsWith(MEDIA_HOST_ROOT) || p.startsWith(DATA_MEDIA_HOST_ROOT)) {
+  return { kind: 'host', realPath: p, displayPath: p };
  }
 
  if (p.startsWith(AGENTS_CONFIG_ROOT)) {
