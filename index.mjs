@@ -7939,6 +7939,110 @@ function resolveWorkspacePathForFiles(rawPath = '/', { file = false } = {}) {
  };
 }
 
+// Recent files by mtime for Home + Files Artifacts (Trooper /api/bridge/files/recent).
+// Scans host workspace + config/media; skips skills and agent system docs.
+const RECENT_SKIP_DIRS = new Set([
+  '.git', 'node_modules', '.openclaw', '__pycache__', '.cache', 'dist', 'build',
+  '.next', 'venv', '.venv', 'graphify-out', 'skills', '.hls',
+]);
+const RECENT_SKIP_NAMES = new Set([
+  '.ds_store', 'thumbs.db', '.gitkeep', 'package-lock.json', 'package.json',
+  'skill.md', 'agents.md', 'boot.md', 'bootstrap.md', 'heartbeat.md', 'company.md',
+  'identity.md', 'tools.md', 'user.md', 'soul.md', 'knowledge.md', 'integrations.md',
+  'team.md', 'capabilities.md', 'capabilities.json', 'workflows.json', 'workflows.md',
+  'memories.md', 'memory.md', 'openclaw-workspace-state.json', '.graphifyignore',
+  ...SYSTEM_WORKSPACE_FILES,
+].map((n) => String(n).toLowerCase()));
+
+function listRecentHostFiles(rootDir, {
+  limit = 80,
+  maxDepth = 6,
+  maxVisited = 4000,
+  pathRoot = rootDir,
+} = {}) {
+  const files = [];
+  let visited = 0;
+  const walk = (dir, depth) => {
+    if (depth > maxDepth || visited >= maxVisited) return;
+    let names;
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return;
+    }
+    const dirs = [];
+    for (const name of names) {
+      if (visited >= maxVisited) return;
+      if (!name || name.startsWith('.')) continue;
+      if (RECENT_SKIP_NAMES.has(name.toLowerCase())) continue;
+      const full = path.join(dir, name);
+      visited += 1;
+      let st;
+      try {
+        st = statSync(full);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) {
+        if (RECENT_SKIP_DIRS.has(name) || SYSTEM_WORKSPACE_DIRS.has(name)) continue;
+        dirs.push(full);
+        continue;
+      }
+      if (!st.isFile()) continue;
+      let rel = path.relative(pathRoot, full).split(path.sep).join('/');
+      if (!rel || rel.startsWith('..')) rel = full;
+      const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : '';
+      files.push({
+        name,
+        path: rel,
+        filePath: full,
+        size: st.size || 0,
+        mtimeMs: Number(st.mtimeMs) || 0,
+        ext,
+        type: ext || 'file',
+      });
+    }
+    for (const full of dirs) {
+      if (visited >= maxVisited) return;
+      walk(full, depth + 1);
+    }
+  };
+  if (existsSync(rootDir)) walk(rootDir, 0);
+  return files;
+}
+
+app.get('/files/recent', (req, res) => {
+  try {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 80, 1), 200);
+    const collected = [];
+    // Host workspace (same root File manager uses)
+    collected.push(...listRecentHostFiles(WORKSPACE_HOST_ROOT, { limit: limit * 2, pathRoot: WORKSPACE_HOST_ROOT }));
+    // Generated media (image_generate etc.)
+    const mediaHost = path.join(OPENCLAW_CONFIG_ROOT, 'media');
+    if (existsSync(mediaHost) && path.resolve(mediaHost) !== path.resolve(WORKSPACE_HOST_ROOT)) {
+      collected.push(...listRecentHostFiles(mediaHost, { limit: limit * 2, maxDepth: 4, pathRoot: mediaHost }));
+    }
+    const dataMedia = path.join(OPENCLAW_DATA_ROOT, 'media');
+    if (existsSync(dataMedia) && path.resolve(dataMedia) !== path.resolve(mediaHost)) {
+      collected.push(...listRecentHostFiles(dataMedia, { limit: limit, maxDepth: 4, pathRoot: dataMedia }));
+    }
+    collected.sort((a, b) => (b.mtimeMs || 0) - (a.mtimeMs || 0));
+    const seen = new Set();
+    const files = [];
+    for (const f of collected) {
+      const key = String(f.filePath || f.path || f.name).toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      files.push(f);
+      if (files.length >= limit) break;
+    }
+    res.json({ files, source: 'vps', limit, scannedAt: Date.now() });
+  } catch (e) {
+    console.warn('[files/recent]', e?.message || e);
+    res.status(500).json({ error: e?.message || 'Failed to list recent files', files: [] });
+  }
+});
+
 app.get('/files', (req, res) => {
  try {
  const resolved = resolveWorkspacePathForFiles(req.query.path || '/');
