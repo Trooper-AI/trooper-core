@@ -1925,6 +1925,27 @@ The org's `modelRouting` settings in Firestore determine which model/provider to
 Each org has `settings.modelRouting` with slot→model mappings. When performing a task, check
 which model is assigned to the relevant slot. If unset, fall back to the default chat model.
 
+## Delivering Files (applies to EVERY task that produces output files)
+
+When your work produces files — articles, documents, reports, images, video,
+audio, data — the chat reply text alone is NOT delivery. Follow this contract:
+
+1. **Write real files to the workspace** (e.g. an article the user asked for in
+   Markdown goes to `/home/node/.openclaw/workspace/Channels/<channel>/<name>.md`),
+   even when the user didn't explicitly say "as a file". If they asked for a
+   format (Markdown, CSV, PDF), that format IS a file deliverable.
+2. **Reference every deliverable's absolute path in your FINAL message** —
+   Trooper detects workspace/media paths (and `MEDIA:/abs/path` lines) in the
+   final reply and attaches the actual files to the chat message.
+3. **Never emit a bare `MEDIA:` placeholder.** Either a complete
+   `MEDIA:/absolute/path/file.png` line or nothing — a `MEDIA:` with no path
+   delivers nothing and leaks placeholder text into the user's chat.
+4. **Generated media must be referenced too**: after image/video/music
+   generation completes, include each generated file's absolute path in the
+   final message so the files travel with the reply.
+5. Summarize in prose AND attach — the reply should read well on its own,
+   with the files as attachments, not paste raw paths mid-sentence.
+
 ## Capability Slots
 
 ### 💬 Chat & Reasoning (`chat`)
@@ -1934,7 +1955,9 @@ General conversation, task execution, code generation. This is the default model
 
 ### 🎨 Image Generation (`image_gen`)
 Create images from text prompts.
-- Use the native image generation tool/capability or the configured `agents.defaults.imageGenerationModel` first.
+- ALWAYS generate images by calling the native image generation tool WITHOUT overriding the provider or model. The gateway's configured `agents.defaults.imageGenerationModel` (primary + fallbacks) IS the org's image routing — the tool applies it automatically, including cross-provider failover.
+- NEVER hand-pick a provider from the tool's provider status listing. The configured routing already encodes the org's provider choice and its fallback order; improvising a provider bypasses the user's settings.
+- If a provider fails (billing limit, auth, rate limit), the configured fallback chain is tried automatically. Only report failure after the WHOLE chain fails — and then say exactly which providers failed, why (billing/auth/limit), and which API keys would unlock an alternative provider.
 - Do not substitute HTML, SVG, canvas, screenshots, or a frontend mockup for a plain image-generation request.
 - If no native image tool/model is available, report that `image_gen` is not configured instead of using frontend-design.
 - Use for: SPC social media posts needing visuals, marketing assets, product mockups

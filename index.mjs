@@ -84,6 +84,7 @@ import {
   resolveProviderRuntimeContext,
   stripGatewayErrorPrefix,
 } from './lib/provider-runtime.mjs';
+import { buildCrossProviderImageFallbacks } from './lib/image-generation-routing.mjs';
 import { startFleetHeartbeat } from './lib/fleet-heartbeat.mjs';
 import {
   buildPostCompactionRecoveryMessage,
@@ -159,7 +160,13 @@ import {
 import {
   isOpenClawPluginHostPath,
   writePluginFilesFromAbsolutePaths,
+  syncGatewayPlugin,
 } from './lib/gateway-plugins.mjs';
+import {
+  RUN_COMPLETION_PLUGIN_ID,
+  RunTerminalMarkerStore,
+  buildRunCompletionPluginFiles,
+} from './lib/run-completion-plugin.mjs';
 
 const OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write', 'operator.approvals', 'operator.pairing', 'operator.talk.secrets'];
 
@@ -1676,7 +1683,7 @@ function applyMediaGenerationRoutingToOpenClawConfig(config, routing = {}, fallb
   }
 
   const primary = normalizeRoutingModelIdForOpenClaw(routing?.[slot]);
-  const slotFallbacks = Array.isArray(fallbacks?.[slot])
+  let slotFallbacks = Array.isArray(fallbacks?.[slot])
    ? fallbacks[slot].map(normalizeRoutingModelIdForOpenClaw).filter(Boolean)
    : [];
 
@@ -1686,6 +1693,16 @@ function applyMediaGenerationRoutingToOpenClawConfig(config, routing = {}, fallb
     changed = true;
    }
    continue;
+  }
+
+  if (slot === 'image_gen') {
+   // Match the gateway-start augmentation so change detection compares against
+   // the cross-provider chain that actually lands on disk.
+   slotFallbacks = buildCrossProviderImageFallbacks({
+    primary,
+    fallbacks: slotFallbacks,
+    hasProviderCredential: bridgeHasImageProviderCredential,
+   }).fallbacks;
   }
 
   const nextValue = slotFallbacks.length ? { primary, fallbacks: slotFallbacks } : primary;
@@ -1803,11 +1820,54 @@ function sanitizeUnresolvedProviderEnvSecrets(providers, repairs = []) {
  return repairs;
 }
 
+/** Credential probe for image-capable providers (env + auth-profiles.json). */
+function bridgeHasImageProviderCredential(provider) {
+ const envNames = provider === 'fal'
+  ? ['FAL_KEY', 'FAL_API_KEY']
+  : (PROVIDER_ENV_NAME_MAP[provider] || []);
+ const hasEnvKey = envNames.some((name) => {
+  const value = String(readEnvValue(name) || '').trim();
+  return !!value && !/^__UNSET_/i.test(value);
+ });
+ if (hasEnvKey) return true;
+ if (provider === 'fal') return false;
+ return hasRuntimeProviderCredential(provider);
+}
+
+/**
+ * Image routing chains written by Trooper were historically single-provider
+ * (all OpenRouter), so one provider-level billing/auth failure killed every
+ * fallback at once. Extend agents.defaults.imageGenerationModel with the
+ * default image model of each credentialed provider not already in the chain
+ * so the image_generate tool can genuinely fail over across providers.
+ */
+function augmentImageGenerationFallbacksForGatewayStart(config, repairs) {
+ const defaults = config?.agents?.defaults;
+ if (!defaults || typeof defaults !== 'object' || Array.isArray(defaults)) return;
+ const current = defaults.imageGenerationModel;
+ const primary = typeof current === 'string'
+  ? current.trim()
+  : String(current?.primary || '').trim();
+ if (!primary) return;
+ const fallbacks = current && typeof current === 'object' && Array.isArray(current.fallbacks)
+  ? current.fallbacks
+  : [];
+ const { fallbacks: nextFallbacks, added } = buildCrossProviderImageFallbacks({
+  primary,
+  fallbacks,
+  hasProviderCredential: bridgeHasImageProviderCredential,
+ });
+ if (!added.length) return;
+ defaults.imageGenerationModel = { primary, fallbacks: nextFallbacks };
+ repairs.push(`agents.defaults.imageGenerationModel: added cross-provider image fallbacks (${added.join(', ')})`);
+}
+
 function prepareOpenClawConfigForGatewayStart(config) {
  const next = cloneJson(config);
  const repairs = [];
  normalizeOpenClawAgentsList(next);
  sanitizeBravePluginConfigForGatewayStart(next, repairs);
+ augmentImageGenerationFallbacksForGatewayStart(next, repairs);
 
  const providers = next?.models?.providers;
  if (providers && typeof providers === 'object' && !Array.isArray(providers)) {
@@ -2486,6 +2546,8 @@ class OpenClawGateway {
  try {
  upsertBridgePairedDevice({ force: true, reason: 'connect' });
  } catch (e) { console.warn('[OpenClaw] paired.json auto-approve failed:', e.message); }
+ // Recover any runs whose terminal fired while the socket was down.
+ setTimeout(() => { this.recoverDetachedRunsViaAgentWait().catch(() => {}); }, 1500);
  resolve(true);
  })
  .catch((err) => {
@@ -3905,6 +3967,39 @@ function extractPatchFilePaths(patchText = '') {
     pending.reject(new Error(data?.error || data?.message || `OpenClaw run ${lifecycleSignal.phase}`));
    }
    this._pendingRequests.delete(id);
+  } else if (
+   pending
+   && pending.expectFinal
+   && runId
+   && (runId === mainRunId || (pending.runId && runId === pending.runId))
+   && !pending.lifecycleResolveTimer
+  ) {
+   // The gateway guarantees a lifecycle end/error per run, but the final res
+   // frame can be dropped even on a live socket (observed: run finished,
+   // promise never resolved, Trooper stuck "Working" forever, no watchdog
+   // because chat runs disable the inactivity timeout). Prefer the richer
+   // res payload when it races in; otherwise resolve from the lifecycle
+   // terminal after a short grace so the run ALWAYS completes.
+   const lifecycleRunId = runId || mainRunId || pending.runId || null;
+   const lifecycleSuccessful = lifecycleSignal.successful;
+   const lifecycleError = data?.error || data?.message || `OpenClaw run ${lifecycleSignal.phase}`;
+   pending.lifecycleResolveTimer = setTimeout(() => {
+    const still = this._pendingRequests.get(id);
+    if (!still) return;
+    this._pendingRequests.delete(id);
+    console.warn(`[OpenClaw] Final res frame missing after lifecycle terminal — resolving run ${String(lifecycleRunId || '').slice(0, 8)} from lifecycle signal`);
+    if (lifecycleSuccessful) {
+     still.resolve({
+      status: 'completed',
+      runId: lifecycleRunId,
+      sessionKey,
+      resolvedBy: 'lifecycle_terminal',
+     });
+    } else {
+     still.reject(new Error(lifecycleError));
+    }
+   }, 2000);
+   if (typeof pending.lifecycleResolveTimer.unref === 'function') pending.lifecycleResolveTimer.unref();
   }
  }
  // A lifecycle error can be a recoverable model/tool/compaction attempt while
@@ -4140,6 +4235,7 @@ function extractPatchFilePaths(patchText = '') {
  resolve: (payload) => { clearTimeout(timeout); this._activeTimeoutReset = null; resolve(payload); },
  reject: (err) => { clearTimeout(timeout); this._activeTimeoutReset = null; reject(err); },
   expectFinal: !steerMode, runId: null, idempotencyKey,
+  sessionKey: sessionKey || null,
   preserveAcrossReconnect: !steerMode,
   transportDetached: false,
  });
@@ -4480,6 +4576,68 @@ const formattedToolLog = toolLog.map(t => ({
   }
  }
 
+ /**
+  * Resolve a pending main run from an out-of-band completion signal (the
+  * trooper-run-completion gateway plugin POSTs agent_end to the bridge).
+  * Matches by runId first, then sessionKey. Returns true when a pending
+  * run was resolved.
+  */
+ resolvePendingRunExternally({ runId = null, sessionKey = null, successful = true, source = 'plugin_agent_end' } = {}) {
+  for (const [id, pending] of this._pendingRequests.entries()) {
+   if (!pending?.expectFinal) continue;
+   const matchesRun = runId && pending.runId && String(pending.runId) === String(runId);
+   const matchesSession = !matchesRun && sessionKey && pending.sessionKey && pending.sessionKey === sessionKey;
+   if (!matchesRun && !matchesSession) continue;
+   this._pendingRequests.delete(id);
+   console.log(`[OpenClaw] Run ${String(runId || pending.runId || '').slice(0, 8)} resolved externally (${source})`);
+   if (successful) {
+    pending.resolve({
+     status: 'completed',
+     runId: runId || pending.runId || null,
+     sessionKey: sessionKey || pending.sessionKey || null,
+     resolvedBy: source,
+    });
+   } else {
+    try { pending.reject(new Error(`OpenClaw run ended with error (${source})`)); } catch {}
+   }
+   return true;
+  }
+  return false;
+ }
+
+ /**
+  * After a reconnect, terminal events that fired during the gap are lost.
+  * agent.wait returns the terminal snapshot once a lifecycle end/error was
+  * seen for the runId — recover every preserved (transport-detached) run.
+  */
+ async recoverDetachedRunsViaAgentWait() {
+  const detached = [...this._pendingRequests.entries()]
+   .filter(([, pending]) => pending?.transportDetached === true && pending.runId);
+  for (const [id, pending] of detached) {
+   try {
+    const snapshot = await this.request('agent.wait', { runId: pending.runId, timeoutMs: 5000 }, { timeoutMs: 10000 });
+    const status = String(snapshot?.status || '').toLowerCase();
+    if (!status || status === 'timeout') continue; // still running — leave pending
+    if (!this._pendingRequests.has(id)) continue;
+    this._pendingRequests.delete(id);
+    console.log(`[OpenClaw] Run ${String(pending.runId).slice(0, 8)} recovered via agent.wait (${status})`);
+    if (status === 'ok') {
+     pending.resolve({
+      status: 'completed',
+      runId: pending.runId,
+      sessionKey: pending.sessionKey || null,
+      resolvedBy: 'agent_wait_recovery',
+     });
+    } else {
+     try { pending.reject(new Error(snapshot?.error || `OpenClaw run ended with ${status}`)); } catch {}
+    }
+   } catch {
+    // agent.wait unsupported or transient failure — the lifecycle/plugin
+    // signals remain as fallbacks; never reject a run on recovery errors.
+   }
+  }
+ }
+
  async request(method, params = {}, { timeoutMs = 10000 } = {}) {
   if (!method) throw new Error('Gateway request method is required');
   const ok = await this.ensureConnected();
@@ -4522,6 +4680,9 @@ try {
  console.warn('[OpenClaw] Startup pairing repair failed:', err.message);
 }
 const gateway = new OpenClawGateway(OPENCLAW_URL, OPENCLAW_GATEWAY_TOKEN);
+// Durable-ish (in-memory, TTL'd) record of run terminals pushed by the
+// trooper-run-completion gateway plugin — pollable long after the SSE died.
+const runTerminalMarkers = new RunTerminalMarkerStore();
 
 // ── Live agent event forwarding (cron, background runs → Trooper frontend) ──
 gateway._onAnyAgentEvent = (stream, data, runId) => {
@@ -15130,7 +15291,17 @@ app.get('/api/session-status', async (req, res) => {
     const sessionKey = String(req.query.sessionKey || '').trim();
     if (!sessionKey) return res.status(400).json({ error: 'sessionKey is required' });
     const session = await gateway.fetchSessionSnapshot(sessionKey);
-    res.json({ ok: true, session });
+    // Terminal markers let pollers learn a run ended even when the snapshot
+    // is unavailable or the session row keeps a non-idle status.
+    const lastRunTerminal = runTerminalMarkers.get({ sessionKey });
+    if (!session) {
+      if (!gateway.connected) {
+        // Unreachable gateway is UNKNOWN — pollers must not read it as idle.
+        return res.json({ ok: false, error: 'gateway_unreachable', session: null, lastRunTerminal });
+      }
+      return res.json({ ok: true, session: null, reason: 'not_found', lastRunTerminal });
+    }
+    res.json({ ok: true, session, lastRunTerminal });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -16274,6 +16445,37 @@ app.post('/local-model/probe', async (req, res) => {
 // Skills (e.g. browserbase, browserbase-sessions) call this to report
 // their live view URL so the bridge can show it in the frontend.
 // Accessible from inside the Docker container at host.docker.internal:PORT
+// ── Run completion push (trooper-run-completion gateway plugin) ──────────
+// agent_end/session_end hooks inside the gateway POST here the moment a run
+// terminates — independent of the WS res frame the bridge otherwise needs.
+// Reachable from the container at host.docker.internal:PORT.
+app.post('/internal/run-complete', (req, res) => {
+ try {
+  const remote = String(req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
+  const isLocal = remote === '::1'
+   || /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(remote);
+  const token = String(req.headers['x-trooper-bridge-token'] || '');
+  if (!isLocal && (!BRIDGE_AUTH_TOKEN || token !== BRIDGE_AUTH_TOKEN)) {
+   return res.status(403).json({ error: 'forbidden' });
+  }
+  const { kind, runId, sessionKey, success, reason } = req.body || {};
+  const marker = runTerminalMarkers.record({ kind, runId, sessionKey, success, reason });
+  let resolvedPending = false;
+  if (kind === 'agent_end') {
+   resolvedPending = gateway.resolvePendingRunExternally({
+    runId,
+    sessionKey,
+    successful: success !== false,
+    source: 'plugin_agent_end',
+   });
+  }
+  console.log(`[bridge] run-complete push: ${kind || 'unknown'} run=${String(runId || '').slice(0, 8)} resolvedPending=${resolvedPending}`);
+  res.json({ ok: true, resolvedPending, marker });
+ } catch (error) {
+  res.status(500).json({ ok: false, error: error.message });
+ }
+});
+
 app.post('/api/browser-session', (req, res) => {
  const { liveViewUrl, sessionId, provider } = req.body;
  if (!liveViewUrl) {
@@ -16511,6 +16713,23 @@ server.listen(PORT, '0.0.0.0', () => {
  } catch (error) {
   console.warn(`[bridge] ensureLocalModelAuthReadyForAllAgents failed: ${error.message}`);
  }
+ // Keep the run-completion push plugin present in the gateway (best-effort;
+ // it activates on the next gateway restart — never force one from here).
+ setTimeout(() => {
+  try {
+   const files = buildRunCompletionPluginFiles({ bridgePort: PORT, token: BRIDGE_AUTH_TOKEN || '' });
+   const result = syncGatewayPlugin({
+    pluginId: RUN_COMPLETION_PLUGIN_ID,
+    files,
+    mkdirSync,
+    writeFileSync,
+    execSync,
+   });
+   console.log(`[bridge] run-completion plugin synced (installed=${result.installed}, extensionsOverwritten=${result.extensionsOverwritten})`);
+  } catch (error) {
+   console.warn(`[bridge] run-completion plugin sync failed: ${error.message}`);
+  }
+ }, 20_000);
  // Soft-start: strip unresolved env secrets + restart path if gateway is dead.
  try {
   const repaired = repairOpenClawConfigForGatewayStart('startup');
