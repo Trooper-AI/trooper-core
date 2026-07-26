@@ -168,6 +168,12 @@ import {
   syncGatewayPlugin,
 } from './lib/gateway-plugins.mjs';
 import {
+  CodexDeviceAuthJobManager,
+  DEFAULT_CODEX_ACP_CONTAINER_HOME,
+  hasValidNativeCodexChatGptAuth,
+  redactCodexDeviceAuthOutput,
+} from './lib/codex-device-auth.mjs';
+import {
   RUN_COMPLETION_PLUGIN_ID,
   RunTerminalMarkerStore,
   buildRunCompletionPluginFiles,
@@ -5500,6 +5506,15 @@ const CODEX_OAUTH_SIDECAR_DIR = openclawConfigPath('credentials', 'auth-profiles
 // ChatGPT/Codex subscription.
 const CODEX_ACP_HOME = openclawConfigPath('acpx', 'codex-home');
 const CODEX_ACP_AUTH_PATH = path.join(CODEX_ACP_HOME, 'auth.json');
+// `/opt/openclaw-data/config` on the bridge host is mounted as
+// `/home/node/.openclaw` inside the gateway. The managed device-auth process
+// must use this container path, not the bridge host path and not ~/.codex.
+const CODEX_ACP_CONTAINER_HOME = DEFAULT_CODEX_ACP_CONTAINER_HOME;
+const codexDeviceAuthJobs = new CodexDeviceAuthJobManager({
+ containerName: OPENCLAW_GATEWAY_CONTAINER,
+ codexHome: CODEX_ACP_CONTAINER_HOME,
+ execFile: runExecFileAsync,
+});
 const AUTH_PROFILE_SECRET_DIR = openclawDataPath('auth-profile-secrets');
 const AUTH_PROFILE_SECRET_FILE = path.join(AUTH_PROFILE_SECRET_DIR, 'auth-profile-secret-key');
 
@@ -5750,8 +5765,17 @@ function codexOAuthTokensFromProfile(profile) {
  return { access, refresh, idToken, accountId };
 }
 
-function syncCodexOAuthToAcpHome(authDoc) {
+function syncCodexOAuthToAcpHome(authDoc, { overwriteNative = true } = {}) {
  try {
+  // A passive status refresh must not clobber credentials that were just
+  // created by `codex login --device-auth` in the ACP-owned CODEX_HOME. The
+  // explicit auth-profile save path remains authoritative (the default).
+  if (!overwriteNative) {
+   try {
+    const existing = JSON.parse(readFileSync(CODEX_ACP_AUTH_PATH, 'utf8'));
+    if (hasValidNativeCodexChatGptAuth(existing)) return false;
+   } catch {}
+  }
   const selected = pickCodexOAuthProfile(authDoc);
   const tokens = codexOAuthTokensFromProfile(selected?.profile);
   if (!tokens) return false;
@@ -5788,10 +5812,7 @@ function syncCodexOAuthToAcpHome(authDoc) {
 function getCodexAcpNativeAuthStatus() {
  try {
   const auth = JSON.parse(readFileSync(CODEX_ACP_AUTH_PATH, 'utf8'));
-  const tokens = auth?.tokens && typeof auth.tokens === 'object' ? auth.tokens : {};
-  const hasSubscriptionSession = auth?.auth_mode === 'chatgpt'
-   && Boolean(tokens.access_token)
-   && Boolean(tokens.refresh_token);
+  const hasSubscriptionSession = hasValidNativeCodexChatGptAuth(auth);
   if (hasSubscriptionSession) {
    return {
     connected: true,
@@ -13017,6 +13038,76 @@ app.post('/gateway/plugins/install-package', async (req, res) => {
  }
 });
 
+// ── Managed Codex device authorization ─────────────────────────────────
+// This is intentionally separate from /gateway/exec. It only runs a fixed
+// Codex CLI lifecycle as the actual node user inside the gateway container,
+// and its in-memory job output is redacted before it reaches the caller.
+function getCodexDeviceAuthJobId(req) {
+ const jobId = String(req.params?.jobId || '').trim();
+ if (!jobId || jobId.length > 128) return null;
+ return jobId;
+}
+
+function sendCodexDeviceAuthError(res, error) {
+ const code = error?.code === 'CODEX_CLI_MISSING' ? 409 : 500;
+ res.status(code).json({
+  success: false,
+  error: redactCodexDeviceAuthOutput(error?.message || 'Codex device authorization failed', 800),
+  availability: error?.availability || undefined,
+ });
+}
+
+app.get('/gateway/codex/device-auth/availability', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+  const availability = await codexDeviceAuthJobs.getAvailability();
+  const active = codexDeviceAuthJobs.currentActiveJob();
+  const activeJob = active ? codexDeviceAuthJobs.getStatus(active.id) : null;
+  res.json({
+   success: true,
+   ...availability,
+   status: availability.authenticated ? 'connected' : (availability.installed ? 'ready' : 'missing'),
+   state: availability.authenticated ? 'connected' : (availability.installed ? 'ready' : 'missing'),
+   activeJob,
+  });
+ } catch (error) {
+  sendCodexDeviceAuthError(res, error);
+ }
+});
+
+app.post('/gateway/codex/device-auth/start', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+  const result = await codexDeviceAuthJobs.start({
+   force: req.body?.force === true,
+   // A one-click VPS connection should repair a missing CLI, while callers
+   // that only want diagnostics can explicitly opt out.
+   installIfMissing: req.body?.installIfMissing !== false,
+  });
+  res.status(result.alreadyAuthenticated ? 200 : 202).json({ success: true, ...result });
+ } catch (error) {
+  sendCodexDeviceAuthError(res, error);
+ }
+});
+
+app.get('/gateway/codex/device-auth/:jobId', (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ const jobId = getCodexDeviceAuthJobId(req);
+ if (!jobId) return res.status(400).json({ success: false, error: 'jobId is required' });
+ const job = codexDeviceAuthJobs.getStatus(jobId);
+ if (!job) return res.status(404).json({ success: false, error: 'Codex device authorization job not found' });
+ res.json({ success: true, ...job });
+});
+
+app.post('/gateway/codex/device-auth/:jobId/cancel', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ const jobId = getCodexDeviceAuthJobId(req);
+ if (!jobId) return res.status(400).json({ success: false, error: 'jobId is required' });
+ const job = await codexDeviceAuthJobs.cancel(jobId);
+ if (!job) return res.status(404).json({ success: false, error: 'Codex device authorization job not found' });
+ res.status(202).json({ success: true, ...job });
+});
+
 app.post('/gateway/exec', async (req, res) => {
  try {
   const result = await runGatewayPluginWorker('exec', {
@@ -15720,10 +15811,11 @@ app.get('/acp/doctor', async (req, res) => {
 app.get('/acp/agents', async (req, res) => {
  // Auth profiles can be refreshed independently from the bridge process.
  // Reconcile the selected ChatGPT/Codex OAuth session into the ACP adapter's
- // native CODEX_HOME before reporting availability.
+ // native CODEX_HOME before reporting availability, but do not overwrite a
+ // valid device-auth session that already belongs to that adapter.
  try {
   const authDoc = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
-  syncCodexOAuthToAcpHome(authDoc);
+  syncCodexOAuthToAcpHome(authDoc, { overwriteNative: false });
  } catch {}
  const agents = Object.entries(ACP_HARNESS_CATALOG).map(([name, meta]) => {
   const connection = getAcpHarnessConnectionState(name);
