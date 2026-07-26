@@ -8113,6 +8113,12 @@ function resolveWorkspacePathForFiles(rawPath = '/', { file = false } = {}) {
  }
 
  if (p.startsWith(WORKSPACE_CONTAINER_ROOT)) {
+  // The container workspace is a bind-mount of the host workspace: prefer the
+  // direct host read (streaming, no docker exec) whenever the file exists there.
+  const hostEquivalent = path.join(WORKSPACE_HOST_ROOT, stripWorkspaceRoot(p));
+  if (existsSync(hostEquivalent)) {
+   return { kind: 'host', realPath: hostEquivalent, displayPath: workspaceUiPathFromReal(p) };
+  }
   return { kind: 'container', realPath: p, displayPath: workspaceUiPathFromReal(p) };
  }
 
@@ -11141,6 +11147,7 @@ app.get('/agents/:name/workspace', (req, res) => {
 
  try {
  const files = {};
+ const filesMeta = {};
  const walkWorkspaceMarkdown = (dirPath, prefix = '') => {
  for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
  if (entry.name.startsWith('.')) continue;
@@ -11151,11 +11158,18 @@ app.get('/agents/:name/workspace', (req, res) => {
  continue;
  }
  if (!/\.(md|markdown|txt)$/i.test(entry.name)) continue;
- try { files[relPath] = readFileSync(fullPath, 'utf8'); } catch { files[relPath] = null; }
+ try {
+ files[relPath] = readFileSync(fullPath, 'utf8');
+ const stat = statSync(fullPath);
+ filesMeta[relPath] = { size: stat.size, modified: stat.mtimeMs };
+ } catch { files[relPath] = null; }
  }
  };
  walkWorkspaceMarkdown(workspacePath);
- res.json({ agent: name, workspace: workspacePath, files });
+ // filesComplete tells consumers this map carries full, uncapped file
+ // content; older bridges omit it, which downstream treats as "unknown"
+ // and refuses to present fallback content as a complete file.
+ res.json({ agent: name, workspace: workspacePath, files, filesMeta, filesComplete: true });
  } catch (err) {
  res.status(500).json({ error: err.message });
  }
