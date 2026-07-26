@@ -18,6 +18,7 @@ import {
   buildScreenshotFramePayload,
   extractStructuredToolResult,
   extractHistoryToolEvents,
+  forwardToolEventPayload,
   normalizeBridgeEventPayload,
   normalizeToolEventPayload,
 } from './lib/event-contracts.mjs';
@@ -3676,6 +3677,29 @@ class OpenClawGateway {
  let lastToolTextSnapshot = ''; // text snapshot at last tool boundary
  if (onEvent) onEvent('model_start', { eventType: 'model_start', confidence: 'native', model: effectiveRequestedModel, time: Date.now() });
  const toolLog = [];
+ const toolCallIdFromEvent = (event = {}) => (
+   event?.toolCallId || event?.tool_call_id || event?.id || undefined
+ );
+ const pendingToolLogEntryForResult = (event = {}) => {
+   const toolCallId = toolCallIdFromEvent(event);
+   if (toolCallId) {
+     for (let index = toolLog.length - 1; index >= 0; index -= 1) {
+       const entry = toolLog[index];
+       if (entry?.status === 'called' && entry.toolCallId === toolCallId) return { entry, index };
+     }
+   }
+   const explicitTool = String(event?.name || event?.tool || '').trim();
+   if (explicitTool) {
+     for (let index = toolLog.length - 1; index >= 0; index -= 1) {
+       const entry = toolLog[index];
+       if (entry?.status === 'called' && entry.tool === explicitTool) return { entry, index };
+     }
+   }
+   for (let index = toolLog.length - 1; index >= 0; index -= 1) {
+     if (toolLog[index]?.status === 'called') return { entry: toolLog[index], index };
+   }
+   return { entry: null, index: -1 };
+ };
  let lifecycleDepth = 0; // track nested lifecycle start/end for sub-agent detection
  let emittedMainRunStart = false;
  let sawLiveStreamPayload = false;
@@ -3815,20 +3839,16 @@ class OpenClawGateway {
  const subToolName = data.name || data.tool || 'unknown';
  const subToolParams = data.input || data.params || {};
  const subResult = extractStructuredToolResult(data.result ?? data.content ?? data.output);
- if (onEvent) onEvent('subagent_tool_result', {
+ const subToolResultPayload = forwardToolEventPayload('tool_result', data, {
  tool: subToolName,
- toolCallId: data.id || data.toolCallId || undefined,
+ toolCallId: toolCallIdFromEvent(data),
  params: subToolParams,
  result: subResult,
- ...(data.details ? { details: data.details } : {}),
- imageGeneration: buildImageGenerationEventMetadata({
-  tool: subToolName,
-  params: subToolParams,
-  result: subResult,
-  details: data.details,
- }),
  success: !data.is_error,
  summary: previewString(summary, 500),
+ });
+ if (onEvent) onEvent('subagent_tool_result', {
+ ...subToolResultPayload,
  subAgentRunId: runId,
  parentRunId: subInfo.parentRunId,
  depth: subInfo.depth,
@@ -3935,7 +3955,7 @@ function extractPatchFilePaths(patchText = '') {
  if (stream === 'tool_use' && data) {
  const toolName = data.name || data.tool || 'processing';
  const toolParams = data.input || data.params || {};
- const toolCallId = data.id || data.toolCallId || undefined;
+ const toolCallId = toolCallIdFromEvent(data);
  // Snapshot text before this tool call
  const currentText = textChunks.join('');
  const textSinceLastTool = currentText.slice(lastToolTextSnapshot.length).trim();
@@ -3957,14 +3977,16 @@ function extractPatchFilePaths(patchText = '') {
  return;
  }
  if (stream === 'tool_result' && data) {
- const last = toolLog[toolLog.length - 1];
+ const { entry: last, index: toolLogIndex } = pendingToolLogEntryForResult(data);
  if (last && last.status === 'called') {
    last.status = data.is_error ? 'failed' : 'ok';
    last.durationMs = Date.now() - (last.startedAt || Date.now());
    const raw = typeof data.content === 'string' ? data.content : JSON.stringify(data.content || data.result || data, null, 2).slice(0, 4000);
-   const structuredResult = extractStructuredToolResult(data.result ?? data.content);
+   const structuredResult = extractStructuredToolResult(data.result ?? data.content ?? data.output);
+   const rawResult = data.result ?? data.output;
+   const result = structuredResult ?? (rawResult && typeof rawResult === 'object' ? rawResult : null);
    const summary = summarizeToolResult(last.tool, last.params, raw || data.summary || '', !data.is_error);
-   last.result = structuredResult;
+   last.result = result;
    last.summary = summary;
   if (_projectFolder) {
     const toolLower = String(last.tool || '').toLowerCase();
@@ -3974,28 +3996,28 @@ function extractPatchFilePaths(patchText = '') {
     } else if (toolLower === 'apply_patch') {
       const patchPaths = extractPatchFilePaths(last.params?.patch || raw || data.summary || '');
       for (const patchPath of patchPaths) relocateIntoProjectFolder(_projectFolder, patchPath);
-    }
+   }
   }
    const toolResultPayload = normalizeToolEventPayload('tool_result', {
+    ...data,
     tool: last.tool,
-    toolCallId: last.toolCallId,
+    toolCallId: last.toolCallId || toolCallIdFromEvent(data),
     params: last.params,
-    result: structuredResult,
+    result,
     success: !data.is_error,
     summary,
     raw,
     durationMs: last.durationMs,
-    index: toolLog.length - 1,
+    index: toolLogIndex,
     startedAt: last.startedAt,
     confidence: 'native',
     imageGeneration: buildImageGenerationEventMetadata({
       tool: last.tool,
       params: last.params,
-      result: structuredResult,
+      result,
       details: data.details,
     }),
    });
-   if (data.details) toolResultPayload.details = data.details;
 
    // Extract details.media from tool_result (OpenClaw v2026.3.22+ — browser/canvas/nodes snapshots)
    const detailsMedia = data.details?.media && typeof data.details.media === 'object' && !Array.isArray(data.details.media) ? data.details.media : null;
@@ -4158,7 +4180,13 @@ function extractPatchFilePaths(patchText = '') {
  console.warn(`[OpenClaw] Lifecycle error recorded without closing active run ${runId || mainRunId || sessionKey}`);
  }
  if (stream === 'tool_use' && data) {
- const entry = { tool: data.name || data.tool || 'unknown', params: data.input || data.params || {}, status: 'called', startedAt: Date.now() };
+ const entry = {
+  tool: data.name || data.tool || 'unknown',
+  toolCallId: toolCallIdFromEvent(data),
+  params: data.input || data.params || {},
+  status: 'called',
+  startedAt: Date.now(),
+ };
  // Capture write tool content for artifact rendering (HTML/JSX/React files)
  const ARTIFACT_EXTS = /\.(html?|jsx|tsx|css|svg)$/i;
  if ((entry.tool === 'write' || entry.tool === 'Write') && entry.params) {
@@ -4181,7 +4209,7 @@ function extractPatchFilePaths(patchText = '') {
  toolLog.push(entry);
  if (onEvent) onEvent('tool_start', {
   tool: entry.tool,
-  toolCallId: data.id || data.toolCallId || undefined,
+  toolCallId: entry.toolCallId,
   params: entry.params,
   imageGeneration: buildImageGenerationEventMetadata({ tool: entry.tool, params: entry.params }),
   index: toolLog.length - 1,
@@ -4216,7 +4244,7 @@ function extractPatchFilePaths(patchText = '') {
  }
  }
  if (stream === 'tool_result' && data) {
- const last = toolLog[toolLog.length - 1];
+ const { entry: last, index: toolLogIndex } = pendingToolLogEntryForResult(data);
  if (last && last.status === 'called') {
  last.status = data.is_error ? 'failed' : 'ok';
  last.durationMs = Date.now() - (last.startedAt || Date.now());
@@ -4240,22 +4268,19 @@ function extractPatchFilePaths(patchText = '') {
  if (last?.tool === 'sessions_spawn' || last?.tool === 'Task') {
  resetSubagentDrainWait();
  }
- if (onEvent) onEvent('tool_result', {
- tool: last?.tool || 'unknown',
- toolCallId: data.id || data.toolCallId || undefined,
- params: last?.params || {},
- result: extractStructuredToolResult(data.result ?? data.content ?? data.output),
- ...(data.details ? { details: data.details } : {}),
- imageGeneration: buildImageGenerationEventMetadata({
-  tool: last?.tool || 'unknown',
-  params: last?.params || {},
-  result: extractStructuredToolResult(data.result ?? data.content ?? data.output),
-  details: data.details,
- }),
- success: !data.is_error,
- summary: last?.summary || '',
- index: toolLog.length - 1,
+ const legacyRawResult = data.result ?? data.output;
+ const legacyResult = extractStructuredToolResult(data.result ?? data.content ?? data.output)
+  ?? (legacyRawResult && typeof legacyRawResult === 'object' ? legacyRawResult : null);
+ const legacyToolResultPayload = forwardToolEventPayload('tool_result', data, {
+  tool: last?.tool || data.name || data.tool || 'unknown',
+  toolCallId: last?.toolCallId || toolCallIdFromEvent(data),
+  params: last?.params || data.input || data.params || {},
+  result: legacyResult,
+  success: !data.is_error,
+  summary: last?.summary || data.summary || '',
+  index: toolLogIndex,
  });
+ if (onEvent) onEvent('tool_result', legacyToolResultPayload);
  // Emit file_artifact for renderable files created by write tool
  if (last?._pendingArtifact && !data.is_error) {
    const art = last._pendingArtifact;
@@ -4854,14 +4879,23 @@ gateway._onAnyAgentEvent = (stream, data, runId) => {
         ? 'tool_result'
         : stream;
     const toolName = data?.name || data?.tool || null;
+    const toolEventData = stream === 'tool_use'
+      ? forwardToolEventPayload('tool_start', data, {
+        tool: toolName || 'unknown',
+        params: data?.input || data?.params || {},
+      })
+      : stream === 'tool_result'
+        ? forwardToolEventPayload('tool_result', data, {
+          tool: toolName || 'unknown',
+          success: !data?.is_error,
+          summary: typeof data?.content === 'string' ? data.content.slice(0, 500) : (data?.summary || ''),
+        })
+        : null;
     const payload = {
       event: eventType,
       runId: runId || null,
-      data: {
+      data: toolEventData || {
         tool: toolName,
-        params: stream === 'tool_use' ? (data?.input || data?.params || {}) : undefined,
-        success: stream === 'tool_result' ? !data?.is_error : undefined,
-        summary: stream === 'tool_result' ? (typeof data?.content === 'string' ? data.content.slice(0, 500) : '') : undefined,
         phase: (stream === 'lifecycle' || stream === 'compaction') ? data?.phase : undefined,
         completed: stream === 'compaction' ? data?.completed : undefined,
         willRetry: stream === 'compaction' ? data?.willRetry : undefined,
