@@ -21,6 +21,10 @@ import {
   normalizeBridgeEventPayload,
   normalizeToolEventPayload,
 } from './lib/event-contracts.mjs';
+import {
+  buildImageGenerationDefaultsPrompt,
+  buildImageGenerationEventMetadata,
+} from './lib/image-generation-defaults.mjs';
 import { ensureXvnc } from './lib/xvnc.mjs';
 import cors from 'cors';
 import { EventEmitter } from 'events';
@@ -167,6 +171,11 @@ import {
   RunTerminalMarkerStore,
   buildRunCompletionPluginFiles,
 } from './lib/run-completion-plugin.mjs';
+import {
+  IMAGE_GENERATION_DEFAULTS_PLUGIN_ID,
+  buildImageGenerationDefaultsPluginFiles,
+} from './lib/image-generation-defaults-plugin.mjs';
+import { resolveHostMediaAlias } from './lib/media-path-resolution.mjs';
 
 const OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write', 'operator.approvals', 'operator.pairing', 'operator.talk.secrets'];
 
@@ -1862,12 +1871,47 @@ function augmentImageGenerationFallbacksForGatewayStart(config, repairs) {
  repairs.push(`agents.defaults.imageGenerationModel: added cross-provider image fallbacks (${added.join(', ')})`);
 }
 
+// This is a bridge-owned safety/cost policy, not a user-managed optional
+// integration. Keep the typed before_tool_call plugin enabled so the settings
+// are injected into the actual native image_generate request rather than
+// relying solely on model prompt compliance. Conversation access is needed
+// only to retain a per-run boolean for an explicit high-res/upscale request;
+// the plugin never persists or emits the raw prompt.
+function ensureImageGenerationDefaultsPluginForGatewayStart(config, repairs) {
+ if (!config.plugins || typeof config.plugins !== 'object' || Array.isArray(config.plugins)) config.plugins = {};
+ if (!config.plugins.entries || typeof config.plugins.entries !== 'object' || Array.isArray(config.plugins.entries)) {
+  config.plugins.entries = {};
+ }
+ const existing = config.plugins.entries[IMAGE_GENERATION_DEFAULTS_PLUGIN_ID];
+ const entry = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
+ if (entry.enabled !== true) {
+  entry.enabled = true;
+  repairs.push(`plugins.entries.${IMAGE_GENERATION_DEFAULTS_PLUGIN_ID}: enabled native image draft policy`);
+ }
+ if (!entry.hooks || typeof entry.hooks !== 'object' || Array.isArray(entry.hooks)) entry.hooks = {};
+ if (entry.hooks.allowConversationAccess !== true) {
+  entry.hooks.allowConversationAccess = true;
+  repairs.push(`plugins.entries.${IMAGE_GENERATION_DEFAULTS_PLUGIN_ID}.hooks.allowConversationAccess: enabled scoped high-res opt-out`);
+ }
+ config.plugins.entries[IMAGE_GENERATION_DEFAULTS_PLUGIN_ID] = entry;
+
+ if (Array.isArray(config.plugins.allow) && !config.plugins.allow.includes(IMAGE_GENERATION_DEFAULTS_PLUGIN_ID)) {
+  config.plugins.allow.push(IMAGE_GENERATION_DEFAULTS_PLUGIN_ID);
+  repairs.push(`plugins.allow: added ${IMAGE_GENERATION_DEFAULTS_PLUGIN_ID}`);
+ }
+ if (Array.isArray(config.plugins.deny) && config.plugins.deny.includes(IMAGE_GENERATION_DEFAULTS_PLUGIN_ID)) {
+  config.plugins.deny = config.plugins.deny.filter((pluginId) => pluginId !== IMAGE_GENERATION_DEFAULTS_PLUGIN_ID);
+  repairs.push(`plugins.deny: removed ${IMAGE_GENERATION_DEFAULTS_PLUGIN_ID}`);
+ }
+}
+
 function prepareOpenClawConfigForGatewayStart(config) {
  const next = cloneJson(config);
  const repairs = [];
  normalizeOpenClawAgentsList(next);
  sanitizeBravePluginConfigForGatewayStart(next, repairs);
  augmentImageGenerationFallbacksForGatewayStart(next, repairs);
+ ensureImageGenerationDefaultsPluginForGatewayStart(next, repairs);
 
  const providers = next?.models?.providers;
  if (providers && typeof providers === 'object' && !Array.isArray(providers)) {
@@ -1942,6 +1986,53 @@ function repairOpenClawConfigForGatewayStart(reason = 'gateway-start') {
   console.log(`[bridge] Repaired OpenClaw config (${reason}): ${prepared.repairs.join('; ')}`);
  }
  return { updated, repairs: prepared.repairs, config: prepared.config };
+}
+
+// The gateway loads extensions only during boot. Stage Trooper-owned plugins
+// before the startup config repair so a freshly deployed bridge can enable
+// them in the same gateway restart, rather than waiting for an unrelated
+// future restart. Keep this best-effort: Docker may still be coming up, in
+// which case the server-listen retry below takes over.
+function syncBridgeOwnedGatewayPlugins(reason = 'startup') {
+ const plugins = [
+  {
+   id: RUN_COMPLETION_PLUGIN_ID,
+   label: 'run-completion',
+   files: buildRunCompletionPluginFiles({ bridgePort: PORT, token: BRIDGE_AUTH_TOKEN || '' }),
+  },
+  {
+   id: IMAGE_GENERATION_DEFAULTS_PLUGIN_ID,
+   label: 'image-generation-defaults',
+   files: buildImageGenerationDefaultsPluginFiles(),
+  },
+ ];
+ const results = {};
+ for (const plugin of plugins) {
+  try {
+   const result = syncGatewayPlugin({
+    pluginId: plugin.id,
+    files: plugin.files,
+    mkdirSync,
+    writeFileSync,
+    execSync,
+   });
+   results[plugin.id] = result;
+   console.log(`[bridge] ${plugin.label} plugin synced (${reason}; installed=${result.installed}, extensionsOverwritten=${result.extensionsOverwritten})`);
+  } catch (error) {
+   results[plugin.id] = { error: String(error?.message || error) };
+   console.warn(`[bridge] ${plugin.label} plugin sync failed (${reason}): ${error.message}`);
+  }
+ }
+ return results;
+}
+
+function imageDefaultsPluginRequiresActivation(results = {}) {
+ const result = results?.[IMAGE_GENERATION_DEFAULTS_PLUGIN_ID];
+ // `syncGatewayPlugin` refreshes the container copy on every boot, including
+ // when its bytes are already current. Only restart the gateway when this
+ // bridge process actually staged new bytes; otherwise we would disrupt live
+ // runs on every bridge restart for no functional change.
+ return Boolean(result && !result.error && Number(result.changed) > 0);
 }
 
 function readGatewayTokenFromConfig() {
@@ -3710,6 +3801,10 @@ class OpenClawGateway {
  tool: subToolName,
  toolCallId: data.id || data.toolCallId || undefined,
  params: subToolParams,
+ imageGeneration: buildImageGenerationEventMetadata({
+  tool: subToolName,
+  params: subToolParams,
+ }),
  subAgentRunId: runId,
  parentRunId: subInfo.parentRunId,
  depth: subInfo.depth,
@@ -3717,9 +3812,21 @@ class OpenClawGateway {
  });
  } else if (stream === 'tool_result' && data) {
  const summary = typeof data.content === 'string' ? data.content : (data.output || '');
+ const subToolName = data.name || data.tool || 'unknown';
+ const subToolParams = data.input || data.params || {};
+ const subResult = extractStructuredToolResult(data.result ?? data.content ?? data.output);
  if (onEvent) onEvent('subagent_tool_result', {
- tool: data.name || 'unknown',
+ tool: subToolName,
  toolCallId: data.id || data.toolCallId || undefined,
+ params: subToolParams,
+ result: subResult,
+ ...(data.details ? { details: data.details } : {}),
+ imageGeneration: buildImageGenerationEventMetadata({
+  tool: subToolName,
+  params: subToolParams,
+  result: subResult,
+  details: data.details,
+ }),
  success: !data.is_error,
  summary: previewString(summary, 500),
  subAgentRunId: runId,
@@ -3834,7 +3941,15 @@ function extractPatchFilePaths(patchText = '') {
  const textSinceLastTool = currentText.slice(lastToolTextSnapshot.length).trim();
  lastToolTextSnapshot = currentText;
  toolLog.push({ tool: toolName, toolCallId, skillName: null, params: toolParams, status: 'called', startedAt: Date.now(), textBefore: textSinceLastTool });
- const toolStartPayload = normalizeToolEventPayload('tool_start', { tool: toolName, toolCallId, params: toolParams, index: toolLog.length - 1, startedAt: Date.now(), confidence: 'native' });
+ const toolStartPayload = normalizeToolEventPayload('tool_start', {
+  tool: toolName,
+  toolCallId,
+  params: toolParams,
+  imageGeneration: buildImageGenerationEventMetadata({ tool: toolName, params: toolParams }),
+  index: toolLog.length - 1,
+  startedAt: Date.now(),
+  confidence: 'native',
+ });
  toolStartPayload.textBefore = textSinceLastTool;
  toolStartPayload.runId = runId || mainRunId || null;
  toolStartPayload.sessionKey = sessionKey;
@@ -3861,7 +3976,26 @@ function extractPatchFilePaths(patchText = '') {
       for (const patchPath of patchPaths) relocateIntoProjectFolder(_projectFolder, patchPath);
     }
   }
-   const toolResultPayload = normalizeToolEventPayload('tool_result', { tool: last.tool, toolCallId: last.toolCallId, params: last.params, result: structuredResult, success: !data.is_error, summary, raw, durationMs: last.durationMs, index: toolLog.length - 1, startedAt: last.startedAt, confidence: 'native' });
+   const toolResultPayload = normalizeToolEventPayload('tool_result', {
+    tool: last.tool,
+    toolCallId: last.toolCallId,
+    params: last.params,
+    result: structuredResult,
+    success: !data.is_error,
+    summary,
+    raw,
+    durationMs: last.durationMs,
+    index: toolLog.length - 1,
+    startedAt: last.startedAt,
+    confidence: 'native',
+    imageGeneration: buildImageGenerationEventMetadata({
+      tool: last.tool,
+      params: last.params,
+      result: structuredResult,
+      details: data.details,
+    }),
+   });
+   if (data.details) toolResultPayload.details = data.details;
 
    // Extract details.media from tool_result (OpenClaw v2026.3.22+ — browser/canvas/nodes snapshots)
    const detailsMedia = data.details?.media && typeof data.details.media === 'object' && !Array.isArray(data.details.media) ? data.details.media : null;
@@ -4045,7 +4179,14 @@ function extractPatchFilePaths(patchText = '') {
  logDebugEvent('tool_use', { tool: entry.tool, params: entry.params, rawKeys: Object.keys(data) });
  console.log(`[TOOL_USE] ${entry.tool} params=${JSON.stringify(entry.params).substring(0, 200)} raw_keys=${Object.keys(data).join(',')}`);
  toolLog.push(entry);
- if (onEvent) onEvent('tool_start', { tool: entry.tool, params: entry.params, index: toolLog.length - 1, textBefore: _textSinceLastTool2 });
+ if (onEvent) onEvent('tool_start', {
+  tool: entry.tool,
+  toolCallId: data.id || data.toolCallId || undefined,
+  params: entry.params,
+  imageGeneration: buildImageGenerationEventMetadata({ tool: entry.tool, params: entry.params }),
+  index: toolLog.length - 1,
+  textBefore: _textSinceLastTool2,
+ });
  // Track sub-agent spawning so we can associate the next new runId with this spawn
  const toolLower = (entry.tool || '').toLowerCase();
  if (toolLower === 'sessions_spawn' || toolLower === 'task' || toolLower === 'spawn' || toolLower.includes('subagent')) {
@@ -4101,7 +4242,16 @@ function extractPatchFilePaths(patchText = '') {
  }
  if (onEvent) onEvent('tool_result', {
  tool: last?.tool || 'unknown',
+ toolCallId: data.id || data.toolCallId || undefined,
  params: last?.params || {},
+ result: extractStructuredToolResult(data.result ?? data.content ?? data.output),
+ ...(data.details ? { details: data.details } : {}),
+ imageGeneration: buildImageGenerationEventMetadata({
+  tool: last?.tool || 'unknown',
+  params: last?.params || {},
+  result: extractStructuredToolResult(data.result ?? data.content ?? data.output),
+  details: data.details,
+ }),
  success: !data.is_error,
  summary: last?.summary || '',
  index: toolLog.length - 1,
@@ -4669,6 +4819,16 @@ const formattedToolLog = toolLog.map(t => ({
 
  get isReady() { return this.connected && this.ws?.readyState === WebSocket.OPEN; }
  close() { if (this._reconnectTimer) clearTimeout(this._reconnectTimer); if (this.ws) this.ws.close(); }
+}
+
+// Stage the native policy before the first startup config repair. If the
+// gateway container is not up yet this stays harmless and the listener retry
+// will perform the same operation once Docker is ready.
+let startupGatewayPluginResults = {};
+try {
+ startupGatewayPluginResults = syncBridgeOwnedGatewayPlugins('startup-preflight');
+} catch (error) {
+ console.warn(`[bridge] Startup gateway plugin preflight failed: ${error.message}`);
 }
 
 // Initialize the gateway client (connects on startup)
@@ -6753,10 +6913,10 @@ function buildTrooperSystemPrompt(registered, context = {}, explicitSystemPrompt
    deviceRef: context?.deviceRef || null,
   });
   if (laneBlock) prompt = `${prompt}\n\n${laneBlock}`;
-  return prompt;
+  return `${prompt}\n\n${buildImageGenerationDefaultsPrompt()}`;
  }
 
-  return buildRuntimeSystemPrompt(registered || {}, {
+  const prompt = buildRuntimeSystemPrompt(registered || {}, {
   channel: context?.channel || 'general',
   taskId: context?.taskId || null,
   taskTitle: context?.taskTitle || '',
@@ -6768,6 +6928,7 @@ function buildTrooperSystemPrompt(registered, context = {}, explicitSystemPrompt
   senderName: context?.senderName || '',
   matchedSkillNames: context?.matchedSkillNames || [],
  });
+  return `${prompt}\n\n${buildImageGenerationDefaultsPrompt()}`;
 }
 
 function resolveChannelWorkspaceFolder(context = {}) {
@@ -8093,6 +8254,20 @@ function resolveWorkspacePathForFiles(rawPath = '/', { file = false } = {}) {
    displayPath: virtualPath,
    virtualBase: virtualPath,
   };
+ }
+
+ // image_generate reports the in-container MEDIA path in transcript/tool
+ // output, but its completed file can live solely on the host-mounted media
+ // root. Resolve that alias before the generic container branch so `/files`
+ // streams the real generated image instead of returning a container 404.
+ const hostMediaAlias = resolveHostMediaAlias({
+  requestedPath: p,
+  mediaContainerRoot: MEDIA_CONTAINER_ROOT,
+  mediaHostRoots: [MEDIA_HOST_ROOT, DATA_MEDIA_HOST_ROOT],
+  exists: existsSync,
+ });
+ if (hostMediaAlias) {
+  return { kind: 'host', realPath: hostMediaAlias, displayPath: p };
  }
 
  if (p.startsWith('/tmp') || p.startsWith(MEDIA_CONTAINER_ROOT)) {
@@ -16727,22 +16902,29 @@ server.listen(PORT, '0.0.0.0', () => {
  } catch (error) {
   console.warn(`[bridge] ensureLocalModelAuthReadyForAllAgents failed: ${error.message}`);
  }
- // Keep the run-completion push plugin present in the gateway (best-effort;
- // it activates on the next gateway restart — never force one from here).
+ // The preflight sync happens before config repair and gateway connection. If
+ // it succeeds, restart once after config repair so first deploys load the
+ // image-default hook immediately. Keep a delayed retry for the rare boot
+ // order where Docker was not ready during module startup.
+ let imageDefaultsRestartScheduled = false;
+ const scheduleImageDefaultsActivation = (results, reason) => {
+  if (imageDefaultsRestartScheduled || !imageDefaultsPluginRequiresActivation(results)) return;
+  imageDefaultsRestartScheduled = true;
+  setTimeout(() => {
+   try {
+    repairOpenClawConfigForGatewayStart(`activate-image-defaults:${reason}`);
+    execSync(`docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 30000 });
+    gateway.forceReconnect(30000, `activate-image-defaults:${reason}`);
+    console.log(`[bridge] Gateway restarted to activate image-generation defaults (${reason})`);
+   } catch (error) {
+    console.warn(`[bridge] Could not restart gateway to activate image-generation defaults: ${error.message}`);
+   }
+  }, 750);
+ };
+ scheduleImageDefaultsActivation(startupGatewayPluginResults, 'startup-preflight');
  setTimeout(() => {
-  try {
-   const files = buildRunCompletionPluginFiles({ bridgePort: PORT, token: BRIDGE_AUTH_TOKEN || '' });
-   const result = syncGatewayPlugin({
-    pluginId: RUN_COMPLETION_PLUGIN_ID,
-    files,
-    mkdirSync,
-    writeFileSync,
-    execSync,
-   });
-   console.log(`[bridge] run-completion plugin synced (installed=${result.installed}, extensionsOverwritten=${result.extensionsOverwritten})`);
-  } catch (error) {
-   console.warn(`[bridge] run-completion plugin sync failed: ${error.message}`);
-  }
+  const retryResults = syncBridgeOwnedGatewayPlugins('startup-retry');
+  scheduleImageDefaultsActivation(retryResults, 'startup-retry');
  }, 20_000);
  // Soft-start: strip unresolved env secrets + restart path if gateway is dead.
  try {
