@@ -178,6 +178,7 @@ import {
   ManagedAcpCliManager,
   getManagedAcpCliRecipe,
 } from './lib/managed-acp-cli.mjs';
+import { OpenCodeAcpConfigManager, normalizeOpenCodeAcpProvider } from './lib/opencode-acp-config.mjs';
 import {
   RUN_COMPLETION_PLUGIN_ID,
   RunTerminalMarkerStore,
@@ -4971,6 +4972,9 @@ async function forwardToMissionControl(taskId, agentName, result, requestId) {
 // ── ACP Session Registry (tracks active ACP agent sessions) ─────────
 const acpSessionRegistry = new Map(); // sessionId -> { agent, sessionKey, status, spawnedAt, lastActivity, permissions, output }
 const acpHarnessRuntimeState = new Map(); // harness -> last observed auth/quota/runtime state
+// This cache is refreshed by the fixed in-container OpenCode config probe.
+// It contains a provider name and boolean only — never OpenCode config or keys.
+let opencodeAcpProviderAvailability = null;
 const execApprovalRegistry = new Map(); // approvalId -> { id, createdAtMs, expiresAtMs, request, ...derivedFields }
 
 const ACP_HARNESS_CATALOG = Object.freeze({
@@ -5052,6 +5056,18 @@ function getAcpHarnessConnectionState(harness) {
   return { ...observed, ...native };
  }
  const observed = acpHarnessRuntimeState.get(normalized) || {};
+ if (normalized === 'opencode') {
+  const providerConfig = opencodeAcpProviderAvailability;
+  const connected = Boolean(providerConfig?.authenticated);
+  return {
+   ...observed,
+   connected,
+   connectionStatus: connected ? 'connected' : 'auth_required',
+   errorKind: connected ? null : 'acp_auth_required',
+   text: connected ? null : (providerConfig?.error || 'Choose an OpenCode provider and configure its gateway credential before starting an ACP worker.'),
+   lastError: connected ? null : (providerConfig?.error || 'Choose an OpenCode provider and configure its gateway credential before starting an ACP worker.'),
+  };
+ }
  if (observed.connectionStatus === 'quota_exhausted') {
   return { ...observed, connected: true };
  }
@@ -5516,6 +5532,13 @@ const codexDeviceAuthJobs = new CodexDeviceAuthJobManager({
 // Non-Codex ACP CLIs use their own fixed package/binary recipes. This is
 // intentionally separate from the plugin-only /gateway/exec endpoint.
 const managedAcpCliManager = new ManagedAcpCliManager({
+ containerName: OPENCLAW_GATEWAY_CONTAINER,
+ execFile: runExecFileAsync,
+});
+// OpenCode is intentionally configured through a separate, provider-specific
+// manager. It never runs a client-supplied command and only writes `{env:...}`
+// references into the gateway user's OpenCode config.
+const opencodeAcpConfigManager = new OpenCodeAcpConfigManager({
  containerName: OPENCLAW_GATEWAY_CONTAINER,
  execFile: runExecFileAsync,
 });
@@ -13116,6 +13139,89 @@ app.post('/gateway/codex/device-auth/:jobId/cancel', async (req, res) => {
  res.status(202).json({ success: true, ...job });
 });
 
+// ── OpenCode ACP provider selection ────────────────────────────────────
+// This is deliberately not a generic OpenCode shell/login endpoint. It only
+// selects one provider from a fixed allowlist and writes `{env:...}` into the
+// gateway node user's OpenCode config. Browser/API credentials are rejected at
+// the boundary and never enter the bridge process from this API.
+function rememberOpenCodeAcpProviderAvailability(availability) {
+ opencodeAcpProviderAvailability = availability || null;
+ const connected = Boolean(availability?.authenticated);
+ setAcpHarnessRuntimeState('opencode', {
+  connectionStatus: connected ? 'connected' : 'auth_required',
+  errorKind: connected ? null : 'acp_auth_required',
+  text: connected ? null : (availability?.error || 'Choose an OpenCode provider and configure its gateway credential before starting an ACP worker.'),
+  lastError: connected ? null : (availability?.error || 'Choose an OpenCode provider and configure its gateway credential before starting an ACP worker.'),
+ });
+ return availability;
+}
+
+function readOpenCodeAcpProviderRequest(req) {
+ const body = req.body;
+ if (!body || typeof body !== 'object' || Array.isArray(body)) {
+  const error = new Error('A supported OpenCode provider is required.');
+  error.code = 'OPENCODE_PROVIDER_REQUEST_INVALID';
+  throw error;
+ }
+ // Do not accept a "key", "token", or any other credential-shaped field and
+ // do not silently discard one. This route's whole contract is `{ provider }`.
+ const keys = Object.keys(body);
+ if (keys.length !== 1 || keys[0] !== 'provider') {
+  const error = new Error('Only a provider selection may be submitted for OpenCode.');
+  error.code = 'OPENCODE_PROVIDER_REQUEST_INVALID';
+  throw error;
+ }
+ const provider = normalizeOpenCodeAcpProvider(body.provider);
+ if (!provider) {
+  const error = new Error('Choose Anthropic, OpenAI, or OpenRouter for OpenCode.');
+  error.code = 'OPENCODE_PROVIDER_UNSUPPORTED';
+  throw error;
+ }
+ return provider;
+}
+
+function sendOpenCodeAcpProviderError(res, error) {
+ const code = error?.code || 'OPENCODE_PROVIDER_CONFIG_FAILED';
+ const status = /REQUEST_INVALID|UNSUPPORTED/.test(code) ? 400
+  : /CONFIG_INVALID/.test(code) ? 409
+   : 500;
+ res.status(status).json({
+  success: false,
+  code,
+  // The manager intentionally turns container/config errors into fixed safe
+  // messages, so this endpoint never reflects an OpenCode file or key.
+  error: String(error?.message || 'OpenCode provider configuration failed').slice(0, 500),
+ });
+}
+
+app.get('/gateway/opencode/provider-config/availability', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+  const availability = rememberOpenCodeAcpProviderAvailability(
+   await opencodeAcpConfigManager.getAvailability(),
+  );
+  res.json({ success: true, ...availability });
+ } catch (error) {
+  sendOpenCodeAcpProviderError(res, error);
+ }
+});
+
+app.post('/gateway/opencode/provider-config', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ let endOperation = null;
+ try {
+  const provider = readOpenCodeAcpProviderRequest(req);
+  endOperation = beginRuntimeOperation('opencode_provider_config', { provider }, 30_000);
+  const result = await opencodeAcpConfigManager.configure(provider);
+  rememberOpenCodeAcpProviderAvailability(result.availability);
+  res.json({ success: true, ...result });
+ } catch (error) {
+  sendOpenCodeAcpProviderError(res, error);
+ } finally {
+  endOperation?.();
+ }
+});
+
 // ── Managed ACP CLI installation ───────────────────────────────────────
 // The historical generic installer incorrectly posted npm commands through
 // /gateway/exec, which is deliberately a plugin-only allowlist. Keep that
@@ -15872,7 +15978,7 @@ app.get('/acp/agents', async (req, res) => {
   const authDoc = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
   syncCodexOAuthToAcpHome(authDoc, { overwriteNative: false });
  } catch {}
- const [managedEntries, codexAvailability] = await Promise.all([
+ const [managedEntries, codexAvailability, opencodeProviderAvailability] = await Promise.all([
   Promise.all(Object.keys(MANAGED_ACP_CLI_CATALOG).map(async (name) => [
    name,
    await managedAcpCliManager.getAvailability(name).catch((error) => ({
@@ -15887,22 +15993,46 @@ app.get('/acp/agents', async (req, res) => {
    })),
   ])),
   codexDeviceAuthJobs.getAvailability().catch(() => null),
+  opencodeAcpConfigManager.getAvailability().catch(() => null),
  ]);
+ rememberOpenCodeAcpProviderAvailability(opencodeProviderAvailability);
  const managedByName = new Map(managedEntries);
  const agents = Object.entries(ACP_HARNESS_CATALOG).map(([name, meta]) => {
   const connection = getAcpHarnessConnectionState(name);
   const managed = managedByName.get(name) || null;
   const codex = name === 'codex' ? codexAvailability : null;
+  const opencodeProvider = name === 'opencode' ? opencodeProviderAvailability : null;
+  const managedForAgent = name === 'opencode' && managed
+   ? {
+    ...managed,
+    // An installed OpenCode binary alone is not a usable ACP connection. The
+    // provider-config manager verifies both a single selected provider and
+    // that provider's matching gateway environment credential.
+    authenticated: Boolean(opencodeProvider?.authenticated),
+    authMode: opencodeProvider?.authMode || managed.authMode,
+    authHint: opencodeProvider?.authHint || managed.authHint,
+    providerConfig: opencodeProvider ? {
+     selectedProvider: opencodeProvider.selectedProvider || null,
+     credentialPresent: Boolean(opencodeProvider.credentialPresent),
+     configured: Boolean(opencodeProvider.configured),
+     status: opencodeProvider.status || 'probe_failed',
+    } : null,
+   }
+   : managed;
   const installed = managed?.installed ?? codex?.installed ?? null;
-  const nativeAuthenticated = managed?.authenticated ?? codex?.authenticated ?? null;
+  const nativeAuthenticated = name === 'opencode'
+   ? Boolean(opencodeProvider?.authenticated)
+   : managed?.authenticated ?? codex?.authenticated ?? null;
   // A provider API credential remains a valid connection route when the
   // provider supports it. A verified native CLI login can only strengthen that
   // result; a missing CLI must always block ACP spawn.
   const connected = installed === false
    ? false
-   : nativeAuthenticated === true
-    ? true
-    : connection.connected;
+   : name === 'opencode'
+    ? Boolean(opencodeProvider?.authenticated)
+    : nativeAuthenticated === true
+     ? true
+     : connection.connected;
   const connectionStatus = installed === false
    ? 'missing_cli'
    : connected
@@ -15910,7 +16040,7 @@ app.get('/acp/agents', async (req, res) => {
     : connection.connectionStatus;
   const setupProblem = installed === false
    ? (managed?.error || codex?.error || `${meta.label} is not installed on the gateway runtime.`)
-   : connection.text || connection.lastError || managed?.authHint || null;
+   : opencodeProvider?.error || connection.text || connection.lastError || managedForAgent?.authHint || null;
   const available = gateway.isReady && installed !== false && connectionStatus !== 'auth_required';
   return {
    name,
@@ -15922,7 +16052,7 @@ app.get('/acp/agents', async (req, res) => {
    installed,
    authenticated: connected,
    ready: Boolean(available && connected),
-   managedCli: managed || (codex ? {
+   managedCli: managedForAgent || (codex ? {
     harness: 'codex',
     supported: true,
     managedInstall: true,
@@ -15930,8 +16060,14 @@ app.get('/acp/agents', async (req, res) => {
     authenticated: codex.authenticated,
     authMode: 'device_code_or_chatgpt',
    } : null),
-   authMode: managed?.authMode || (name === 'codex' ? 'device_code_or_chatgpt' : null),
-   authHint: managed?.authHint || null,
+   authMode: managedForAgent?.authMode || (name === 'codex' ? 'device_code_or_chatgpt' : null),
+   authHint: managedForAgent?.authHint || null,
+   opencodeProvider: name === 'opencode' && opencodeProvider ? {
+    selectedProvider: opencodeProvider.selectedProvider || null,
+    credentialPresent: Boolean(opencodeProvider.credentialPresent),
+    configured: Boolean(opencodeProvider.configured),
+    status: opencodeProvider.status || 'probe_failed',
+   } : undefined,
    supportedByGateway: true,
    gatewayAvailable: gateway.isReady,
    available,
