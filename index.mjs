@@ -174,6 +174,11 @@ import {
   redactCodexDeviceAuthOutput,
 } from './lib/codex-device-auth.mjs';
 import {
+  MANAGED_ACP_CLI_CATALOG,
+  ManagedAcpCliManager,
+  getManagedAcpCliRecipe,
+} from './lib/managed-acp-cli.mjs';
+import {
   RUN_COMPLETION_PLUGIN_ID,
   RunTerminalMarkerStore,
   buildRunCompletionPluginFiles,
@@ -4997,13 +5002,6 @@ const ACP_HARNESS_CATALOG = Object.freeze({
   nativeModelLabel: 'OpenCode session default',
   connectAction: 'configure_opencode',
  },
- pi: {
-  label: 'Pi',
-  provider: 'pi',
-  authProvider: null,
-  nativeModelLabel: 'Pi session default',
-  connectAction: 'configure_pi',
- },
 });
 
 function classifyAcpHarnessFailure(value) {
@@ -5513,6 +5511,12 @@ const CODEX_ACP_CONTAINER_HOME = DEFAULT_CODEX_ACP_CONTAINER_HOME;
 const codexDeviceAuthJobs = new CodexDeviceAuthJobManager({
  containerName: OPENCLAW_GATEWAY_CONTAINER,
  codexHome: CODEX_ACP_CONTAINER_HOME,
+ execFile: runExecFileAsync,
+});
+// Non-Codex ACP CLIs use their own fixed package/binary recipes. This is
+// intentionally separate from the plugin-only /gateway/exec endpoint.
+const managedAcpCliManager = new ManagedAcpCliManager({
+ containerName: OPENCLAW_GATEWAY_CONTAINER,
  execFile: runExecFileAsync,
 });
 const AUTH_PROFILE_SECRET_DIR = openclawDataPath('auth-profile-secrets');
@@ -13080,6 +13084,10 @@ app.post('/gateway/codex/device-auth/start', async (req, res) => {
  try {
   const result = await codexDeviceAuthJobs.start({
    force: req.body?.force === true,
+   // A user who just changed their account/workspace policy needs a brand-new
+   // one-time code. The manager first terminates the old fixed child, then
+   // starts another; no caller-provided command ever runs here.
+   restart: req.body?.restart === true,
    // A one-click VPS connection should repair a missing CLI, while callers
    // that only want diagnostics can explicitly opt out.
    installIfMissing: req.body?.installIfMissing !== false,
@@ -13106,6 +13114,53 @@ app.post('/gateway/codex/device-auth/:jobId/cancel', async (req, res) => {
  const job = await codexDeviceAuthJobs.cancel(jobId);
  if (!job) return res.status(404).json({ success: false, error: 'Codex device authorization job not found' });
  res.status(202).json({ success: true, ...job });
+});
+
+// ── Managed ACP CLI installation ───────────────────────────────────────
+// The historical generic installer incorrectly posted npm commands through
+// /gateway/exec, which is deliberately a plugin-only allowlist. Keep that
+// boundary intact: this route accepts only a catalog harness and executes its
+// fixed argv recipe in the actual gateway container.
+function getManagedAcpCliHarness(req) {
+ const harness = String(req.params?.harness || '').trim().toLowerCase();
+ return getManagedAcpCliRecipe(harness) ? harness : null;
+}
+
+function sendManagedAcpCliError(res, error) {
+ const code = error?.code === 'ACP_CLI_UNSUPPORTED' ? 404 : 500;
+ res.status(code).json({
+  success: false,
+  error: String(error?.message || 'Managed ACP CLI operation failed').slice(0, 2_000),
+  code: error?.code || 'ACP_CLI_OPERATION_FAILED',
+  availability: error?.availability || undefined,
+  stdout: error?.stdout || undefined,
+  stderr: error?.stderr || undefined,
+ });
+}
+
+app.get('/gateway/acp-cli/:harness/availability', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ const harness = getManagedAcpCliHarness(req);
+ if (!harness) return res.status(404).json({ success: false, error: 'Unsupported managed ACP harness', code: 'ACP_CLI_UNSUPPORTED' });
+ try {
+  res.json({ success: true, ...(await managedAcpCliManager.getAvailability(harness)) });
+ } catch (error) {
+  sendManagedAcpCliError(res, error);
+ }
+});
+
+app.post('/gateway/acp-cli/:harness/install', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ const harness = getManagedAcpCliHarness(req);
+ if (!harness) return res.status(404).json({ success: false, error: 'Unsupported managed ACP harness', code: 'ACP_CLI_UNSUPPORTED' });
+ const endOperation = beginRuntimeOperation('managed_acp_cli_install', { harness }, 210000);
+ try {
+  res.json({ success: true, ...(await managedAcpCliManager.install(harness)) });
+ } catch (error) {
+  sendManagedAcpCliError(res, error);
+ } finally {
+  endOperation();
+ }
 });
 
 app.post('/gateway/exec', async (req, res) => {
@@ -15817,9 +15872,46 @@ app.get('/acp/agents', async (req, res) => {
   const authDoc = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
   syncCodexOAuthToAcpHome(authDoc, { overwriteNative: false });
  } catch {}
+ const [managedEntries, codexAvailability] = await Promise.all([
+  Promise.all(Object.keys(MANAGED_ACP_CLI_CATALOG).map(async (name) => [
+   name,
+   await managedAcpCliManager.getAvailability(name).catch((error) => ({
+    harness: name,
+    supported: true,
+    managedInstall: true,
+    installed: null,
+    authenticated: null,
+    authMode: MANAGED_ACP_CLI_CATALOG[name]?.authMode || 'unknown',
+    errorCode: 'ACP_CLI_PROBE_FAILED',
+    error: String(error?.message || 'Could not inspect the managed ACP CLI').slice(0, 800),
+   })),
+  ])),
+  codexDeviceAuthJobs.getAvailability().catch(() => null),
+ ]);
+ const managedByName = new Map(managedEntries);
  const agents = Object.entries(ACP_HARNESS_CATALOG).map(([name, meta]) => {
   const connection = getAcpHarnessConnectionState(name);
-  const available = gateway.isReady && connection.connectionStatus !== 'auth_required';
+  const managed = managedByName.get(name) || null;
+  const codex = name === 'codex' ? codexAvailability : null;
+  const installed = managed?.installed ?? codex?.installed ?? null;
+  const nativeAuthenticated = managed?.authenticated ?? codex?.authenticated ?? null;
+  // A provider API credential remains a valid connection route when the
+  // provider supports it. A verified native CLI login can only strengthen that
+  // result; a missing CLI must always block ACP spawn.
+  const connected = installed === false
+   ? false
+   : nativeAuthenticated === true
+    ? true
+    : connection.connected;
+  const connectionStatus = installed === false
+   ? 'missing_cli'
+   : connected
+    ? 'connected'
+    : connection.connectionStatus;
+  const setupProblem = installed === false
+   ? (managed?.error || codex?.error || `${meta.label} is not installed on the gateway runtime.`)
+   : connection.text || connection.lastError || managed?.authHint || null;
+  const available = gateway.isReady && installed !== false && connectionStatus !== 'auth_required';
   return {
    name,
    label: meta.label,
@@ -15827,13 +15919,34 @@ app.get('/acp/agents', async (req, res) => {
    authProvider: meta.authProvider,
    nativeModelLabel: meta.nativeModelLabel,
    modelSource: 'provider_default',
-   installed: null,
+   installed,
+   authenticated: connected,
+   ready: Boolean(available && connected),
+   managedCli: managed || (codex ? {
+    harness: 'codex',
+    supported: true,
+    managedInstall: true,
+    installed: codex.installed,
+    authenticated: codex.authenticated,
+    authMode: 'device_code_or_chatgpt',
+   } : null),
+   authMode: managed?.authMode || (name === 'codex' ? 'device_code_or_chatgpt' : null),
+   authHint: managed?.authHint || null,
+   supportedByGateway: true,
    gatewayAvailable: gateway.isReady,
    available,
-   connected: connection.connected,
-   connectionStatus: connection.connectionStatus,
+   connected,
+   connectionStatus,
    errorKind: connection.errorKind || null,
-   lastError: connection.text || connection.lastError || null,
+   lastError: setupProblem,
+   setupProblem,
+   doctorStatus: installed === false
+    ? 'missing'
+    : connectionStatus === 'auth_required'
+      ? 'auth_required'
+      : available
+        ? 'ready'
+        : 'blocked',
    connectAction: meta.connectAction,
   };
  });
