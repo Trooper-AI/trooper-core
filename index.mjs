@@ -178,7 +178,12 @@ import {
   ManagedAcpCliManager,
   getManagedAcpCliRecipe,
 } from './lib/managed-acp-cli.mjs';
-import { OpenCodeAcpConfigManager, normalizeOpenCodeAcpProvider } from './lib/opencode-acp-config.mjs';
+import {
+ OpenCodeAcpConfigManager,
+ ensureManagedOpenCodeAcpAgentConfig,
+ getManagedOpenCodeAcpAgentConfigState,
+ normalizeOpenCodeAcpProvider,
+} from './lib/opencode-acp-config.mjs';
 import {
   RUN_COMPLETION_PLUGIN_ID,
   RunTerminalMarkerStore,
@@ -5489,6 +5494,17 @@ try {
  changed = true;
  console.log('[bridge] Migrated: enabled acpx plugin');
  }
+ // OpenCode's normal ~/.config path belongs to the disposable gateway image.
+ // Give only this ACPX harness a persistent config path under the mounted
+ // OpenClaw data directory. This is a fixed argv override, not user input.
+ const managedOpenCodeAcp = ensureManagedOpenCodeAcpAgentConfig(config);
+ if (managedOpenCodeAcp.changed) {
+ config = managedOpenCodeAcp.config;
+ changed = true;
+ console.log('[bridge] Migrated: configured persistent OpenCode ACP adapter');
+ } else if (!managedOpenCodeAcp.managed && managedOpenCodeAcp.reason === 'custom_override') {
+  console.warn('[bridge] OpenCode ACP adapter is custom; left the existing ACPX command unchanged');
+ }
  // Startup migration: enable all 4 bundled hooks
  if (config.hooks?.internal?.entries) {
  const entries = config.hooks.internal.entries;
@@ -5542,6 +5558,57 @@ const opencodeAcpConfigManager = new OpenCodeAcpConfigManager({
  containerName: OPENCLAW_GATEWAY_CONTAINER,
  execFile: runExecFileAsync,
 });
+
+function getOpenCodeAcpAdapterState() {
+ try {
+  return getManagedOpenCodeAcpAgentConfigState(readOpenClawConfig());
+ } catch {
+  return { managed: false, reason: 'missing' };
+ }
+}
+
+function unavailableOpenCodeAcpAdapter(adapter = getOpenCodeAcpAdapterState()) {
+ const customOverride = adapter?.reason === 'custom_override';
+ return {
+  supported: true,
+  selectedProvider: null,
+  credentialPresent: false,
+  configured: false,
+  authenticated: false,
+  authMode: 'provider_selection_required',
+  authHint: customOverride
+   ? 'OpenCode has a custom ACPX gateway command. Trooper left it unchanged; configure that adapter directly or remove the override to use managed provider setup.'
+   : 'The managed OpenCode ACP adapter is not configured on the gateway runtime.',
+  status: customOverride ? 'adapter_override' : 'adapter_missing',
+  errorCode: customOverride ? 'OPENCODE_ACP_ADAPTER_OVERRIDE' : 'OPENCODE_ACP_ADAPTER_MISSING',
+  error: customOverride
+   ? 'OpenCode has a custom ACPX gateway command. Trooper did not replace it.'
+   : 'The managed OpenCode ACP adapter is not configured on the gateway runtime.',
+ };
+}
+
+async function getOpenCodeAcpProviderAvailability() {
+ const adapter = getOpenCodeAcpAdapterState();
+ return adapter.managed
+  ? opencodeAcpConfigManager.getAvailability()
+  : unavailableOpenCodeAcpAdapter(adapter);
+}
+
+async function configureOpenCodeAcpProvider(provider) {
+ const adapter = getOpenCodeAcpAdapterState();
+ if (!adapter.managed) {
+  const availability = unavailableOpenCodeAcpAdapter(adapter);
+  const error = new Error(availability.error);
+  error.code = availability.errorCode;
+  error.availability = availability;
+  throw error;
+ }
+ const result = await opencodeAcpConfigManager.configure(provider);
+ return {
+  ...result,
+  availability: await getOpenCodeAcpProviderAvailability(),
+ };
+}
 const AUTH_PROFILE_SECRET_DIR = openclawDataPath('auth-profile-secrets');
 const AUTH_PROFILE_SECRET_FILE = path.join(AUTH_PROFILE_SECRET_DIR, 'auth-profile-secret-key');
 
@@ -13183,7 +13250,7 @@ function readOpenCodeAcpProviderRequest(req) {
 function sendOpenCodeAcpProviderError(res, error) {
  const code = error?.code || 'OPENCODE_PROVIDER_CONFIG_FAILED';
  const status = /REQUEST_INVALID|UNSUPPORTED/.test(code) ? 400
-  : /CONFIG_INVALID/.test(code) ? 409
+  : /CONFIG_INVALID|ADAPTER_(?:OVERRIDE|MISSING)/.test(code) ? 409
    : 500;
  res.status(status).json({
   success: false,
@@ -13198,7 +13265,7 @@ app.get('/gateway/opencode/provider-config/availability', async (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
  try {
   const availability = rememberOpenCodeAcpProviderAvailability(
-   await opencodeAcpConfigManager.getAvailability(),
+   await getOpenCodeAcpProviderAvailability(),
   );
   res.json({ success: true, ...availability });
  } catch (error) {
@@ -13212,7 +13279,7 @@ app.post('/gateway/opencode/provider-config', async (req, res) => {
  try {
   const provider = readOpenCodeAcpProviderRequest(req);
   endOperation = beginRuntimeOperation('opencode_provider_config', { provider }, 30_000);
-  const result = await opencodeAcpConfigManager.configure(provider);
+  const result = await configureOpenCodeAcpProvider(provider);
   rememberOpenCodeAcpProviderAvailability(result.availability);
   res.json({ success: true, ...result });
  } catch (error) {
@@ -15993,7 +16060,7 @@ app.get('/acp/agents', async (req, res) => {
    })),
   ])),
   codexDeviceAuthJobs.getAvailability().catch(() => null),
-  opencodeAcpConfigManager.getAvailability().catch(() => null),
+  getOpenCodeAcpProviderAvailability().catch(() => null),
  ]);
  rememberOpenCodeAcpProviderAvailability(opencodeProviderAvailability);
  const managedByName = new Map(managedEntries);
@@ -16002,15 +16069,20 @@ app.get('/acp/agents', async (req, res) => {
   const managed = managedByName.get(name) || null;
   const codex = name === 'codex' ? codexAvailability : null;
   const opencodeProvider = name === 'opencode' ? opencodeProviderAvailability : null;
-  const managedForAgent = name === 'opencode' && managed
+  const managedForAgent = name === 'opencode'
    ? {
-    ...managed,
-    // An installed OpenCode binary alone is not a usable ACP connection. The
-    // provider-config manager verifies both a single selected provider and
-    // that provider's matching gateway environment credential.
+    // ACPX owns OpenCode's fixed `npx -y opencode-ai acp` bootstrap. Do not
+    // make readiness depend on a global npm install in the disposable gateway
+    // image; this managed config is the durable adapter contract instead.
+    harness: 'opencode',
+    label: meta.label,
+    supported: true,
+    managedInstall: false,
+    adapter: 'acpx_npx',
+    installed: opencodeProvider?.configured ? true : null,
     authenticated: Boolean(opencodeProvider?.authenticated),
-    authMode: opencodeProvider?.authMode || managed.authMode,
-    authHint: opencodeProvider?.authHint || managed.authHint,
+    authMode: opencodeProvider?.authMode || 'provider_selection_required',
+    authHint: opencodeProvider?.authHint || 'Choose Anthropic, OpenAI, or OpenRouter, then configure that provider’s gateway API key. Trooper stores only an environment reference, never the key.',
     providerConfig: opencodeProvider ? {
      selectedProvider: opencodeProvider.selectedProvider || null,
      credentialPresent: Boolean(opencodeProvider.credentialPresent),
@@ -16019,7 +16091,9 @@ app.get('/acp/agents', async (req, res) => {
     } : null,
    }
    : managed;
-  const installed = managed?.installed ?? codex?.installed ?? null;
+  const installed = name === 'opencode'
+   ? managedForAgent?.installed ?? null
+   : managed?.installed ?? codex?.installed ?? null;
   const nativeAuthenticated = name === 'opencode'
    ? Boolean(opencodeProvider?.authenticated)
    : managed?.authenticated ?? codex?.authenticated ?? null;
