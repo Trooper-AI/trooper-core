@@ -28,6 +28,15 @@ chmod 700 /home/node/.openclaw/identity 2>/dev/null || true
 chmod 600 /home/node/.openclaw/identity/*.json 2>/dev/null || true
 chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null || true
 
+# The OpenClaw ACP backend is an external plugin, not a bundled executable.
+# Install and verify it before startup so an ACP-enabled configuration cannot
+# leave the gateway perpetually "installing" with a missing-plugin warning.
+if ! /opt/acpx-bootstrap.sh; then
+  echo "[entrypoint] FATAL: ACPX bootstrap failed; gateway will not start" >&2
+  exit 1
+fi
+export TROOPER_ACPX_BOOTSTRAPPED=1
+
 # Background: re-fix identity perms 30s after start (gateway may create files late)
 (sleep 30 && chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null && chmod 700 /home/node/.openclaw/identity 2>/dev/null && chmod 600 /home/node/.openclaw/identity/*.json 2>/dev/null) &
 

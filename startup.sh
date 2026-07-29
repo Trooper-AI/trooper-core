@@ -71,6 +71,16 @@ run_as_node() {
   fi
 }
 
+# Local-Mac launches intentionally bypass the image entrypoint, so make the
+# ACPX plugin bootstrap available here as well. The normal image entrypoint
+# sets the marker after it has already performed this check.
+if [ "${TROOPER_ACPX_BOOTSTRAPPED:-0}" != "1" ]; then
+  if ! /opt/acpx-bootstrap.sh; then
+    echo "[startup] FATAL: ACPX bootstrap failed; gateway will not start" >&2
+    exit 1
+  fi
+fi
+
 # Auto-repair config after upgrades (prevents crash loops from schema changes).
 # Local Mac installs can skip this foreground repair because the bridge already
 # writes a managed config, and amd64 gateway images can spend minutes here under

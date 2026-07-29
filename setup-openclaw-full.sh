@@ -2198,29 +2198,15 @@ if [ "$_gw_ready" -eq 0 ]; then
  docker compose logs --tail 40 openclaw-gateway 2>/dev/null || true
 fi
 
-# OpenClaw treats npm plugin packages under ~/.openclaw/npm as trusted only when
-# they are root-owned. Fresh Trooper hosts may write them as the node user while
-# ACLs are being aligned, which makes native plugins appear installed but blocked.
-docker compose exec -T -u 0 openclaw-gateway sh -lc '
-  if [ -d /home/node/.openclaw/npm/node_modules/@openclaw ]; then
-    chown -R root:root /home/node/.openclaw/npm/node_modules/@openclaw || true
-    find /home/node/.openclaw/npm/node_modules/@openclaw -type d -exec chmod 755 {} \; 2>/dev/null || true
-    find /home/node/.openclaw/npm/node_modules/@openclaw -type f -exec chmod 644 {} \; 2>/dev/null || true
-    echo "[setup] Native OpenClaw plugin ownership repaired"
-  fi
-' 2>/dev/null || true
-
-# Run openclaw setup/doctor (use node directly — openclaw CLI is not in PATH)
+# Run OpenClaw setup/doctor as the gateway's node user. Keep managed npm plugin
+# projects node-owned; the image entrypoint already normalizes that persisted
+# state before this point and the plugin loader accepts the gateway uid (or root)
+# only when the plugin path is otherwise safe.
+# (Use node directly because the openclaw CLI is not in PATH.)
 docker compose exec -T -w /app openclaw-gateway node dist/index.js setup --workspace /home/node/.openclaw/workspace 2>/dev/null || true
 docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --repair 2>/dev/null \
   || docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --fix 2>/dev/null \
   || true
-docker compose exec -T -u 0 openclaw-gateway sh -lc '
-  if [ -d /home/node/.openclaw/npm/node_modules/@openclaw ]; then
-    chown -R root:root /home/node/.openclaw/npm/node_modules/@openclaw || true
-    echo "[setup] Native OpenClaw plugin ownership verified after doctor"
-  fi
-' 2>/dev/null || true
 restore_codex_oauth_sidecars
 
 # ── [6/9] Bridge + Sandbox + Poller (PARALLEL where possible) ─────────
