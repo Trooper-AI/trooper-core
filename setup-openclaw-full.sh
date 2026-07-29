@@ -3285,7 +3285,6 @@ const operatorScopes = [
  'operator.admin',
  'operator.read',
  'operator.write',
- 'operator.pairing',
  'operator.approvals',
  'operator.talk.secrets',
 ];

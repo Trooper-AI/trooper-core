@@ -203,7 +203,7 @@ import {
 } from './lib/image-generation-defaults-plugin.mjs';
 import { resolveHostMediaAlias } from './lib/media-path-resolution.mjs';
 
-const OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write', 'operator.approvals', 'operator.pairing', 'operator.talk.secrets'];
+const OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write', 'operator.approvals', 'operator.talk.secrets'];
 
 function isLocalHostRuntime() {
  return process.platform === 'darwin'
