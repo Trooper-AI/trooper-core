@@ -22,6 +22,38 @@ mkdir -p /tmp/jiti && chmod 1777 /tmp/jiti
 chmod 700 /home/node/.openclaw/devices 2>/dev/null || true
 chmod 600 /home/node/.openclaw/devices/*.json 2>/dev/null || true
 
+# ── Persistent ACP CLI credential homes ──────────────────────────────────
+# Vendor CLI logins (claude auth login, kimi login, copilot login, opencode
+# auth login) write credentials under $HOME, but only /home/node/.openclaw is
+# a mounted volume. Link each CLI state dir into the mounted ACP tree so a
+# login survives container recreation AND so the login-time credential lands
+# exactly where the acpx-spawned harness process reads it. Codex already has
+# its own persistent CODEX_HOME under this tree.
+link_persistent_cli_home() {
+  target="$1"; link="$2"
+  mkdir -p "$target" 2>/dev/null || return 0
+  if [ -L "$link" ]; then
+    [ "$(readlink "$link")" = "$target" ] || ln -sfn "$target" "$link" 2>/dev/null || true
+    return 0
+  fi
+  if [ -e "$link" ]; then
+    # One-time migration of an existing image-local credential dir; the
+    # persisted copy wins on conflicts.
+    cp -an "$link"/. "$target"/ 2>/dev/null || true
+    rm -rf "$link" 2>/dev/null || true
+  fi
+  mkdir -p "$(dirname "$link")" 2>/dev/null || true
+  ln -sfn "$target" "$link" 2>/dev/null || true
+}
+ACPX_PERSIST_ROOT=/home/node/.openclaw/acpx
+link_persistent_cli_home "$ACPX_PERSIST_ROOT/claude-home"   /home/node/.claude
+link_persistent_cli_home "$ACPX_PERSIST_ROOT/kimi-home"     /home/node/.kimi-code
+link_persistent_cli_home "$ACPX_PERSIST_ROOT/copilot-home"  /home/node/.copilot
+link_persistent_cli_home "$ACPX_PERSIST_ROOT/data/opencode" /home/node/.local/share/opencode
+chown -R 1000:1000 "$ACPX_PERSIST_ROOT" /home/node/.local 2>/dev/null || true
+chown -h 1000:1000 /home/node/.claude /home/node/.kimi-code /home/node/.copilot /home/node/.local/share/opencode 2>/dev/null || true
+find "$ACPX_PERSIST_ROOT" -maxdepth 1 -type d -exec chmod 700 {} \; 2>/dev/null || true
+
 # Identity dir: gateway creates device-auth.json as root during init — fix ownership
 # so internal tool connections (cron, sessions_spawn) can read it as node user
 chmod 700 /home/node/.openclaw/identity 2>/dev/null || true

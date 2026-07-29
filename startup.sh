@@ -50,6 +50,31 @@ chmod 600 /home/node/.openclaw/*.json 2>/dev/null || true
 chown 1000:1000 /home/node/.npm 2>/dev/null || true
 echo "[startup] Permission pass complete"
 
+# Persistent ACP CLI credential homes (see entrypoint.sh). Local-Mac launches
+# bypass the image entrypoint, so repeat the idempotent link pass here; a
+# non-root run simply skips chown.
+link_persistent_cli_home() {
+  target="$1"; link="$2"
+  mkdir -p "$target" 2>/dev/null || return 0
+  if [ -L "$link" ]; then
+    [ "$(readlink "$link")" = "$target" ] || ln -sfn "$target" "$link" 2>/dev/null || true
+    return 0
+  fi
+  if [ -e "$link" ]; then
+    cp -an "$link"/. "$target"/ 2>/dev/null || true
+    rm -rf "$link" 2>/dev/null || true
+  fi
+  mkdir -p "$(dirname "$link")" 2>/dev/null || true
+  ln -sfn "$target" "$link" 2>/dev/null || true
+}
+ACPX_PERSIST_ROOT=/home/node/.openclaw/acpx
+link_persistent_cli_home "$ACPX_PERSIST_ROOT/claude-home"   /home/node/.claude
+link_persistent_cli_home "$ACPX_PERSIST_ROOT/kimi-home"     /home/node/.kimi-code
+link_persistent_cli_home "$ACPX_PERSIST_ROOT/copilot-home"  /home/node/.copilot
+link_persistent_cli_home "$ACPX_PERSIST_ROOT/data/opencode" /home/node/.local/share/opencode
+chown -R 1000:1000 "$ACPX_PERSIST_ROOT" /home/node/.local 2>/dev/null || true
+chown -h 1000:1000 /home/node/.claude /home/node/.kimi-code /home/node/.copilot /home/node/.local/share/opencode 2>/dev/null || true
+
 # Startup optimizations (recommended by openclaw doctor)
 export NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache
 export JITI_CACHE_DIR=/var/tmp/jiti

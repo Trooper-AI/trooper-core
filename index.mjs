@@ -5078,14 +5078,17 @@ function getAcpHarnessConnectionState(harness) {
  const observed = acpHarnessRuntimeState.get(normalized) || {};
  if (normalized === 'opencode') {
   const providerConfig = opencodeAcpProviderAvailability;
-  const connected = Boolean(providerConfig?.authenticated);
+  // OpenCode has two valid credential routes: an env-key provider config and
+  // a completed `opencode auth login` account session (observed as connected
+  // by the account-auth manager). Either one makes the harness usable.
+  const connected = Boolean(providerConfig?.authenticated) || observed.connectionStatus === 'connected';
   return {
    ...observed,
    connected,
    connectionStatus: connected ? 'connected' : 'auth_required',
    errorKind: connected ? null : 'acp_auth_required',
-   text: connected ? null : (providerConfig?.error || 'Choose an OpenCode provider and configure its gateway credential before starting an ACP worker.'),
-   lastError: connected ? null : (providerConfig?.error || 'Choose an OpenCode provider and configure its gateway credential before starting an ACP worker.'),
+   text: connected ? null : (providerConfig?.error || 'Connect an OpenCode provider account or configure its gateway credential before starting an ACP worker.'),
+   lastError: connected ? null : (providerConfig?.error || 'Connect an OpenCode provider account or configure its gateway credential before starting an ACP worker.'),
   };
  }
  if (observed.connectionStatus === 'quota_exhausted') {
@@ -5509,6 +5512,24 @@ try {
  changed = true;
  console.log('[bridge] Migrated: enabled acpx plugin');
  }
+ // Startup migration: non-interactive ACP sessions cannot answer a native
+ // permission prompt, and the ACPX default (nonInteractivePermissions=fail)
+ // aborts the whole session with PermissionPromptUnavailableError on the
+ // first blocked write. "deny" degrades that to a per-tool denial the model
+ // can see and work around. Session permission profiles (/acp permissions)
+ // still decide what gets auto-approved; an explicit operator setting wins.
+ {
+  const acpxEntry = config.plugins.entries.acpx;
+  if (acpxEntry && typeof acpxEntry === 'object') {
+   if (acpxEntry.config === undefined) acpxEntry.config = {};
+   if (acpxEntry.config && typeof acpxEntry.config === 'object'
+    && acpxEntry.config.nonInteractivePermissions === undefined) {
+    acpxEntry.config.nonInteractivePermissions = 'deny';
+    changed = true;
+    console.log('[bridge] Migrated: ACPX non-interactive permission prompts degrade to deny');
+   }
+  }
+ }
  // OpenCode's normal ~/.config path belongs to the disposable gateway image.
  // Give only this ACPX harness a persistent config path under the mounted
  // OpenClaw data directory. This is a fixed argv override, not user input.
@@ -5563,7 +5584,20 @@ const codexDeviceAuthJobs = new CodexDeviceAuthJobManager({
 const acpAccountAuthJobs = new AcpAccountAuthJobManager({
  containerName: OPENCLAW_GATEWAY_CONTAINER,
  execFile: runExecFileAsync,
- audit: (event) => console.info('[acp-account-auth]', JSON.stringify(event)),
+ audit: (event) => {
+  console.info('[acp-account-auth]', JSON.stringify(event));
+  // A verified CLI account login is authoritative for chat-side readiness;
+  // without this the runtime keeps demanding a provider API key until the
+  // next live probe happens to run.
+  if (event?.event === 'login_connected') {
+   setAcpHarnessRuntimeState(event.harness, {
+    connectionStatus: 'connected',
+    errorKind: null,
+    text: null,
+    lastError: null,
+   });
+  }
+ },
 });
 // Non-Codex ACP CLIs use their own fixed package/binary recipes. This is
 // intentionally separate from the plugin-only /gateway/exec endpoint.
