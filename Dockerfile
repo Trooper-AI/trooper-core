@@ -31,6 +31,7 @@ RUN apt-get update && \
     (dpkg -i /tmp/chrome.deb || apt-get install -y -f) && \
     rm -f /tmp/chrome.deb && \
     apt-get install -y --no-install-recommends \
+      bubblewrap \
       tigervnc-standalone-server \
       novnc \
       websockify && \

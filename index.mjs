@@ -15793,8 +15793,10 @@ async function spawnAcpRun({ agent, cwd, workerModel, model, modelSource, messag
   '/acp spawn',
   harness,
   '--mode persistent',
-  '--thread off',
-  '--bind off',
+  // ACPX must be bound to the parent conversation. `--bind off` creates an
+  // orphaned session: the work can finish, but neither the bridge nor Trooper
+  // can observe its live events or final response reliably.
+  '--bind here',
   '--label',
   acpCommandToken(label),
  ];
@@ -15810,7 +15812,6 @@ async function spawnAcpRun({ agent, cwd, workerModel, model, modelSource, messag
  if (!childSessionKey) {
   throw new Error(`OpenClaw did not return an ACP child session: ${spawnReply.text.slice(0, 600)}`);
  }
- let permissionWarning = null;
  try {
   if (effectiveWorkerModel) {
    const modelReply = await runGatewaySlashCommand(
@@ -15820,19 +15821,6 @@ async function spawnAcpRun({ agent, cwd, workerModel, model, modelSource, messag
    );
    if (/\b(error|failed|unsupported|not found)\b/i.test(modelReply.text)) {
     throw new Error(`ACP model configuration failed: ${modelReply.text}`);
-   }
-  }
-  const permissionMode = permissions || 'approve-reads';
-  if (permissionMode) {
-   const permissionReply = await runGatewaySlashCommand(
-    `/acp permissions ${acpCommandToken(permissionMode)} ${acpCommandToken(childSessionKey)}`,
-    parentSessionKey,
-    { timeoutMs: 30000 },
-   );
-   if (/ACP_BACKEND_UNSUPPORTED_CONTROL|does not accept config key/i.test(permissionReply.text)) {
-    permissionWarning = permissionReply.text;
-   } else if (/\b(error|failed|unsupported|not found)\b/i.test(permissionReply.text)) {
-    throw new Error(`ACP permission configuration failed: ${permissionReply.text}`);
    }
   }
  } catch (error) {
@@ -15867,7 +15855,14 @@ async function spawnAcpRun({ agent, cwd, workerModel, model, modelSource, messag
   projectRef: projectRef || null,
   parentRunId: parentRunId || null,
   parentMessageId: parentMessageId || null,
- permissionWarning,
+ // ACPX does not offer a per-session `approval_policy` control. Preserve the
+ // user's Trooper preference as metadata and never emit `/acp permissions`,
+ // which the backend rejects with ACP_BACKEND_UNSUPPORTED_CONTROL.
+ permissionControl: {
+  supported: false,
+  scope: 'trooper_preference_only',
+  message: 'ACPX does not support a per-session approval policy.',
+ },
   output: '',
   transcript: [{
    id: `request:${sessionId}`,
@@ -16090,24 +16085,30 @@ app.put('/acp/sessions/:sessionId/permissions', async (req, res) => {
  try {
  const { sessionId } = req.params;
  const { permissions } = req.body || {};
- if (!permissions || !['approve-all', 'approve-reads', 'deny-all'].includes(permissions)) {
- return res.status(400).json({ error: 'permissions must be approve-all, approve-reads, or deny-all' });
+ if (!permissions || !['approve-all', 'approve-reads', 'approve-each', 'deny-all'].includes(permissions)) {
+ return res.status(400).json({ error: 'permissions must be approve-all, approve-reads, approve-each, or deny-all' });
  }
  const local = acpSessionRegistry.get(sessionId);
  if (!local?.sessionKey) return res.status(404).json({ error: 'ACP session not found' });
- const output = await runGatewaySlashCommand(
-  `/acp permissions ${acpCommandToken(permissions)} ${acpCommandToken(local.sessionKey)}`,
-  local.parentSessionKey || acpParentSessionKey(local.channel),
-  { timeoutMs: 30000 },
- );
- const unsupported = /ACP_BACKEND_UNSUPPORTED_CONTROL|does not accept config key/i.test(output.text);
- if (!unsupported && /\b(error|failed|unsupported|not found)\b/i.test(output.text)) {
-  throw new Error(`ACP permission update failed: ${output.text}`);
- }
  local.permissions = permissions;
  local.lastActivity = Date.now();
- local.permissionWarning = unsupported ? output.text : null;
- res.json({ sessionId, permissions, output: { ok: true, supported: !unsupported, message: output.text } });
+ // ACPX's config schema has no approval_policy key. Treat this as a local
+ // preference instead of issuing `/acp permissions` and leaking a backend
+ // capability error into the user's channel.
+ local.permissionControl = {
+  supported: false,
+  scope: 'trooper_preference_only',
+  message: 'ACPX does not support a per-session approval policy.',
+ };
+ res.json({
+  sessionId,
+  permissions,
+  output: {
+   ok: true,
+   supported: false,
+   message: local.permissionControl.message,
+  },
+ });
  } catch (e) {
  res.status(500).json({ error: e.message });
  }
