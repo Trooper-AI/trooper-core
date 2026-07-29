@@ -47,6 +47,11 @@ import { db, sqlite, DB_PATH } from './db/index.mjs';
 import { migrate } from './db/migrate.mjs';
 import { parseSingleByteRange } from './lib/byte-range.mjs';
 import { buildWeakFileEtag, getFileContentType, ifRangeAllowsRange } from './lib/file-http.mjs';
+import {
+  mergeAcpArtifacts,
+  mergeAcpTranscript,
+  observeAcpSessionHistory,
+} from './lib/acp-session-observation.mjs';
 
 // Run DB migrations on startup
 migrate(sqlite);
@@ -15606,6 +15611,45 @@ function messageText(message) {
  }).filter(Boolean).join('\n').trim();
 }
 
+function serializeAcpSession(local = {}, extra = {}) {
+ const clean = Object.fromEntries(
+  Object.entries(local || {}).filter(([key]) => !key.startsWith('_')),
+ );
+ return { ...clean, ...extra };
+}
+
+function captureAcpSessionHistory(local, history = []) {
+ if (!local) return [];
+ if (!(local._historyKeys instanceof Set)) local._historyKeys = new Set();
+ if (!Array.isArray(local.events)) local.events = [];
+ if (!Array.isArray(local.transcript)) local.transcript = [];
+ if (!Array.isArray(local.artifacts)) local.artifacts = [];
+ const freshEvents = [];
+ for (const record of observeAcpSessionHistory(history)) {
+  if (local._historyKeys.has(record.historyKey)) continue;
+  local._historyKeys.add(record.historyKey);
+  const unseenTranscript = record.transcript.filter((entry) => !local.transcript.some((existing) => (
+   existing?.role === entry?.role && existing?.content === entry?.content
+  )));
+  local.transcript = mergeAcpTranscript(local.transcript, unseenTranscript);
+  local.artifacts = mergeAcpArtifacts(local.artifacts, record.artifacts);
+  for (const event of record.events) {
+   const normalized = {
+    ...event,
+    sequence: Number(local._eventSequence || 0) + 1,
+   };
+   local._eventSequence = normalized.sequence;
+   local.events.push(normalized);
+   freshEvents.push(normalized);
+  }
+ }
+ if (freshEvents.length) {
+  local.events = local.events.slice(-500);
+  local.lastActivity = Date.now();
+ }
+ return freshEvents;
+}
+
 function acpCommandToken(value) {
  const token = String(value ?? '').trim();
  if (!token || /[\r\n\0]/.test(token)) throw new Error('Invalid ACP command value');
@@ -15823,8 +15867,18 @@ async function spawnAcpRun({ agent, cwd, workerModel, model, modelSource, messag
   projectRef: projectRef || null,
   parentRunId: parentRunId || null,
   parentMessageId: parentMessageId || null,
-  permissionWarning,
+ permissionWarning,
   output: '',
+  transcript: [{
+   id: `request:${sessionId}`,
+   role: 'user',
+   content: task,
+   createdAt: Date.now(),
+  }],
+  events: [],
+  artifacts: [],
+  _historyKeys: new Set(),
+  _eventSequence: 0,
  });
  const steerCommand = `/acp steer --session ${acpCommandToken(childSessionKey)} ${task}`;
  void runGatewaySlashCommand(steerCommand, parentSessionKey, { timeoutMs: 2 * 60 * 60 * 1000 })
@@ -15865,7 +15919,7 @@ async function spawnAcpRun({ agent, cwd, workerModel, model, modelSource, messag
 app.get('/acp/sessions', async (req, res) => {
  const sessions = Array.from(acpSessionRegistry.values())
   .sort((left, right) => Number(right.lastActivity || 0) - Number(left.lastActivity || 0));
- res.json(sessions);
+ res.json(sessions.map((session) => serializeAcpSession(session)));
 });
 
 // POST /acp/spawn — Spawn a new ACP agent session
@@ -15928,7 +15982,6 @@ app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
  try {
  const startedAt = Date.now();
  let sentFinal = false;
- let lastProgressAt = 0;
  while (!res.writableEnded && Date.now() - startedAt < 2 * 60 * 60 * 1000) {
   if (local.status === 'failed') {
    const content = stripAnsi(local.output || 'ACP run failed').trim();
@@ -15939,36 +15992,34 @@ app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
    break;
   }
   const history = await gateway.fetchSessionHistory(local.sessionKey, 200, { timeoutMs: 15000 }) || [];
-  const assistantMessages = history.filter((entry) => String(entry?.role || '').toLowerCase() === 'assistant');
-  const finalText = messageText(assistantMessages[assistantMessages.length - 1]);
+  const freshEvents = captureAcpSessionHistory(local, history);
+  for (const event of freshEvents) {
+   res.write(`data: ${JSON.stringify(event)}\n\n`);
+  }
+  const finalAssistant = [...(local.transcript || [])].reverse()
+   .find((entry) => String(entry?.role || '').toLowerCase() === 'assistant');
+  const finalText = messageText(finalAssistant);
   const snapshot = await gateway.fetchSessionSnapshot(local.sessionKey);
   const status = String(snapshot?.status || '').toLowerCase();
   const terminal = ['completed', 'complete', 'done', 'idle', 'failed', 'cancelled', 'canceled'].includes(status);
-  if (finalText && terminal) {
-   res.write(`data: ${JSON.stringify({ type: 'chunk', content: finalText })}\n\n`);
-   res.write(`data: ${JSON.stringify({ type: 'done', exitCode: 0, status: status || 'completed' })}\n\n`);
-   local.status = 'completed';
-   local.output = finalText;
+  if (terminal) {
+   const failed = ['failed', 'cancelled', 'canceled'].includes(status) || local.status === 'failed';
+   const terminalStatus = failed ? (status || 'failed') : 'completed';
+   res.write(`data: ${JSON.stringify({
+    type: failed ? 'error' : 'done',
+    content: failed ? stripAnsi(local.output || `ACP run ${status}`).trim() : finalText,
+    exitCode: failed ? 1 : 0,
+    status: terminalStatus,
+    artifacts: local.artifacts || [],
+   })}\n\n`);
+   local.status = terminalStatus;
+   local.output = failed ? (local.output || finalText) : finalText;
    local.lastActivity = Date.now();
    sentFinal = true;
    void closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {});
    break;
   }
-  if (terminal && !finalText) {
-   const failed = ['failed', 'cancelled', 'canceled'].includes(status);
-   const content = failed ? stripAnsi(local.output || `ACP run ${status}`).trim() : '';
-   res.write(`data: ${JSON.stringify({ type: failed ? 'error' : 'done', content, status })}\n\n`);
-   local.status = status || 'completed';
-   sentFinal = true;
-   void closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {});
-   break;
-  }
-  if (Date.now() - lastProgressAt >= 10000) {
-   res.write(`data: ${JSON.stringify({ type: 'progress', content: 'ACP worker is running', status: status || 'working' })}\n\n`);
-   lastProgressAt = Date.now();
-  } else {
-   res.write(': keepalive\n\n');
-  }
+  res.write(': keepalive\n\n');
   await new Promise((resolve) => setTimeout(resolve, 1000));
  }
  if (!sentFinal && !res.writableEnded) {
@@ -16024,7 +16075,11 @@ app.get('/acp/sessions/:sessionId', async (req, res) => {
  const { sessionId } = req.params;
  const local = acpSessionRegistry.get(sessionId) || {};
  const status = local?.sessionKey ? await gateway.fetchSessionSnapshot(local.sessionKey) : null;
- res.json({ ...(status || {}), ...local });
+ if (local?.sessionKey) {
+  const history = await gateway.fetchSessionHistory(local.sessionKey, 250, { timeoutMs: 15000 }) || [];
+  captureAcpSessionHistory(local, history);
+ }
+ res.json(serializeAcpSession(local, status || {}));
  } catch (e) {
  res.status(500).json({ error: e.message });
  }
