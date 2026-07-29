@@ -168,11 +168,19 @@ import {
   syncGatewayPlugin,
 } from './lib/gateway-plugins.mjs';
 import {
-  CodexDeviceAuthJobManager,
+ CodexDeviceAuthJobManager,
   DEFAULT_CODEX_ACP_CONTAINER_HOME,
   hasValidNativeCodexChatGptAuth,
   redactCodexDeviceAuthOutput,
 } from './lib/codex-device-auth.mjs';
+import {
+ AcpAccountAuthJobManager,
+ normalizeAccountAuthTarget,
+ redactAccountAuthOutput,
+} from './lib/acp-account-auth.mjs';
+import {
+ buildAcpGatewayCapabilities,
+} from './lib/acp-gateway-capabilities.mjs';
 import {
   MANAGED_ACP_CLI_CATALOG,
   ManagedAcpCliManager,
@@ -4997,19 +5005,26 @@ const ACP_HARNESS_CATALOG = Object.freeze({
   nativeModelLabel: 'Codex account default',
   connectAction: 'connect_codex',
  },
- gemini: {
-  label: 'Gemini CLI',
-  provider: 'gemini',
-  authProvider: 'gemini',
-  nativeModelLabel: 'Gemini CLI account default',
-  connectAction: 'connect_gemini',
- },
  opencode: {
   label: 'OpenCode',
   provider: 'opencode',
   authProvider: null,
   nativeModelLabel: 'OpenCode session default',
   connectAction: 'configure_opencode',
+ },
+ kimi: {
+  label: 'Kimi Code',
+  provider: 'moonshot',
+  authProvider: 'kimi',
+  nativeModelLabel: 'Kimi account default',
+  connectAction: 'connect_kimi',
+ },
+ copilot: {
+  label: 'GitHub Copilot',
+  provider: 'github-copilot',
+  authProvider: 'github',
+  nativeModelLabel: 'Copilot account default',
+  connectAction: 'connect_copilot',
  },
 });
 
@@ -5479,7 +5494,7 @@ try {
  enabled: true,
  backend: 'acpx',
  defaultAgent: 'claude',
- allowedAgents: ['claude', 'codex', 'gemini', 'opencode'],
+ allowedAgents: ['claude', 'codex', 'opencode', 'kimi', 'copilot'],
  maxConcurrentSessions: 3,
  dispatch: { enabled: true },
  };
@@ -5544,6 +5559,11 @@ const codexDeviceAuthJobs = new CodexDeviceAuthJobManager({
  containerName: OPENCLAW_GATEWAY_CONTAINER,
  codexHome: CODEX_ACP_CONTAINER_HOME,
  execFile: runExecFileAsync,
+});
+const acpAccountAuthJobs = new AcpAccountAuthJobManager({
+ containerName: OPENCLAW_GATEWAY_CONTAINER,
+ execFile: runExecFileAsync,
+ audit: (event) => console.info('[acp-account-auth]', JSON.stringify(event)),
 });
 // Non-Codex ACP CLIs use their own fixed package/binary recipes. This is
 // intentionally separate from the plugin-only /gateway/exec endpoint.
@@ -13136,6 +13156,190 @@ app.post('/gateway/plugins/install-package', async (req, res) => {
 // This is intentionally separate from /gateway/exec. It only runs a fixed
 // Codex CLI lifecycle as the actual node user inside the gateway container,
 // and its in-memory job output is redacted before it reaches the caller.
+async function inspectGatewayReleaseIdentity() {
+ try {
+  const containerResult = await runExecFileAsync('docker', [
+   'inspect',
+   '--format',
+   '{{.Image}}',
+   OPENCLAW_GATEWAY_CONTAINER,
+  ], { timeout: 10_000 });
+  const imageDigest = String(containerResult.stdout || '').trim() || null;
+  if (!imageDigest) return { commit: null, imageDigest: null };
+  const imageResult = await runExecFileAsync('docker', [
+   'image',
+   'inspect',
+   '--format',
+   '{{index .Config.Labels "org.opencontainers.image.revision"}}',
+   imageDigest,
+  ], { timeout: 10_000 }).catch(() => ({ stdout: '' }));
+  const commit = String(imageResult.stdout || '').trim();
+  return {
+   commit: commit && commit !== '<no value>' ? commit : null,
+   imageDigest,
+  };
+ } catch {
+  return { commit: null, imageDigest: null };
+ }
+}
+
+app.get('/gateway/capabilities', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+  const names = Object.keys(MANAGED_ACP_CLI_CATALOG);
+  const entries = await Promise.all(names.map(async (harness) => [
+   harness,
+   await managedAcpCliManager.getAvailability(harness).catch(() => ({
+    installed: null,
+    authenticated: null,
+    version: null,
+   })),
+  ]));
+  const codex = await codexDeviceAuthJobs.getAvailability().catch(() => ({
+   installed: null,
+   authenticated: null,
+   version: null,
+  }));
+  const releaseIdentity = await inspectGatewayReleaseIdentity();
+  res.json({
+   success: true,
+   ...buildAcpGatewayCapabilities({
+    commit: releaseIdentity.commit,
+    imageDigest: releaseIdentity.imageDigest,
+    availabilityByHarness: {
+     ...Object.fromEntries(entries),
+     codex,
+    },
+   }),
+  });
+ } catch (error) {
+  res.status(500).json({
+   success: false,
+   code: 'ACP_CAPABILITIES_FAILED',
+   error: 'Could not inspect gateway ACP capabilities.',
+  });
+ }
+});
+
+function readUnifiedAcpAuthTarget(req) {
+ const harness = String(req.params?.harness || '').trim().toLowerCase();
+ const provider = String(req.body?.provider || req.query?.provider || '').trim().toLowerCase();
+ if (harness === 'codex') return { harness, provider: null, codex: true };
+ const target = normalizeAccountAuthTarget(harness, provider);
+ if (!target) {
+  const error = new Error('This ACP account-login target is not supported.');
+  error.code = 'ACP_AUTH_UNSUPPORTED';
+  throw error;
+ }
+ return target;
+}
+
+function sendUnifiedAcpAuthError(res, error) {
+ const code = String(error?.code || 'ACP_AUTH_FAILED');
+ const status = code === 'ACP_AUTH_UNSUPPORTED' ? 404
+  : code === 'ACP_AUTH_INPUT_INVALID' ? 400
+   : code === 'ACP_AUTH_INPUT_NOT_EXPECTED' ? 409
+    : 500;
+ res.status(status).json({
+  success: false,
+  code,
+  error: redactAccountAuthOutput(error?.message || 'ACP account login failed', 800),
+ });
+}
+
+app.get('/gateway/acp/auth/:harness/status', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+  const target = readUnifiedAcpAuthTarget(req);
+  const status = target.codex
+   ? await codexDeviceAuthJobs.getAvailability()
+   : await acpAccountAuthJobs.getStatus(target.harness, target.provider);
+  res.json({ success: true, ...status });
+ } catch (error) {
+  sendUnifiedAcpAuthError(res, error);
+ }
+});
+
+app.post('/gateway/acp/auth/:harness/jobs', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+  const target = readUnifiedAcpAuthTarget(req);
+  if (target.codex) {
+   const job = await codexDeviceAuthJobs.start({
+    force: req.body?.force === true,
+    restart: req.body?.force === true || req.body?.restart === true,
+    installIfMissing: req.body?.installIfMissing !== false,
+   });
+   return res.status(job.alreadyAuthenticated ? 200 : 202).json({
+    success: true,
+    ...job,
+    harness: 'codex',
+    promptType: 'none',
+   });
+  }
+  const job = acpAccountAuthJobs.start(target.harness, {
+   provider: target.provider,
+   force: req.body?.force === true,
+  });
+  res.status(202).json({ success: true, ...job });
+ } catch (error) {
+  sendUnifiedAcpAuthError(res, error);
+ }
+});
+
+app.get('/gateway/acp/auth/:harness/jobs/:jobId', (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+  const target = readUnifiedAcpAuthTarget(req);
+  const job = target.codex
+   ? codexDeviceAuthJobs.getStatus(String(req.params.jobId || '').trim())
+   : acpAccountAuthJobs.getJob(req.params.jobId);
+  if (!job) return res.status(404).json({ success: false, code: 'ACP_AUTH_JOB_NOT_FOUND', error: 'Account-login job not found.' });
+  res.json({
+   success: true,
+   ...job,
+   harness: target.harness,
+   provider: target.provider,
+   promptType: job.promptType || 'none',
+  });
+ } catch (error) {
+  sendUnifiedAcpAuthError(res, error);
+ }
+});
+
+app.post('/gateway/acp/auth/:harness/jobs/:jobId/input', (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+  const target = readUnifiedAcpAuthTarget(req);
+  if (target.codex) {
+   return res.status(409).json({
+    success: false,
+    code: 'ACP_AUTH_INPUT_NOT_EXPECTED',
+    error: 'Codex device authorization accepts its one-time code only on OpenAI’s official page.',
+   });
+  }
+  const job = acpAccountAuthJobs.input(req.params.jobId, req.body?.value);
+  if (!job) return res.status(404).json({ success: false, code: 'ACP_AUTH_JOB_NOT_FOUND', error: 'Account-login job not found.' });
+  res.status(202).json({ success: true, ...job });
+ } catch (error) {
+  sendUnifiedAcpAuthError(res, error);
+ }
+});
+
+app.delete('/gateway/acp/auth/:harness/jobs/:jobId', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+  const target = readUnifiedAcpAuthTarget(req);
+  const job = target.codex
+   ? await codexDeviceAuthJobs.cancel(String(req.params.jobId || '').trim())
+   : acpAccountAuthJobs.cancel(req.params.jobId);
+  if (!job) return res.status(404).json({ success: false, code: 'ACP_AUTH_JOB_NOT_FOUND', error: 'Account-login job not found.' });
+  res.status(202).json({ success: true, ...job });
+ } catch (error) {
+  sendUnifiedAcpAuthError(res, error);
+ }
+});
+
 function getCodexDeviceAuthJobId(req) {
  const jobId = String(req.params?.jobId || '').trim();
  if (!jobId || jobId.length > 128) return null;
@@ -16045,7 +16249,7 @@ app.get('/acp/agents', async (req, res) => {
   const authDoc = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
   syncCodexOAuthToAcpHome(authDoc, { overwriteNative: false });
  } catch {}
- const [managedEntries, codexAvailability, opencodeProviderAvailability] = await Promise.all([
+ const [managedEntries, codexAvailability, opencodeProviderAvailability, accountAuthEntries] = await Promise.all([
   Promise.all(Object.keys(MANAGED_ACP_CLI_CATALOG).map(async (name) => [
    name,
    await managedAcpCliManager.getAvailability(name).catch((error) => ({
@@ -16061,28 +16265,46 @@ app.get('/acp/agents', async (req, res) => {
   ])),
   codexDeviceAuthJobs.getAvailability().catch(() => null),
   getOpenCodeAcpProviderAvailability().catch(() => null),
+  Promise.all([
+   ['claude', null],
+   ['kimi', null],
+   ['copilot', null],
+   ['opencode', 'openai'],
+   ['opencode', 'xai'],
+   ['opencode', 'github-copilot'],
+  ].map(async ([harness, provider]) => [
+   `${harness}:${provider || ''}`,
+   await acpAccountAuthJobs.getStatus(harness, provider).catch(() => null),
+  ])),
  ]);
  rememberOpenCodeAcpProviderAvailability(opencodeProviderAvailability);
  const managedByName = new Map(managedEntries);
+ const accountAuthByTarget = new Map(accountAuthEntries);
  const agents = Object.entries(ACP_HARNESS_CATALOG).map(([name, meta]) => {
   const connection = getAcpHarnessConnectionState(name);
   const managed = managedByName.get(name) || null;
   const codex = name === 'codex' ? codexAvailability : null;
   const opencodeProvider = name === 'opencode' ? opencodeProviderAvailability : null;
+  const directAccountAuth = accountAuthByTarget.get(`${name}:`) || null;
+  const openCodeAccountAuth = name === 'opencode'
+   ? ['openai', 'xai', 'github-copilot']
+    .map((provider) => accountAuthByTarget.get(`opencode:${provider}`))
+    .filter(Boolean)
+   : [];
+  const connectedOpenCodeAccount = openCodeAccountAuth.find((entry) => entry.authenticated === true) || null;
   const managedForAgent = name === 'opencode'
    ? {
-    // ACPX owns OpenCode's fixed `npx -y opencode-ai acp` bootstrap. Do not
-    // make readiness depend on a global npm install in the disposable gateway
-    // image; this managed config is the durable adapter contract instead.
+    // ACPX owns OpenCode's pinned managed binary. Do not make readiness depend
+    // on an unversioned npx download in a disposable gateway image.
     harness: 'opencode',
     label: meta.label,
     supported: true,
-    managedInstall: false,
-    adapter: 'acpx_npx',
-    installed: opencodeProvider?.configured ? true : null,
-    authenticated: Boolean(opencodeProvider?.authenticated),
-    authMode: opencodeProvider?.authMode || 'provider_selection_required',
-    authHint: opencodeProvider?.authHint || 'Choose Anthropic, OpenAI, or OpenRouter, then configure that provider’s gateway API key. Trooper stores only an environment reference, never the key.',
+    managedInstall: true,
+    adapter: 'managed_binary',
+    installed: managed?.installed ?? null,
+    authenticated: Boolean(connectedOpenCodeAccount || opencodeProvider?.authenticated),
+    authMode: 'provider_account_login',
+    authHint: 'Choose ChatGPT, SuperGrok/xAI, or GitHub Copilot and complete OpenCode’s official provider login. API credentials are available only under Advanced.',
     providerConfig: opencodeProvider ? {
      selectedProvider: opencodeProvider.selectedProvider || null,
      credentialPresent: Boolean(opencodeProvider.credentialPresent),
@@ -16095,15 +16317,15 @@ app.get('/acp/agents', async (req, res) => {
    ? managedForAgent?.installed ?? null
    : managed?.installed ?? codex?.installed ?? null;
   const nativeAuthenticated = name === 'opencode'
-   ? Boolean(opencodeProvider?.authenticated)
-   : managed?.authenticated ?? codex?.authenticated ?? null;
+   ? Boolean(connectedOpenCodeAccount || opencodeProvider?.authenticated)
+   : directAccountAuth?.authenticated ?? managed?.authenticated ?? codex?.authenticated ?? null;
   // A provider API credential remains a valid connection route when the
   // provider supports it. A verified native CLI login can only strengthen that
   // result; a missing CLI must always block ACP spawn.
   const connected = installed === false
    ? false
    : name === 'opencode'
-    ? Boolean(opencodeProvider?.authenticated)
+    ? Boolean(connectedOpenCodeAccount || opencodeProvider?.authenticated)
     : nativeAuthenticated === true
      ? true
      : connection.connected;
@@ -16114,7 +16336,10 @@ app.get('/acp/agents', async (req, res) => {
     : connection.connectionStatus;
   const setupProblem = installed === false
    ? (managed?.error || codex?.error || `${meta.label} is not installed on the gateway runtime.`)
-   : opencodeProvider?.error || connection.text || connection.lastError || managedForAgent?.authHint || null;
+   : connected
+    ? null
+    : (name === 'opencode' ? null : directAccountAuth?.error)
+      || opencodeProvider?.error || connection.text || connection.lastError || managedForAgent?.authHint || null;
   const available = gateway.isReady && installed !== false && connectionStatus !== 'auth_required';
   return {
    name,

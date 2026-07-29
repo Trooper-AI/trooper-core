@@ -38,10 +38,15 @@ jobs:
         with:
           pull: true
           push: true
-          tags: ghcr.io/trooper-ai/trooper-gateway:latest
+          tags: |
+            ghcr.io/trooper-ai/trooper-gateway:latest
+            ghcr.io/trooper-ai/trooper-gateway:${{ github.sha }}
+          build-args: |
+            TROOPER_CORE_COMMIT=${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/Trooper-AI/trooper-core
             org.opencontainers.image.description=Trooper OpenClaw gateway runtime
+            org.opencontainers.image.revision=${{ github.sha }}
       - name: Verify public GHCR pull
         run: |
           docker logout ghcr.io >/dev/null 2>&1 || true

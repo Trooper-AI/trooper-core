@@ -1335,7 +1335,7 @@ ${MODELS_PROVIDERS}
  "enabled": true,
  "backend": "acpx",
  "defaultAgent": "claude",
- "allowedAgents": ["claude", "codex", "gemini", "opencode"],
+ "allowedAgents": ["claude", "codex", "opencode", "kimi", "copilot"],
  "maxConcurrentSessions": 3,
  "dispatch": { "enabled": true }
  },
