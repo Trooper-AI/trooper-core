@@ -179,6 +179,10 @@ import {
   OPENCLAW_BASE_IMAGE,
 } from './lib/base-image-pin.mjs';
 import {
+  buildInterruptedAcpToolResultEvent,
+  listUnmatchedAcpToolUses,
+} from './lib/interrupted-tool-result.mjs';
+import {
  CodexDeviceAuthJobManager,
   DEFAULT_CODEX_ACP_CONTAINER_HOME,
   hasValidNativeCodexChatGptAuth,
@@ -15665,6 +15669,23 @@ function captureAcpSessionHistory(local, history = []) {
  return freshEvents;
 }
 
+// On a failed/cancelled terminal, close any tool_use that never got a result
+// with an explicit interruption marker so observers (and anything replaying
+// the event stream) see the honest state instead of a silently open call.
+// Pairing treats prior markers as results, so this is idempotent.
+function appendAcpInterruptionMarkers(local) {
+ if (!local || !Array.isArray(local.events)) return [];
+ const markers = [];
+ for (const pending of listUnmatchedAcpToolUses(local.events)) {
+  const marker = buildInterruptedAcpToolResultEvent(pending);
+  marker.sequence = Number(local._eventSequence || 0) + 1;
+  local._eventSequence = marker.sequence;
+  local.events.push(marker);
+  markers.push(marker);
+ }
+ return markers;
+}
+
 function acpCommandToken(value) {
  const token = String(value ?? '').trim();
  if (!token || /[\r\n\0]/.test(token)) throw new Error('Invalid ACP command value');
@@ -15994,6 +16015,9 @@ app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
  let sentFinal = false;
  while (!res.writableEnded && Date.now() - startedAt < 2 * 60 * 60 * 1000) {
   if (local.status === 'failed') {
+   for (const marker of appendAcpInterruptionMarkers(local)) {
+    res.write(`data: ${JSON.stringify(marker)}\n\n`);
+   }
    const content = stripAnsi(local.output || 'ACP run failed').trim();
    res.write(`data: ${JSON.stringify({ type: 'error', content, status: 'failed' })}\n\n`);
    local.lastActivity = Date.now();
@@ -16015,6 +16039,11 @@ app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
   if (terminal) {
    const failed = ['failed', 'cancelled', 'canceled'].includes(status) || local.status === 'failed';
    const terminalStatus = failed ? (status || 'failed') : 'completed';
+   if (failed) {
+    for (const marker of appendAcpInterruptionMarkers(local)) {
+     res.write(`data: ${JSON.stringify(marker)}\n\n`);
+    }
+   }
    res.write(`data: ${JSON.stringify({
     type: failed ? 'error' : 'done',
     content: failed ? stripAnsi(local.output || `ACP run ${status}`).trim() : finalText,
