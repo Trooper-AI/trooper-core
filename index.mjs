@@ -191,6 +191,10 @@ import {
   createAcpEventStreamRegistry,
 } from './lib/acp-event-stream.mjs';
 import {
+  ACP_EVENT_RELAY_PLUGIN_ID,
+  buildAcpEventRelayPluginFiles,
+} from './lib/acp-event-relay-plugin.mjs';
+import {
  CodexDeviceAuthJobManager,
   DEFAULT_CODEX_ACP_CONTAINER_HOME,
   hasValidNativeCodexChatGptAuth,
@@ -1955,6 +1959,49 @@ function ensureImageGenerationDefaultsPluginForGatewayStart(config, repairs) {
  }
 }
 
+// Bridge-owned telemetry plugins (run-completion push + ACP event relay) are
+// staged and installed by syncBridgeOwnedGatewayPlugins, but installation
+// alone does not enable them — they must be registered in config.plugins.
+// run-completion shipped without this registration for a while, so this also
+// repairs existing deployments.
+function ensureBridgeTelemetryPluginsForGatewayStart(config, repairs) {
+ if (!config.plugins || typeof config.plugins !== 'object' || Array.isArray(config.plugins)) config.plugins = {};
+ if (!config.plugins.entries || typeof config.plugins.entries !== 'object' || Array.isArray(config.plugins.entries)) {
+  config.plugins.entries = {};
+ }
+ const wanted = [
+  { id: RUN_COMPLETION_PLUGIN_ID, allowConversationAccess: false },
+  // Conversation access lets the relay carry tool activity for the shared
+  // ACP stream; content is capped in the plugin and only ever posted to the
+  // bridge's own /internal/acp-event on the docker host.
+  { id: ACP_EVENT_RELAY_PLUGIN_ID, allowConversationAccess: true },
+ ];
+ for (const plugin of wanted) {
+  const existing = config.plugins.entries[plugin.id];
+  const entry = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
+  if (entry.enabled !== true) {
+   entry.enabled = true;
+   repairs.push(`plugins.entries.${plugin.id}: enabled bridge telemetry plugin`);
+  }
+  if (plugin.allowConversationAccess) {
+   if (!entry.hooks || typeof entry.hooks !== 'object' || Array.isArray(entry.hooks)) entry.hooks = {};
+   if (entry.hooks.allowConversationAccess !== true) {
+    entry.hooks.allowConversationAccess = true;
+    repairs.push(`plugins.entries.${plugin.id}.hooks.allowConversationAccess: enabled activity relay`);
+   }
+  }
+  config.plugins.entries[plugin.id] = entry;
+  if (Array.isArray(config.plugins.allow) && !config.plugins.allow.includes(plugin.id)) {
+   config.plugins.allow.push(plugin.id);
+   repairs.push(`plugins.allow: added ${plugin.id}`);
+  }
+  if (Array.isArray(config.plugins.deny) && config.plugins.deny.includes(plugin.id)) {
+   config.plugins.deny = config.plugins.deny.filter((pluginId) => pluginId !== plugin.id);
+   repairs.push(`plugins.deny: removed ${plugin.id}`);
+  }
+ }
+}
+
 function prepareOpenClawConfigForGatewayStart(config) {
  const next = cloneJson(config);
  const repairs = [];
@@ -1962,6 +2009,7 @@ function prepareOpenClawConfigForGatewayStart(config) {
  sanitizeBravePluginConfigForGatewayStart(next, repairs);
  augmentImageGenerationFallbacksForGatewayStart(next, repairs);
  ensureImageGenerationDefaultsPluginForGatewayStart(next, repairs);
+ ensureBridgeTelemetryPluginsForGatewayStart(next, repairs);
 
  const providers = next?.models?.providers;
  if (providers && typeof providers === 'object' && !Array.isArray(providers)) {
@@ -2054,6 +2102,11 @@ function syncBridgeOwnedGatewayPlugins(reason = 'startup') {
    id: IMAGE_GENERATION_DEFAULTS_PLUGIN_ID,
    label: 'image-generation-defaults',
    files: buildImageGenerationDefaultsPluginFiles(),
+  },
+  {
+   id: ACP_EVENT_RELAY_PLUGIN_ID,
+   label: 'acp-event-relay',
+   files: buildAcpEventRelayPluginFiles({ bridgePort: PORT, token: BRIDGE_AUTH_TOKEN || '' }),
   },
  ];
  const results = {};
@@ -4936,6 +4989,23 @@ const runTerminalMarkers = new RunTerminalMarkerStore();
 
 // ── Live agent event forwarding (cron, background runs → Trooper frontend) ──
 gateway._onAnyAgentEvent = (stream, data, runId) => {
+  // Push probe: if this frame belongs to an ACP child session someone is
+  // streaming, feed it into the shared stream's dedupe line and count it —
+  // /capabilities exposes whether this gateway emits agent frames for ACP
+  // children, which decides how much the relay plugin matters here.
+  const frameSessionKey = data?.sessionKey || data?.key || null;
+  if (frameSessionKey && acpEventStreams.indexBySessionKey(frameSessionKey)) {
+    acpEventPushStats.agentFramesObserved += 1;
+    acpEventPushStats.lastAt = Date.now();
+    acpEventStreams.ingestExternalEvents(frameSessionKey, [{
+      kind: stream,
+      type: stream,
+      tool: data?.name || data?.tool || undefined,
+      toolCallId: data?.toolCallId || data?.callId || undefined,
+      content: typeof data?.content === 'string' ? data.content.slice(0, 2000) : undefined,
+      runId: runId || undefined,
+    }], { source: 'acp_push' });
+  }
   // Only forward meaningful events, not high-frequency text chunks
   if (stream === 'tool_use' || stream === 'tool_result' || stream === 'lifecycle' || stream === 'compaction') {
     const eventType = stream === 'tool_use'
@@ -5024,6 +5094,10 @@ async function forwardToMissionControl(taskId, agentName, result, requestId) {
 
 // ── ACP Session Registry (tracks active ACP agent sessions) ─────────
 const acpSessionRegistry = new Map(); // sessionId -> { agent, sessionKey, status, spawnedAt, lastActivity, permissions, output }
+// Observability for the ACP push lane: agent WS frames matched to streamed
+// ACP children, and relay-plugin POSTs. Exposed via /capabilities so a
+// deployment can see whether push is flowing or polling is carrying it all.
+const acpEventPushStats = { agentFramesObserved: 0, lastAt: null, relayPostsObserved: 0, lastRelayAt: null };
 const acpHarnessRuntimeState = new Map(); // harness -> last observed auth/quota/runtime state
 // This cache is refreshed by the fixed in-container OpenCode config probe.
 // It contains a provider name and boolean only — never OpenCode config or keys.
@@ -14067,6 +14141,10 @@ function buildOpenClawCapabilitiesPayload() {
    features: summarizeGatewayFeatures(gateway?.gatewayFeatures),
    negotiationSource: gateway?.gatewayFeatures ? 'connect_handshake' : 'probe_fallback',
   },
+  acpEventPush: {
+   ...acpEventPushStats,
+   stream: acpEventStreams.getStats(),
+  },
   commitments: {
    enabledByOpenClawConfig: readOpenClawConfig()?.commitments?.enabled === true,
    supported: true,
@@ -17479,6 +17557,42 @@ app.post('/local-model/probe', async (req, res) => {
 // agent_end/session_end hooks inside the gateway POST here the moment a run
 // terminates — independent of the WS res frame the bridge otherwise needs.
 // Reachable from the container at host.docker.internal:PORT.
+// POST /internal/acp-event — batched session activity pushed by the
+// trooper-acp-event-relay gateway plugin. Same trust boundary as
+// /internal/run-complete: docker-local source or the bridge token.
+app.post('/internal/acp-event', (req, res) => {
+ try {
+  const remote = String(req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
+  const isLocal = remote === '::1'
+   || /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(remote);
+  const token = String(req.headers['x-trooper-bridge-token'] || '');
+  if (!isLocal && (!BRIDGE_AUTH_TOKEN || token !== BRIDGE_AUTH_TOKEN)) {
+   return res.status(403).json({ error: 'forbidden' });
+  }
+  const events = Array.isArray(req.body?.events) ? req.body.events : [];
+  acpEventPushStats.relayPostsObserved += 1;
+  acpEventPushStats.lastRelayAt = Date.now();
+  const bySession = new Map();
+  for (const event of events) {
+   const sessionKey = String(event?.sessionKey || '').trim();
+   if (!sessionKey) continue;
+   if (!bySession.has(sessionKey)) bySession.set(sessionKey, []);
+   bySession.get(sessionKey).push(event);
+  }
+  let accepted = 0;
+  let dropped = events.length - [...bySession.values()].reduce((sum, list) => sum + list.length, 0);
+  for (const [sessionKey, sessionEvents] of bySession) {
+   const result = acpEventStreams.ingestExternalEvents(sessionKey, sessionEvents, { source: 'acp_push' });
+   accepted += result.accepted;
+   dropped += result.dropped;
+  }
+  // 202: accepted-and-possibly-dropped — a child may already be closed/GC'd.
+  res.status(202).json({ ok: true, accepted, dropped });
+ } catch (error) {
+  res.status(500).json({ ok: false, error: error.message });
+ }
+});
+
 app.post('/internal/run-complete', (req, res) => {
  try {
   const remote = String(req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
