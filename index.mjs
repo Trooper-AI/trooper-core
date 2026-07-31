@@ -183,6 +183,11 @@ import {
   listUnmatchedAcpToolUses,
 } from './lib/interrupted-tool-result.mjs';
 import {
+  orderMethodCandidates,
+  parseGatewayFeatures,
+  summarizeGatewayFeatures,
+} from './lib/gateway-capabilities-handshake.mjs';
+import {
  CodexDeviceAuthJobManager,
   DEFAULT_CODEX_ACP_CONTAINER_HOME,
   hasValidNativeCodexChatGptAuth,
@@ -2494,6 +2499,11 @@ class OpenClawGateway {
  this._historyQueue = [];
  this._historyMaxConcurrent = Math.max(1, Number(process.env.OPENCLAW_HISTORY_MAX_CONCURRENT || 3));
  this._historyCacheTtlMs = Math.max(250, Number(process.env.OPENCLAW_HISTORY_CACHE_TTL_MS || 2000));
+ // Negotiated capabilities from the connect handshake (hello-ok features).
+ // Kept across disconnects — they describe the gateway binary; the next
+ // successful handshake refreshes them.
+ this.gatewayFeatures = null;
+ this.lastConnectSnapshot = null;
 	 this.connect();
 	 }
 
@@ -2666,6 +2676,10 @@ class OpenClawGateway {
  this.connected = true;
  this.lastConnectedAt = Date.now();
  this.lastError = null;
+ // Capture what this gateway build advertises instead of rediscovering it
+ // later through error-string probes (see orderMethodCandidates callers).
+ this.gatewayFeatures = parseGatewayFeatures(result);
+ this.lastConnectSnapshot = result?.snapshot || null;
  // Clear sticky auth failures so health/UI stop reporting "missing scope" after a good connect.
  this.lastAuthError = null;
  this.lastAuthAt = null;
@@ -3483,23 +3497,26 @@ class OpenClawGateway {
   const safeRunId = typeof opts?.runId === 'string' ? opts.runId.trim() : '';
   const timeoutMs = Number.isFinite(Number(opts?.timeoutMs)) ? Number(opts.timeoutMs) : 10000;
   if (!safeSessionKey && !safeRunId) throw new Error('sessionKey or runId is required');
-  const nativeParams = {
-   ...(safeSessionKey ? { key: safeSessionKey } : {}),
-   ...(safeRunId ? { runId: safeRunId } : {}),
-  };
-  try {
-   const result = await this.request('sessions.abort', nativeParams, { timeoutMs });
-   return { ok: true, method: 'sessions.abort', ...(result || {}) };
-  } catch (err) {
-   if (!safeSessionKey) throw err;
-   console.warn(`[OpenClaw] sessions.abort failed; falling back to chat.abort: ${err.message}`);
-   const legacyParams = {
-    sessionKey: safeSessionKey,
-    ...(safeRunId ? { runId: safeRunId } : {}),
-   };
-   const result = await this.request('chat.abort', legacyParams, { timeoutMs });
-   return { ok: true, method: 'chat.abort', ...(result || {}) };
+  const paramsFor = (method) => method === 'chat.abort'
+   ? { sessionKey: safeSessionKey, ...(safeRunId ? { runId: safeRunId } : {}) }
+   : { ...(safeSessionKey ? { key: safeSessionKey } : {}), ...(safeRunId ? { runId: safeRunId } : {}) };
+  // Handshake-advertised support goes first; unadvertised names stay as
+  // fallback (features may under-report). chat.abort needs a sessionKey.
+  const candidates = orderMethodCandidates(this.gatewayFeatures, ['sessions.abort', 'chat.abort'])
+   .filter((method) => method !== 'chat.abort' || safeSessionKey);
+  let lastErr = null;
+  for (const method of candidates) {
+   try {
+    const result = await this.request(method, paramsFor(method), { timeoutMs });
+    return { ok: true, method, ...(result || {}) };
+   } catch (err) {
+    lastErr = err;
+    if (method !== candidates[candidates.length - 1]) {
+     console.warn(`[OpenClaw] ${method} failed; trying next abort method: ${err.message}`);
+    }
+   }
   }
+  throw lastErr || new Error('no abort method available');
  }
 
  async steerSession(sessionKey, message, opts = {}) {
@@ -9976,12 +9993,14 @@ app.get('/admin/devices', async (req, res) => {
 async function approveOpenClawDevicePairingRequest(requestId) {
  const safeRequestId = String(requestId || '').trim();
  if (!safeRequestId) throw new Error('requestId is required');
- const attempts = [
-  { method: 'device.pair.approve', params: { requestId: safeRequestId } },
-  { method: 'device.pair.approve', params: { id: safeRequestId } },
-  { method: 'node.pair.approve', params: { requestId: safeRequestId } },
-  { method: 'node.pair.approve', params: { id: safeRequestId } },
- ];
+ // Method order comes from the handshake-advertised feature list (probe
+ // fallback preserved); the param-name permutation per method remains —
+ // features only name methods, not their parameter shapes.
+ const methods = orderMethodCandidates(gateway.gatewayFeatures, ['device.pair.approve', 'node.pair.approve']);
+ const attempts = methods.flatMap((method) => [
+  { method, params: { requestId: safeRequestId } },
+  { method, params: { id: safeRequestId } },
+ ]);
  const errors = [];
  for (const attempt of attempts) {
   const result = await gatewayRequestResult(attempt.method, attempt.params, { timeoutMs: 15000 });
@@ -10099,14 +10118,19 @@ app.get('/admin/nodes/status', async (req, res) => {
 async function removeNativeOpenClawNode(nodeId) {
  const safeNodeId = String(nodeId || '').trim();
  if (!safeNodeId) throw new Error('nodeId is required');
- const attempts = [
-  { method: 'node.pair.remove', params: { nodeId: safeNodeId } },
-  { method: 'node.pair.remove', params: { id: safeNodeId } },
-  { method: 'node.remove', params: { nodeId: safeNodeId } },
-  { method: 'nodes.remove', params: { nodeId: safeNodeId } },
-  { method: 'device.pair.remove', params: { deviceId: safeNodeId } },
-  { method: 'device.pair.remove', params: { id: safeNodeId } },
- ];
+ // Handshake-advertised methods first, probe fallback preserved; the param
+ // permutations per method remain (features name methods, not param shapes).
+ const paramVariants = {
+  'node.pair.remove': [{ nodeId: safeNodeId }, { id: safeNodeId }],
+  'node.remove': [{ nodeId: safeNodeId }],
+  'nodes.remove': [{ nodeId: safeNodeId }],
+  'device.pair.remove': [{ deviceId: safeNodeId }, { id: safeNodeId }],
+ };
+ const methods = orderMethodCandidates(
+  gateway.gatewayFeatures,
+  ['node.pair.remove', 'node.remove', 'nodes.remove', 'device.pair.remove'],
+ );
+ const attempts = methods.flatMap((method) => paramVariants[method].map((params) => ({ method, params })));
  const errors = [];
  for (const attempt of attempts) {
   try {
@@ -14035,6 +14059,10 @@ function buildOpenClawCapabilitiesPayload() {
    progressEvents: true,
    nativeSteer: true,
    nativeAbort: 'sessions.abort',
+  },
+  gatewayHandshake: {
+   features: summarizeGatewayFeatures(gateway?.gatewayFeatures),
+   negotiationSource: gateway?.gatewayFeatures ? 'connect_handshake' : 'probe_fallback',
   },
   commitments: {
    enabledByOpenClawConfig: readOpenClawConfig()?.commitments?.enabled === true,
