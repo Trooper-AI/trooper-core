@@ -188,6 +188,9 @@ import {
   summarizeGatewayFeatures,
 } from './lib/gateway-capabilities-handshake.mjs';
 import {
+  createAcpEventStreamRegistry,
+} from './lib/acp-event-stream.mjs';
+import {
  CodexDeviceAuthJobManager,
   DEFAULT_CODEX_ACP_CONTAINER_HOME,
   hasValidNativeCodexChatGptAuth,
@@ -15798,6 +15801,38 @@ async function closeGatewayAcpSession(sessionKey, parentSessionKey) {
  return { ok: !/\b(error|failed|not found)\b/i.test(result.text), message: result.text };
 }
 
+// One shared poller per ACP session, however many SSE clients watch it.
+// Gateway I/O is injected so scheduling/fan-out/terminal logic stays
+// unit-testable (lib/acp-event-stream.mjs).
+const acpEventStreams = createAcpEventStreamRegistry({
+ fetchHistory: (sessionKey, limit, opts) => gateway.fetchSessionHistory(sessionKey, limit, opts),
+ fetchSnapshot: (sessionKey) => gateway.fetchSessionSnapshot(sessionKey),
+ captureHistory: (local, history) => captureAcpSessionHistory(local, history),
+ synthesizeInterruptionMarkers: (local) => appendAcpInterruptionMarkers(local),
+ normalizeEvent: normalizeBridgeEventPayload,
+ onTerminalCleanup: (local) => closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {}),
+ buildFinal: (local, { failed, status, timedOut }) => {
+  if (timedOut) {
+   return { type: 'error', content: 'ACP run timed out before a final response', status: 'timeout' };
+  }
+  const finalAssistant = [...(local.transcript || [])].reverse()
+   .find((entry) => String(entry?.role || '').toLowerCase() === 'assistant');
+  const finalText = messageText(finalAssistant);
+  const terminalStatus = failed ? (status || 'failed') : 'completed';
+  const content = failed ? stripAnsi(local.output || `ACP run ${status || 'failed'}`).trim() : finalText;
+  local.status = terminalStatus;
+  local.output = failed ? (local.output || finalText) : finalText;
+  local.lastActivity = Date.now();
+  return {
+   type: failed ? 'error' : 'done',
+   content,
+   exitCode: failed ? 1 : 0,
+   status: terminalStatus,
+   artifacts: local.artifacts || [],
+  };
+ },
+});
+
 async function reapTerminalGatewayAcpSessions(parentSessionKey) {
  const listed = await runGatewaySlashCommand('/acp sessions', parentSessionKey, { timeoutMs: 30000 });
  const keys = parseAcpSessionKeys(listed.text);
@@ -16025,7 +16060,10 @@ app.post('/acp/sessions/:sessionId/steer', async (req, res) => {
  }
 });
 
-// POST /acp/sessions/:sessionId/stream — Stream ACP session response as SSE
+// POST /acp/sessions/:sessionId/stream — Stream ACP session response as SSE.
+// Backed by the shared per-session poller (lib/acp-event-stream.mjs): N
+// concurrent clients cost one gateway poll per tick, and a reconnecting
+// client passes replayFromSequence to resume without a gap.
 app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
  const { sessionId } = req.params;
  const local = acpSessionRegistry.get(sessionId);
@@ -16038,65 +16076,32 @@ app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
  'X-Accel-Buffering': 'no',
  });
 
- try {
- const startedAt = Date.now();
- let sentFinal = false;
- while (!res.writableEnded && Date.now() - startedAt < 2 * 60 * 60 * 1000) {
-  if (local.status === 'failed') {
-   for (const marker of appendAcpInterruptionMarkers(local)) {
-    res.write(`data: ${JSON.stringify(marker)}\n\n`);
-   }
-   const content = stripAnsi(local.output || 'ACP run failed').trim();
-   res.write(`data: ${JSON.stringify({ type: 'error', content, status: 'failed' })}\n\n`);
-   local.lastActivity = Date.now();
-   sentFinal = true;
-   void closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {});
-   break;
-  }
-  const history = await gateway.fetchSessionHistory(local.sessionKey, 200, { timeoutMs: 15000 }) || [];
-  const freshEvents = captureAcpSessionHistory(local, history);
-  for (const event of freshEvents) {
-   res.write(`data: ${JSON.stringify(event)}\n\n`);
-  }
-  const finalAssistant = [...(local.transcript || [])].reverse()
-   .find((entry) => String(entry?.role || '').toLowerCase() === 'assistant');
-  const finalText = messageText(finalAssistant);
-  const snapshot = await gateway.fetchSessionSnapshot(local.sessionKey);
-  const status = String(snapshot?.status || '').toLowerCase();
-  const terminal = ['completed', 'complete', 'done', 'idle', 'failed', 'cancelled', 'canceled'].includes(status);
-  if (terminal) {
-   const failed = ['failed', 'cancelled', 'canceled'].includes(status) || local.status === 'failed';
-   const terminalStatus = failed ? (status || 'failed') : 'completed';
-   if (failed) {
-    for (const marker of appendAcpInterruptionMarkers(local)) {
-     res.write(`data: ${JSON.stringify(marker)}\n\n`);
-    }
-   }
-   res.write(`data: ${JSON.stringify({
-    type: failed ? 'error' : 'done',
-    content: failed ? stripAnsi(local.output || `ACP run ${status}`).trim() : finalText,
-    exitCode: failed ? 1 : 0,
-    status: terminalStatus,
-    artifacts: local.artifacts || [],
-   })}\n\n`);
-   local.status = terminalStatus;
-   local.output = failed ? (local.output || finalText) : finalText;
-   local.lastActivity = Date.now();
-   sentFinal = true;
-   void closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {});
-   break;
-  }
-  res.write(': keepalive\n\n');
-  await new Promise((resolve) => setTimeout(resolve, 1000));
- }
- if (!sentFinal && !res.writableEnded) {
-  res.write(`data: ${JSON.stringify({ type: 'error', content: 'ACP run timed out before a final response' })}\n\n`);
- }
- res.end();
- } catch (e) {
- res.write(`data: ${JSON.stringify({ type: 'error', content: e.message })}\n\n`);
- res.end();
- }
+ const replayFromSequence = Number(req.body?.replayFromSequence ?? req.query?.replayFromSequence ?? 0) || 0;
+ const writeFrame = (payload) => {
+  if (!res.writableEnded) res.write(`data: ${JSON.stringify(payload)}\n\n`);
+ };
+ const keepalive = setInterval(() => {
+  if (!res.writableEnded) res.write(': keepalive\n\n');
+ }, 1000);
+ let finished = false;
+ const finishStream = () => {
+  if (finished) return;
+  finished = true;
+  clearInterval(keepalive);
+  if (!res.writableEnded) res.end();
+ };
+ const unsubscribe = acpEventStreams.subscribe(sessionId, local, {
+  replayFromSequence,
+  onEvent: writeFrame,
+  onTerminal: (final) => {
+   writeFrame(final);
+   finishStream();
+  },
+ });
+ req.on('close', () => {
+  unsubscribe();
+  finishStream();
+ });
 });
 
 // POST /acp/sessions/:sessionId/cancel — Cancel running ACP operation
