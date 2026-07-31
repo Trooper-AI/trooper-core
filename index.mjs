@@ -173,6 +173,9 @@ import {
   syncGatewayPlugin,
 } from './lib/gateway-plugins.mjs';
 import {
+  evaluateBridgeAuth,
+} from './lib/bridge-auth.mjs';
+import {
  CodexDeviceAuthJobManager,
   DEFAULT_CODEX_ACP_CONTAINER_HOME,
   hasValidNativeCodexChatGptAuth,
@@ -808,6 +811,7 @@ const app = express();
 const PORT = parseInt(process.env.BRIDGE_PORT || '3002');
 const server = createServer(app);
 const BRIDGE_AUTH_TOKEN = process.env.BRIDGE_AUTH_TOKEN || '';
+const BRIDGE_ALLOW_UNAUTHENTICATED_DEV = process.env.BRIDGE_ALLOW_UNAUTHENTICATED_DEV === '1';
 // Control-plane-pushed env overrides (e.g. FIREBASE_PROJECT_ID backfill) must
 // load before Firebase init so direct browser auth works without an upgrade.
 loadRuntimeEnvOverridesAtBoot();
@@ -2371,10 +2375,14 @@ app.use((req, res, next) => {
    return res.status(401).json({ error: 'invalid_file_token' });
  }
  // Everything else (including /admin/*, /debug/*, /gateway/*, /agents/*, /config/*,
- // /webhook/*, /cron/*, /skills/*, /recording/*) requires bridge auth token
- if (!BRIDGE_AUTH_TOKEN) return next();
- const token = req.headers.authorization?.replace('Bearer ', '');
- if (token !== BRIDGE_AUTH_TOKEN) return res.status(401).json({ error: 'Unauthorized' });
+ // /webhook/*, /cron/*, /skills/*, /recording/*) requires bridge auth token.
+ // Fail closed when no token is configured (503) unless the dev flag opts out.
+ const auth = evaluateBridgeAuth({
+   configuredToken: BRIDGE_AUTH_TOKEN,
+   authorizationHeader: req.headers.authorization,
+   allowUnauthenticatedDev: BRIDGE_ALLOW_UNAUTHENTICATED_DEV,
+ });
+ if (!auth.ok) return res.status(auth.status).json(auth.body);
  next();
 });
 
@@ -9464,12 +9472,16 @@ app.get('/admin/stats', (req, res) => {
 
 // ── Admin: Service Management ────────────────────────────────────────────
 
-// Helper: verify bridge auth token for admin endpoints
+// Helper: verify bridge auth token for admin endpoints.
+// Fails closed when no token is configured (503) unless BRIDGE_ALLOW_UNAUTHENTICATED_DEV=1.
 function requireBridgeAuth(req, res) {
- if (!BRIDGE_AUTH_TOKEN) return true; // no token configured = dev mode
- const token = req.headers.authorization?.replace('Bearer ', '');
- if (token === BRIDGE_AUTH_TOKEN) return true;
- res.status(401).json({ error: 'Unauthorized — bridge auth token required' });
+ const auth = evaluateBridgeAuth({
+   configuredToken: BRIDGE_AUTH_TOKEN,
+   authorizationHeader: req.headers.authorization,
+   allowUnauthenticatedDev: BRIDGE_ALLOW_UNAUTHENTICATED_DEV,
+ });
+ if (auth.ok) return true;
+ res.status(auth.status).json(auth.body);
  return false;
 }
 
