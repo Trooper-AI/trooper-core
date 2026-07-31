@@ -195,6 +195,14 @@ import {
   buildAcpEventRelayPluginFiles,
 } from './lib/acp-event-relay-plugin.mjs';
 import {
+  applyCronJobPatch,
+  upsertCronJob,
+} from './lib/cron-jobs-store.mjs';
+import {
+  filterSessionsByKeys,
+  parseSessionStatusKeys,
+} from './lib/session-status-bulk.mjs';
+import {
  CodexDeviceAuthJobManager,
   DEFAULT_CODEX_ACP_CONTAINER_HOME,
   hasValidNativeCodexChatGptAuth,
@@ -12320,6 +12328,54 @@ app.get('/cron/history', async (req, res) => {
 });
 
 // Cron: toggle job enabled/disabled
+// Atomic jobs.json write: temp file + rename, then re-read to verify. The
+// gateway also writes this file (agent cron tool); single bridge write path
+// plus verify keeps the read-modify-write window as small as it can be
+// without gateway-side locking.
+async function writeCronJobsStore(cronStorePath, data) {
+ const tmpPath = `${cronStorePath}.tmp-${process.pid}-${Date.now()}`;
+ await writeFile(tmpPath, JSON.stringify(data, null, 2));
+ await renameAsync(tmpPath, cronStorePath);
+ return JSON.parse(await readFile(cronStorePath, 'utf8'));
+}
+
+// Cron: deterministic create/upsert. The agent-facing cron tool remains for
+// agent-initiated schedules; control-plane schedulers use this instead of
+// prompting an LLM turn to write a timer.
+app.post('/cron/jobs', async (req, res) => {
+ try {
+  const cronStorePath = openclawConfigPath('cron', 'jobs.json');
+  const raw = await readFile(cronStorePath, 'utf8').catch(() => null);
+  const data = raw ? JSON.parse(raw) : { jobs: [] };
+  const requestedId = typeof req.body?.id === 'string' && req.body.id.trim()
+   ? req.body.id.trim()
+   : `trooper-${randomUUID()}`;
+  const result = upsertCronJob(data, req.body || {}, { id: requestedId });
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  await writeCronJobsStore(cronStorePath, result.store);
+  res.status(result.created ? 201 : 200).json({ success: true, job: result.job, created: result.created });
+ } catch (e) {
+  res.status(500).json({ error: e.message });
+ }
+});
+
+// Cron: whitelisted partial update (unknown gateway-owned fields preserved).
+app.patch('/cron/jobs/:id', async (req, res) => {
+ try {
+  const cronStorePath = openclawConfigPath('cron', 'jobs.json');
+  const raw = await readFile(cronStorePath, 'utf8').catch(() => null);
+  const data = raw ? JSON.parse(raw) : { jobs: [] };
+  const result = applyCronJobPatch(data, req.params.id, req.body || {});
+  if (!result.ok) {
+   return res.status(result.error === 'not_found' ? 404 : 400).json({ error: result.error });
+  }
+  await writeCronJobsStore(cronStorePath, result.store);
+  res.json({ success: true, job: result.job });
+ } catch (e) {
+  res.status(500).json({ error: e.message });
+ }
+});
+
 app.post('/cron/jobs/:id/toggle', async (req, res) => {
  const { enabled } = req.body;
  try {
@@ -16293,6 +16349,27 @@ app.get('/api/session-status', async (req, res) => {
       return res.json({ ok: true, session: null, reason: 'not_found', lastRunTerminal });
     }
     res.json({ ok: true, session, lastRunTerminal });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Bulk variant for control-plane reconcilers: one sessions.list call
+// filtered to the requested keys instead of N single-session probes.
+app.get('/api/sessions/status', async (req, res) => {
+  try {
+    const parsed = parseSessionStatusKeys(req.query.keys);
+    if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+    if (!gateway.connected) {
+      // Unreachable gateway is UNKNOWN — reconcilers must not read it as lost.
+      return res.json({ ok: false, error: 'gateway_unreachable', sessions: null, fetchedAt: Date.now() });
+    }
+    const listResult = await gateway.request('sessions.list', {
+      limit: 500,
+      includeDerivedTitles: false,
+    }, { timeoutMs: 20000 });
+    const sessions = filterSessionsByKeys(listResult, parsed.keys);
+    res.json({ ok: true, sessions, fetchedAt: Date.now(), source: 'sessions.list' });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
