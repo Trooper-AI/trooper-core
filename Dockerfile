@@ -1,6 +1,9 @@
-# Keep the Trooper gateway current by rebuilding this image; it inherits the
-# latest upstream OpenClaw runtime at build time, then layers our bridge code.
-FROM ghcr.io/openclaw/openclaw:latest
+# The upstream OpenClaw base is pinned by immutable digest so rebuilds are
+# reproducible; bump procedure lives in lib/base-image-pin.mjs, and
+# lib/base-image-pin.test.mjs enforces lockstep between this ARG default and
+# the constant exported there.
+ARG OPENCLAW_BASE_IMAGE=ghcr.io/openclaw/openclaw@sha256:25f5bacf51742c3231d7dd1d319fede009a9d5aeab8b6232cd309ac6475fe82c
+FROM ${OPENCLAW_BASE_IMAGE}
 
 USER root
 

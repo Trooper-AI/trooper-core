@@ -176,6 +176,9 @@ import {
   evaluateBridgeAuth,
 } from './lib/bridge-auth.mjs';
 import {
+  OPENCLAW_BASE_IMAGE,
+} from './lib/base-image-pin.mjs';
+import {
  CodexDeviceAuthJobManager,
   DEFAULT_CODEX_ACP_CONTAINER_HOME,
   hasValidNativeCodexChatGptAuth,
@@ -14049,7 +14052,7 @@ function buildOpenClawCapabilitiesPayload() {
   },
   image: {
    customImage: process.env.OPENCLAW_DOCKER_IMAGE || 'ghcr.io/trooper-ai/trooper-gateway:latest',
-   baseImage: 'ghcr.io/openclaw/openclaw:latest',
+   baseImage: OPENCLAW_BASE_IMAGE,
    rebuildRequiredForLatestBase: true,
   },
   voice: buildVoiceCapabilitiesPayload(),
