@@ -2,9 +2,10 @@ name: Build Private Trooper Fallback
 
 # This is deliberately a public-repository workflow, so standard GitHub-hosted
 # Ubuntu runner time is free. It checks out the private Trooper repository with
-# a read-only credential, but it must never upload, cache, release, or print
-# private workspace content. GitHub Actions logs for this repository are
-# visible to every reader of trooper-core.
+# a read-only credential, but it must never upload, cache, or release private
+# workspace content. GitHub Actions logs for this repository are visible to
+# every reader of trooper-core; build output is intentionally retained to make
+# ordinary CI debugging work like a normal GitHub Actions workflow.
 #
 # The job is manual-only. Keep trooper-core's default branch protected and do
 # not add pull_request or repository_dispatch triggers: a public fork must
@@ -27,7 +28,7 @@ concurrency:
 
 jobs:
   test-build:
-    name: Private Trooper build (sanitized output)
+    name: Private Trooper build
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -83,45 +84,50 @@ jobs:
         with:
           node-version: '22.12.0'
 
-      - name: Test and build private Trooper
+      - name: Upgrade npm
         working-directory: private-trooper
-        shell: bash
-        run: |
-          set -euo pipefail
+        run: npm install --global npm@11
 
-          # The raw tools can print source paths, test names, stack traces, and
-          # code excerpts. Capture them only on the disposable GitHub runner;
-          # publish a stable, non-sensitive result to this public log instead.
-          run_private_step() {
-            local label="$1"
-            shift
-            local log_file="$RUNNER_TEMP/trooper-${label}.log"
+      - name: Install web dependencies
+        working-directory: private-trooper
+        run: npm ci
 
-            echo "::group::${label}"
-            if "$@" >"$log_file" 2>&1; then
-              echo "Completed"
-              echo "::endgroup::"
-              return 0
-            fi
+      - name: Verify web production dependencies
+        working-directory: private-trooper
+        run: node scripts/audit-gate.mjs .
 
-            rm -f "$log_file"
-            echo "::endgroup::"
-            echo "::error title=${label} failed::The private build step failed. Detailed output is intentionally withheld from this public repository."
-            exit 1
-          }
+      - name: Lint critical modules
+        working-directory: private-trooper
+        run: npm run lint
 
-          run_private_step "Upgrade npm" npm install --global npm@11
-          run_private_step "Install web dependencies" npm ci
-          run_private_step "Verify web production dependencies" node scripts/audit-gate.mjs .
-          run_private_step "Lint critical modules" npm run lint
-          run_private_step "Run web smoke tests" npm run test:smoke
-          run_private_step "Run frontend tests" npm run test:frontend
-          run_private_step "Build web app" npm run build
-          run_private_step "Install server dependencies" npm --prefix server ci
-          run_private_step "Verify server production dependencies" node scripts/audit-gate.mjs server
-          run_private_step "Run server tests" npm --prefix server test
-          run_private_step "Install function dependencies" npm --prefix functions ci
-          run_private_step "Run Firebase emulator tests" npx --yes firebase-tools@14.20.0 emulators:exec --only firestore,database "npm --prefix functions test"
+      - name: Run web smoke tests
+        working-directory: private-trooper
+        run: npm run test:smoke
 
-          # Do not write a GITHUB_STEP_SUMMARY here: public summaries must not
-          # contain private filenames, source paths, or command output.
+      - name: Run frontend tests
+        working-directory: private-trooper
+        run: npm run test:frontend
+
+      - name: Build web app
+        working-directory: private-trooper
+        run: npm run build
+
+      - name: Install server dependencies
+        working-directory: private-trooper
+        run: npm --prefix server ci
+
+      - name: Verify server production dependencies
+        working-directory: private-trooper
+        run: node scripts/audit-gate.mjs server
+
+      - name: Run server tests
+        working-directory: private-trooper
+        run: npm --prefix server test
+
+      - name: Install function dependencies
+        working-directory: private-trooper
+        run: npm --prefix functions ci
+
+      - name: Run Firebase emulator tests
+        working-directory: private-trooper
+        run: npx --yes firebase-tools@14.20.0 emulators:exec --only firestore,database "npm --prefix functions test"
