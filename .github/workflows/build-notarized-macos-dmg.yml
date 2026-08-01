@@ -1,0 +1,144 @@
+name: Build notarized macOS DMG
+
+on:
+  workflow_dispatch:
+    inputs:
+      trooper_ref:
+        description: Private Trooper branch, tag, or commit SHA to build
+        required: true
+        default: main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: core-macos-release-${{ inputs.trooper_ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-macos:
+    name: Sign, notarize, and package DMG
+    runs-on: macos-latest
+    timeout-minutes: 70
+    environment: production-build
+    env:
+      DEVELOPER_ID_APPLICATION: "Developer ID Application: Vaibhav Kalra (L27PMU448G)"
+    steps:
+      - name: Checkout public workflow definitions
+        uses: actions/checkout@v5
+
+      - name: Download private Trooper source
+        uses: ./.github/actions/download-private-trooper
+        with:
+          ref: ${{ inputs.trooper_ref }}
+          token: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          fallback-token: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+
+      - name: Preflight signing credentials
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD APPLE_API_KEY_ID APPLE_API_ISSUER_ID APPLE_API_KEY_BASE64 TAURI_SIGNING_PRIVATE_KEY; do
+            [ -n "${!name:-}" ] || missing+=("$name")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf '### macOS release blocked\n\nMissing Core production-build secrets:\n' >> "$GITHUB_STEP_SUMMARY"
+            printf -- '- `%s`\n' "${missing[@]}" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Install private source dependencies
+        working-directory: private-trooper
+        run: npm ci
+
+      - name: Import Developer ID signing certificate
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/trooper-signing.keychain-db"
+          certificate="$RUNNER_TEMP/developer-id.p12"
+          keychain_password="$(uuidgen)"
+          echo "KEYCHAIN_PATH=$keychain" >> "$GITHUB_ENV"
+          echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          security find-identity -v -p codesigning "$keychain"
+
+      - name: Install App Store Connect API key
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+          keys="$RUNNER_TEMP/appstoreconnect/private_keys"
+          mkdir -p "$keys"
+          echo "$APPLE_API_KEY_BASE64" | base64 --decode > "$keys/AuthKey_${APPLE_API_KEY_ID}.p8"
+          chmod 600 "$keys/AuthKey_${APPLE_API_KEY_ID}.p8"
+          echo "API_PRIVATE_KEYS_DIR=$keys" >> "$GITHUB_ENV"
+
+      - name: Build signed universal app bundle
+        working-directory: private-trooper
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ env.DEVELOPER_ID_APPLICATION }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          npm run release:macos:check
+          bash src-tauri/helper/build.sh
+          npm run tauri build -- --target universal-apple-darwin --bundles dmg
+
+      - name: Notarize and staple DMG
+        id: package
+        working-directory: private-trooper
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          dmg="$(find src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' -print -quit)"
+          test -n "$dmg"
+          xcrun notarytool submit "$dmg" --key "$API_PRIVATE_KEYS_DIR/AuthKey_${APPLE_API_KEY_ID}.p8" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          echo "path=private-trooper/$dmg" >> "$GITHUB_OUTPUT"
+
+      - name: Upload notarized DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trooper-macos-notarized-dmg
+          path: ${{ steps.package.outputs.path }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish Core macOS release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          dmg='${{ steps.package.outputs.path }}'
+          gh release delete macos-latest --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes >/dev/null 2>&1 || true
+          gh release create macos-latest "$dmg" --repo "$GITHUB_REPOSITORY" --title 'Trooper for macOS' --notes 'Latest signed and notarized Trooper macOS installer.' --latest
