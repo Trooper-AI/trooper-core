@@ -8,6 +8,9 @@ inputs:
   token:
     description: "Fine-grained token with Contents: read on absurdfounder/Trooper"
     required: true
+  fallback-token:
+    description: Optional second fine-grained read token used when the primary token is expired
+    required: false
   destination:
     description: Directory where the source is unpacked
     required: false
@@ -26,6 +29,7 @@ runs:
       env:
         PRIVATE_REF: ${{ inputs.ref }}
         PRIVATE_TOKEN: ${{ inputs.token }}
+        PRIVATE_FALLBACK_TOKEN: ${{ inputs.fallback-token }}
         PRIVATE_DESTINATION: ${{ inputs.destination }}
       run: |
         set -euo pipefail
@@ -33,13 +37,28 @@ runs:
           echo "::error::The requested Trooper ref is not valid."
           exit 1
         fi
-        if [ -z "$PRIVATE_TOKEN" ]; then
-          echo "::error::CRABSHQ_READ_TOKEN is not configured for the production-build environment."
+        select_token() {
+          local candidate="${1:-}"
+          [ -n "$candidate" ] || return 1
+          echo "::add-mask::$candidate"
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer $candidate" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/absurdfounder/Trooper \
+            -o /dev/null 2>/dev/null
+        }
+        selected_token=''
+        if select_token "$PRIVATE_TOKEN"; then
+          selected_token="$PRIVATE_TOKEN"
+        elif select_token "$PRIVATE_FALLBACK_TOKEN"; then
+          selected_token="$PRIVATE_FALLBACK_TOKEN"
+        else
+          echo "::error::No configured Core secret can read absurdfounder/Trooper."
           exit 1
         fi
-        echo "::add-mask::$PRIVATE_TOKEN"
         sha="$(curl --fail --silent --show-error \
-          -H "Authorization: Bearer $PRIVATE_TOKEN" \
+          -H "Authorization: Bearer $selected_token" \
           -H "Accept: application/vnd.github+json" \
           -H "X-GitHub-Api-Version: 2022-11-28" \
           "https://api.github.com/repos/absurdfounder/Trooper/commits/$PRIVATE_REF" | jq -r .sha)"
@@ -51,7 +70,7 @@ runs:
         destination="$GITHUB_WORKSPACE/$PRIVATE_DESTINATION"
         mkdir -p "$destination"
         curl --fail --silent --show-error --location \
-          -H "Authorization: Bearer $PRIVATE_TOKEN" \
+          -H "Authorization: Bearer $selected_token" \
           -H "Accept: application/vnd.github+json" \
           -H "X-GitHub-Api-Version: 2022-11-28" \
           -o "$archive" \
