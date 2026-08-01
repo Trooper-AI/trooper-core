@@ -102,6 +102,7 @@ import {
 } from './lib/provider-runtime.mjs';
 import { buildCrossProviderImageFallbacks } from './lib/image-generation-routing.mjs';
 import { startFleetHeartbeat } from './lib/fleet-heartbeat.mjs';
+import { buildRuntimeServiceDiagnostics } from './lib/service-diagnostics.mjs';
 import {
   buildPostCompactionRecoveryMessage,
   classifyOpenClawLifecycleSignal,
@@ -9563,6 +9564,11 @@ app.get('/admin/health', async (req, res) => {
    hostname: os.hostname(),
    platform: `${os.type()} ${os.release()} ${os.arch()}`,
    nodeVersion: process.version,
+   services: buildRuntimeServiceDiagnostics({
+     env: process.env,
+     gatewayConnected: gateway.isReady,
+     browserResponsive,
+   }),
  });
 });
 
