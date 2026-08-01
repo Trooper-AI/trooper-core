@@ -75,6 +75,12 @@ import { recordTaskStart, updateTaskStatus, getTask as getCfTask, getTaskPayload
 import { createSSESender } from './lib/sse-stream.mjs';
 import { ensureDefaultSkillPack, PROVISIONED_DEFAULT_SKILL_PACK } from './lib/default-skill-pack.mjs';
 import {
+  buildEmailSessionKey,
+  formatEmailWakeMessage,
+  normalizeEmailWakePayload,
+  validateEmailSendBody,
+} from './lib/email-utils.mjs';
+import {
   EMPTY_KNOWLEDGE_MD,
   EMPTY_MEMORIES_MD,
   buildExecutionLanePromptBlock,
@@ -7176,6 +7182,9 @@ function buildRegisteredAgentProfile({ requestedName, slug, existing = {}, incom
   integrations: normalizeAgentValueList(incoming?.integrations ?? existing?.integrations ?? []),
   pluginIds: normalizeAgentValueList(incoming?.pluginIds ?? existing?.pluginIds ?? []),
   recommendedSkills: normalizeAgentValueList(incoming?.recommendedSkills ?? existing?.recommendedSkills ?? []),
+  email: typeof incoming?.email === 'string'
+   ? incoming.email.trim()
+   : (typeof incoming?.emailAddress === 'string' ? incoming.emailAddress.trim() : (existing?.email || '')),
   avatar: incoming?.avatar !== undefined ? (incoming.avatar || null) : (existing.avatar || null),
  };
 }
@@ -11395,7 +11404,7 @@ app.get('/recording/status', (req, res) => {
 
 // Create a new SPC agent
 app.post('/agents', (req, res) => {
- const { name, title, soul, skills, tools, model, installedSkillIds, avatar, role, goals, prompt, integrations, pluginIds, recommendedSkills } = req.body;
+ const { name, title, soul, skills, tools, model, installedSkillIds, avatar, role, goals, prompt, integrations, pluginIds, recommendedSkills, email } = req.body;
  if (!name) return res.status(400).json({ error: 'Agent name required' });
 
  const id = agentSlug(name);
@@ -11417,6 +11426,7 @@ app.post('/agents', (req, res) => {
    integrations: integrations || [],
    pluginIds: pluginIds || [],
    recommendedSkills: recommendedSkills || [],
+   email: email || '',
    avatar: avatar || null,
  };
  agentRegistry.set(id, leadProfile);
@@ -11451,6 +11461,7 @@ app.post('/agents', (req, res) => {
    integrations: integrations || [],
    pluginIds: pluginIds || [],
    recommendedSkills: recommendedSkills || [],
+   email: email || '',
    avatar: avatar || null,
  };
  syncRuntimeIdentityFiles({ workspacePath, agentProfile: nextAgentProfile });
@@ -11506,7 +11517,7 @@ app.put('/agents/:name', (req, res) => {
  const agent = agentRegistry.get(slug);
  if (!agent) return res.status(404).json({ error: `Agent "${req.params.name}" not found` });
 
- const { soul, title, skills, tools, model, workspaceFiles, installedSkillIds, avatar, role, goals, prompt, integrations, pluginIds, recommendedSkills, fallbacks: updateFallbacks, params: updateParams } = req.body;
+ const { soul, title, skills, tools, model, workspaceFiles, installedSkillIds, avatar, role, goals, prompt, integrations, pluginIds, recommendedSkills, email, fallbacks: updateFallbacks, params: updateParams } = req.body;
 
  try {
  const previousAgentId = agent.agentId;
@@ -11525,6 +11536,7 @@ app.put('/agents/:name', (req, res) => {
    integrations: integrations ?? agent.integrations ?? [],
    pluginIds: pluginIds ?? agent.pluginIds ?? [],
    recommendedSkills: recommendedSkills ?? agent.recommendedSkills ?? [],
+   email: email ?? agent.email ?? '',
    avatar,
    role,
   },
@@ -11923,6 +11935,176 @@ app.post('/webhook/background', async (req, res) => {
  } catch (err) {
  console.error('Background hook failed:', err.message);
  res.status(502).json({ error: err.message });
+ }
+});
+
+// ── Trooper Mail (larasend via Mission Control) ──────────────────────────────
+// Inbound wake: Mission Control resolved recipient → agent and forwards the
+// message here. Every message in a thread reuses one session key so the agent
+// keeps the conversation's context.
+app.post('/webhook/email', async (req, res) => {
+ const payload = normalizeEmailWakePayload(req.body || {});
+ if (payload.error) return res.status(400).json({ error: payload.error });
+
+ const slug = agentSlug(payload.agentName || payload.agentId);
+ const registered = agentRegistry.get(slug)
+  || [...agentRegistry.values()].find((agent) => agent?.email && payload.address && agent.email.toLowerCase() === payload.address.toLowerCase())
+  || null;
+ if (!registered) {
+  console.warn(`[email] wake for unknown agent "${payload.agentName || payload.agentId}" (${payload.address || 'no address'})`);
+  return res.status(404).json({ error: 'Agent not registered on this bridge' });
+ }
+ const resolvedSlug = agentSlug(registered.name || slug);
+ const gatewayAgentId = resolveNativeGatewayAgentId(registered, resolvedSlug);
+ const sessionKey = buildEmailSessionKey({ gatewayAgentId, slug: resolvedSlug, threadId: payload.thread.id });
+ const task = formatEmailWakeMessage({ ...payload, agentName: registered.name || payload.agentName });
+
+ if (gateway.isReady) {
+  try {
+   gateway.runAgent(task, { agentName: registered.name, sessionKey })
+    .catch((err) => console.error('[email] wake run failed:', err.message));
+   return res.status(202).json({ status: 'accepted', sessionKey, via: 'websocket' });
+  } catch {}
+ }
+ if (!OPENCLAW_HOOK_TOKEN) return res.status(503).json({ error: 'Gateway unavailable and hook token not configured' });
+ try {
+  const hookRes = await fetch(`${OPENCLAW_URL}/hooks/agent`, {
+   method: 'POST',
+   headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENCLAW_HOOK_TOKEN}` },
+   body: JSON.stringify({
+    message: task,
+    name: registered.name,
+    sessionKey,
+    wakeMode: 'now',
+    deliver: false,
+    timeoutSeconds: 300,
+   }),
+  });
+  const data = await hookRes.json().catch(() => ({}));
+  return res.status(hookRes.status === 200 ? 202 : hookRes.status).json({ status: 'accepted', sessionKey, ...data });
+ } catch (err) {
+  console.error('[email] wake hook failed:', err.message);
+  return res.status(502).json({ error: err.message });
+ }
+});
+
+// Agent-facing email endpoints. Per-agent integration permissions are enforced
+// HERE (pluginId "email"); Mission Control trusts the bridge on this hop, so
+// sends are forwarded with permissionChecked: true. The larasend key never
+// lives on this VPS — all traffic goes through Mission Control's choke point.
+function trooperEmailEnabled() {
+ return String(process.env.TROOPER_EMAIL_ENABLED || '').trim() === '1';
+}
+
+async function forwardEmailApi(path, { method = 'GET', body } = {}) {
+ if (!MISSION_CONTROL_URL) return { status: 503, data: { error: 'MISSION_CONTROL_URL not configured' } };
+ const response = await fetch(`${MISSION_CONTROL_URL}/api/runtime-email/${encodeURIComponent(ORG_ID)}${path}`, {
+  method,
+  headers: {
+   'Content-Type': 'application/json',
+   'x-runtime-secret': RUNTIME_AUTH_SECRET,
+   'x-org-id': ORG_ID,
+   'x-org-runtime-token': ORG_RUNTIME_TOKEN,
+  },
+  body: body === undefined ? undefined : JSON.stringify(body),
+  signal: AbortSignal.timeout(30000),
+ });
+ const data = await response.json().catch(() => ({}));
+ return { status: response.status, data };
+}
+
+function resolveEmailAgentContext(req) {
+ const requestedName = String(req.body?.agentName || req.query?.agentName || req.headers['x-agent-name'] || '').trim();
+ const requestedId = String(req.body?.agentId || req.query?.agentId || req.headers['x-agent-id'] || '').trim();
+ const slug = agentSlug(requestedName || requestedId || 'main');
+ const registered = agentRegistry.get(slug) || null;
+ return {
+  registered,
+  pluginKey: registered?.agentId || slug,
+  // Trooper-side agent id when the caller knows it; otherwise Mission Control
+  // resolves the sender from agentName.
+  trooperAgentId: requestedId,
+  name: registered?.name || requestedName || 'main',
+ };
+}
+
+app.post('/email/send', async (req, res) => {
+ if (!trooperEmailEnabled()) return res.status(503).json({ error: 'Trooper Mail is not enabled for this workspace' });
+ const validation = validateEmailSendBody(req.body || {});
+ if (validation.error) return res.status(400).json({ error: validation.error });
+ const context = resolveEmailAgentContext(req);
+ const decision = checkIntegrationPermission({
+  agentId: context.pluginKey,
+  agentName: context.name,
+  pluginId: 'email',
+  integrationId: 'email',
+  action: 'send',
+ });
+ if (!decision.allowed) {
+  return res.status(403).json({ error: decision.reason || 'Email send denied by integration policy', decision });
+ }
+ try {
+  const result = await forwardEmailApi('/send', {
+   method: 'POST',
+   body: {
+    ...validation.payload,
+    agentId: context.trooperAgentId || undefined,
+    agentName: context.name,
+    permissionChecked: true,
+   },
+  });
+  return res.status(result.status).json(result.data);
+ } catch (err) {
+  console.error('[email] send proxy failed:', err.message);
+  return res.status(502).json({ error: err.message });
+ }
+});
+
+app.get('/email/inbox', async (req, res) => {
+ if (!trooperEmailEnabled()) return res.status(503).json({ error: 'Trooper Mail is not enabled for this workspace' });
+ const context = resolveEmailAgentContext(req);
+ const decision = checkIntegrationPermission({
+  agentId: context.pluginKey,
+  agentName: context.name,
+  pluginId: 'email',
+  integrationId: 'email',
+  action: 'read',
+ });
+ if (!decision.allowed) {
+  return res.status(403).json({ error: decision.reason || 'Email read denied by integration policy', decision });
+ }
+ try {
+  const params = new URLSearchParams();
+  if (context.trooperAgentId) params.set('agentId', context.trooperAgentId);
+  if (String(req.query.unreadOnly || '') === 'true') params.set('unreadOnly', 'true');
+  if (req.query.limit) params.set('limit', String(req.query.limit));
+  const result = await forwardEmailApi(`/inbox${params.toString() ? `?${params}` : ''}`);
+  return res.status(result.status).json(result.data);
+ } catch (err) {
+  console.error('[email] inbox proxy failed:', err.message);
+  return res.status(502).json({ error: err.message });
+ }
+});
+
+app.get('/email/thread/:threadId', async (req, res) => {
+ if (!trooperEmailEnabled()) return res.status(503).json({ error: 'Trooper Mail is not enabled for this workspace' });
+ const context = resolveEmailAgentContext(req);
+ const decision = checkIntegrationPermission({
+  agentId: context.pluginKey,
+  agentName: context.name,
+  pluginId: 'email',
+  integrationId: 'email',
+  action: 'read',
+ });
+ if (!decision.allowed) {
+  return res.status(403).json({ error: decision.reason || 'Email read denied by integration policy', decision });
+ }
+ try {
+  const result = await forwardEmailApi(`/threads/${encodeURIComponent(req.params.threadId)}`);
+  return res.status(result.status).json(result.data);
+ } catch (err) {
+  console.error('[email] thread proxy failed:', err.message);
+  return res.status(502).json({ error: err.message });
  }
 });
 
@@ -14408,6 +14590,8 @@ const PROVIDER_ENV_NAME_MAP = Object.freeze({
 	 browserbase: ['BROWSERBASE_API_KEY'],
 	 browserbaseProjectId: ['BROWSERBASE_PROJECT_ID'],
 	 telegram: ['TELEGRAM_BOT_TOKEN'],
+	 // Enable flag only — the larasend project key stays on Mission Control.
+	 trooperEmail: ['TROOPER_EMAIL_ENABLED'],
 	});
 
 const PROVIDER_ENV_WRITE_NAME_MAP = Object.freeze(
@@ -14486,7 +14670,7 @@ app.post('/config/api-keys', async (req, res) => {
   cloudflareAiGatewayKey, syntheticKey, volcanoEngineKey, byteplusKey, defaultModel, defaultFallbacks,
 	  imageModel, pdfModel, openaiCodexAuthProfile, localProvider, removeLocalProvider,
 	  ollamaProvider, removeOllamaProvider, ollamaBaseUrl,
-	  telegramToken, telegramBotToken,
+	  telegramToken, telegramBotToken, trooperEmailEnabled,
 	 } = body;
  const providerKeyPayloads = {
   anthropic: anthropicKey,
@@ -14525,6 +14709,7 @@ app.post('/config/api-keys', async (req, res) => {
   searchapi: searchapiKey,
   browserbase: browserbaseKey,
   browserbaseProjectId,
+  trooperEmail: trooperEmailEnabled,
 	 };
 	 const channelEnvUpdates = buildTelegramEnvUpdates({ telegramToken, telegramBotToken });
 	 const hasAnyKey = [
