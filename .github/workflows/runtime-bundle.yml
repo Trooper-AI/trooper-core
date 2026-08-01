@@ -1,64 +1,101 @@
-name: Request Private Trooper Fallback CI
+name: Build Private Trooper Fallback
 
-# This public repository is a control plane only. It must never clone,
-# archive, cache, or upload source from absurdfounder/Trooper.
+# This is deliberately a public-repository workflow, so standard GitHub-hosted
+# Ubuntu runner time is free. It checks out the private Trooper repository with
+# a read-only credential, but it must never upload, cache, release, or print
+# private workspace content. GitHub Actions logs for this repository are
+# visible to every reader of trooper-core.
 #
-# A maintainer can request the private fallback from the Actions page when
-# normal Trooper CI needs a clean retry. The actual checkout, build, logs, and
-# test output remain in the private Trooper repository.
+# The job is manual-only. Keep trooper-core's default branch protected and do
+# not add pull_request or repository_dispatch triggers: a public fork must
+# never be able to run a job that receives the private checkout credential.
 
 on:
   workflow_dispatch:
     inputs:
-      reason:
-        description: "Why is the private fallback needed?"
+      trooper_ref:
+        description: "Private Trooper branch, tag, or commit SHA to build"
         required: true
-        default: "Manual fallback requested from trooper-core"
-  repository_dispatch:
-    types: [trooper-actions-fallback-request]
+        default: "main"
 
 permissions:
   contents: read
 
 concurrency:
-  group: request-private-trooper-fallback
+  group: public-trooper-fallback-${{ inputs.trooper_ref }}
   cancel-in-progress: false
 
 jobs:
-  request-private-fallback:
+  test-build:
+    name: Private Trooper build (sanitized output)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 30
     steps:
-      - name: Request private fallback CI
+      - name: Verify checkout credential
         env:
-          RAW_DISPATCH_TOKEN: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
-          EVENT_REASON: ${{ inputs.reason || github.event.client_payload.reason || 'Fallback requested from trooper-core' }}
+          PRIVATE_READ_TOKEN: ${{ secrets.CRABSHQ_READ_TOKEN }}
         run: |
           set -euo pipefail
-          token="$(printf '%s' "${RAW_DISPATCH_TOKEN:-}" | tr -d '\r\n[:space:]')"
-          if [ -z "$token" ]; then
-            echo "::error::CRABSHQ_DISPATCH_TOKEN is required. It needs Actions: write access to absurdfounder/Trooper."
+          if [ -z "${PRIVATE_READ_TOKEN:-}" ]; then
+            echo "::error::CRABSHQ_READ_TOKEN is required. It must have Contents: read access to absurdfounder/Trooper only."
             exit 1
           fi
-          echo "::add-mask::$token"
+          echo "::add-mask::$PRIVATE_READ_TOKEN"
 
-          payload="$(jq -nc \
-            --arg source_repo "$GITHUB_REPOSITORY" \
-            --arg source_sha "$GITHUB_SHA" \
-            --arg reason "$EVENT_REASON" \
-            '{event_type: "trooper-core-fallback-ci", client_payload: {source_repo: $source_repo, source_sha: $source_sha, reason: $reason}}')"
+      - name: Checkout private Trooper source
+        uses: actions/checkout@v5
+        with:
+          repository: absurdfounder/Trooper
+          ref: ${{ inputs.trooper_ref }}
+          token: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          path: private-trooper
+          fetch-depth: 1
+          persist-credentials: false
 
-          curl --fail-with-body --silent --show-error \
-            -X POST \
-            -H "Authorization: Bearer $token" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/repos/absurdfounder/Trooper/dispatches \
-            -d "$payload"
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22.12.0'
 
-          {
-            echo "### Private fallback requested"
-            echo ""
-            echo "The private Trooper repository received the request. Its source, build logs, and test output stay private."
-            echo "Reason: ${EVENT_REASON}"
-          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Test and build private Trooper
+        working-directory: private-trooper
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The raw tools can print source paths, test names, stack traces, and
+          # code excerpts. Capture them only on the disposable GitHub runner;
+          # publish a stable, non-sensitive result to this public log instead.
+          run_private_step() {
+            local label="$1"
+            shift
+            local log_file="$RUNNER_TEMP/trooper-${label}.log"
+
+            echo "::group::${label}"
+            if "$@" >"$log_file" 2>&1; then
+              echo "Completed"
+              echo "::endgroup::"
+              return 0
+            fi
+
+            rm -f "$log_file"
+            echo "::endgroup::"
+            echo "::error title=${label} failed::The private build step failed. Detailed output is intentionally withheld from this public repository."
+            exit 1
+          }
+
+          run_private_step "Upgrade npm" npm install --global npm@11
+          run_private_step "Install web dependencies" npm ci
+          run_private_step "Verify web production dependencies" node scripts/audit-gate.mjs .
+          run_private_step "Lint critical modules" npm run lint
+          run_private_step "Run web smoke tests" npm run test:smoke
+          run_private_step "Run frontend tests" npm run test:frontend
+          run_private_step "Build web app" npm run build
+          run_private_step "Install server dependencies" npm --prefix server ci
+          run_private_step "Verify server production dependencies" node scripts/audit-gate.mjs server
+          run_private_step "Run server tests" npm --prefix server test
+          run_private_step "Install function dependencies" npm --prefix functions ci
+          run_private_step "Run Firebase emulator tests" npx --yes firebase-tools@14.20.0 emulators:exec --only firestore,database "npm --prefix functions test"
+
+          # Do not write a GITHUB_STEP_SUMMARY here: public summaries must not
+          # contain private filenames, source paths, or command output.
