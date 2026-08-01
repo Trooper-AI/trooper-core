@@ -31,26 +31,52 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Verify checkout credential
+      - name: Download private Trooper source
         env:
-          PRIVATE_READ_TOKEN: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          RAW_READ_TOKEN: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          RAW_DISPATCH_TOKEN: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+          TROOPER_REF: ${{ inputs.trooper_ref }}
         run: |
           set -euo pipefail
-          if [ -z "${PRIVATE_READ_TOKEN:-}" ]; then
-            echo "::error::CRABSHQ_READ_TOKEN is required. It must have Contents: read access to absurdfounder/Trooper only."
+          if [[ ! "$TROOPER_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]] || [[ "$TROOPER_REF" == *..* ]]; then
+            echo "::error::The requested Trooper ref is not valid."
             exit 1
           fi
-          echo "::add-mask::$PRIVATE_READ_TOKEN"
 
-      - name: Checkout private Trooper source
-        uses: actions/checkout@v5
-        with:
-          repository: absurdfounder/Trooper
-          ref: ${{ inputs.trooper_ref }}
-          token: ${{ secrets.CRABSHQ_READ_TOKEN }}
-          path: private-trooper
-          fetch-depth: 1
-          persist-credentials: false
+          try_token() {
+            local candidate="${1:-}"
+            [ -n "$candidate" ] || return 1
+            echo "::add-mask::$candidate"
+            curl --fail --silent --show-error \
+              -H "Authorization: Bearer $candidate" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              https://api.github.com/repos/absurdfounder/Trooper \
+              -o /dev/null 2>/dev/null
+          }
+
+          private_token=''
+          if try_token "${RAW_READ_TOKEN:-}"; then
+            private_token="$RAW_READ_TOKEN"
+          elif try_token "${RAW_DISPATCH_TOKEN:-}"; then
+            private_token="$RAW_DISPATCH_TOKEN"
+          else
+            echo "::error::No Core secret can read the private Trooper repository. Configure a fine-grained token with Contents: read access to absurdfounder/Trooper."
+            exit 1
+          fi
+
+          archive="$RUNNER_TEMP/private-trooper.tar.gz"
+          destination="$GITHUB_WORKSPACE/private-trooper"
+          mkdir -p "$destination"
+          curl --fail --silent --show-error --location \
+            -H "Authorization: Bearer $private_token" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -o "$archive" \
+            "https://api.github.com/repos/absurdfounder/Trooper/tarball/$TROOPER_REF"
+          tar -xzf "$archive" -C "$destination" --strip-components=1
+          rm -f "$archive"
+          test -f "$destination/package.json"
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
