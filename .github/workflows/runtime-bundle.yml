@@ -1,89 +1,64 @@
-name: Publish Org Runtime Bundle
+name: Request Private Trooper Fallback CI
+
+# This public repository is a control plane only. It must never clone,
+# archive, cache, or upload source from absurdfounder/Trooper.
+#
+# A maintainer can request the private fallback from the Actions page when
+# normal Trooper CI needs a clean retry. The actual checkout, build, logs, and
+# test output remain in the private Trooper repository.
 
 on:
   workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why is the private fallback needed?"
+        required: true
+        default: "Manual fallback requested from trooper-core"
   repository_dispatch:
-    types: [trooper-server-updated]
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/runtime-bundle.yml'
-      - 'scripts/publish-org-runtime.sh'
+    types: [trooper-actions-fallback-request]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: request-private-trooper-fallback
+  cancel-in-progress: false
 
 jobs:
-  publish-runtime-bundle:
+  request-private-fallback:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      Trooper_REPO: absurdfounder/Trooper
-      Trooper_REF: main
-      RELEASE_TAG: org-runtime-latest
-      ASSET_NAME: trooper-org-runtime.tar.gz
+    timeout-minutes: 5
     steps:
-      - name: Checkout trooper-core
-        uses: actions/checkout@v4
-
-      - name: Download Trooper server source
+      - name: Request private fallback CI
         env:
-          RAW_CRABSHQ_READ_TOKEN: ${{ secrets.CRABSHQ_READ_TOKEN }}
-          RAW_CRABSHQ_DISPATCH_TOKEN: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+          RAW_DISPATCH_TOKEN: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+          EVENT_REASON: ${{ inputs.reason || github.event.client_payload.reason || 'Fallback requested from trooper-core' }}
         run: |
-          try_token() {
-            local name="$1"
-            local raw="$2"
-            local token
-            token="$(printf '%s' "${raw:-}" | tr -d '\r\n[:space:]')"
-            if [ -z "$token" ]; then
-              return 1
-            fi
-            echo "::add-mask::$token"
-            if curl -fsSL \
-              -H "Authorization: Bearer $token" \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/${Trooper_REPO}" >/dev/null; then
-              GH_TOKEN="$token"
-              TOKEN_SOURCE="$name"
-              return 0
-            fi
-            echo "::warning::${name} cannot read ${Trooper_REPO}; trying next token if available"
-            return 1
-          }
-
-          GH_TOKEN=''
-          TOKEN_SOURCE=''
-          if ! try_token "CRABSHQ_READ_TOKEN" "${RAW_CRABSHQ_READ_TOKEN:-}" && \
-             ! try_token "CRABSHQ_DISPATCH_TOKEN" "${RAW_CRABSHQ_DISPATCH_TOKEN:-}"; then
-            echo "::error::No configured Trooper token can read ${Trooper_REPO}. Give CRABSHQ_DISPATCH_TOKEN or CRABSHQ_READ_TOKEN Contents: Read access to the private repo."
+          set -euo pipefail
+          token="$(printf '%s' "${RAW_DISPATCH_TOKEN:-}" | tr -d '\r\n[:space:]')"
+          if [ -z "$token" ]; then
+            echo "::error::CRABSHQ_DISPATCH_TOKEN is required. It needs Actions: write access to absurdfounder/Trooper."
             exit 1
           fi
+          echo "::add-mask::$token"
 
-          mkdir -p "${GITHUB_WORKSPACE}/Trooper"
-          curl -fsSL \
-            -H "Authorization: Bearer $GH_TOKEN" \
+          payload="$(jq -nc \
+            --arg source_repo "$GITHUB_REPOSITORY" \
+            --arg source_sha "$GITHUB_SHA" \
+            --arg reason "$EVENT_REASON" \
+            '{event_type: "trooper-core-fallback-ci", client_payload: {source_repo: $source_repo, source_sha: $source_sha, reason: $reason}}')"
+
+          curl --fail-with-body --silent --show-error \
+            -X POST \
+            -H "Authorization: Bearer $token" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            -o "${RUNNER_TEMP}/trooper.tar.gz" \
-            "https://api.github.com/repos/${Trooper_REPO}/tarball/${Trooper_REF}"
-          tar -xzf "${RUNNER_TEMP}/trooper.tar.gz" -C "${GITHUB_WORKSPACE}/Trooper" --strip-components=1
-          test -f "${GITHUB_WORKSPACE}/Trooper/server/package.json"
-          echo "Downloaded ${Trooper_REPO}@${Trooper_REF} using ${TOKEN_SOURCE}"
+            https://api.github.com/repos/absurdfounder/Trooper/dispatches \
+            -d "$payload"
 
-      - name: Build runtime tarball
-        run: |
-          chmod +x scripts/publish-org-runtime.sh
-          ./scripts/publish-org-runtime.sh build \
-            "${GITHUB_WORKSPACE}/Trooper/server" \
-            "${RUNNER_TEMP}/${ASSET_NAME}"
-
-      - name: Publish release asset
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release view "${RELEASE_TAG}" >/dev/null 2>&1 || \
-            gh release create "${RELEASE_TAG}" \
-              --title "${RELEASE_TAG}" \
-              --notes "Public Trooper org runtime bundle for fresh provisioning."
-
-          gh release upload "${RELEASE_TAG}" "${RUNNER_TEMP}/${ASSET_NAME}" --clobber
+          {
+            echo "### Private fallback requested"
+            echo ""
+            echo "The private Trooper repository received the request. Its source, build logs, and test output stay private."
+            echo "Reason: ${EVENT_REASON}"
+          } >> "$GITHUB_STEP_SUMMARY"
