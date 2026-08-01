@@ -51,6 +51,8 @@ OPENCLAW_COMPANY_PROVIDER_KEYS="$(_resolve_input "${OPENCLAW_COMPANY_PROVIDER_KE
 TROOPER_EMAIL_ENABLED="$(_resolve_input "${TROOPER_EMAIL_ENABLED:-}" "{{TROOPER_EMAIL_ENABLED}}")"
 TROOPER_RUNTIME_TARBALL_URL="$(_resolve_input "${TROOPER_RUNTIME_TARBALL_URL:-}" "{{TROOPER_RUNTIME_TARBALL_URL}}")"
 TROOPER_RUNTIME_TARBALL_SHA256="$(_resolve_input "${TROOPER_RUNTIME_TARBALL_SHA256:-}" "{{TROOPER_RUNTIME_TARBALL_SHA256}}")"
+TROOPER_RUNTIME_PLAINTEXT_SHA256="${TROOPER_RUNTIME_PLAINTEXT_SHA256:-}"
+TROOPER_RUNTIME_ENCRYPTION_PASSWORD="${TROOPER_RUNTIME_ENCRYPTION_PASSWORD:-}"
 OPENCLAWBRIDGE_GIT_SHA="$(_resolve_input "${OPENCLAWBRIDGE_GIT_SHA:-}" "{{OPENCLAWBRIDGE_GIT_SHA}}")"
 TAILSCALE_AUTH_KEY="$(_resolve_input "${TAILSCALE_AUTH_KEY:-}" "{{TAILSCALE_AUTH_KEY}}")"
 TAILSCALE_HOSTNAME="$(_resolve_input "${TAILSCALE_HOSTNAME:-}" "{{TAILSCALE_HOSTNAME}}")"
@@ -2949,15 +2951,15 @@ else
   fi
 
   if [ -n "${TROOPER_RUNTIME_TARBALL_URL:-}" ] && [ "${TROOPER_RUNTIME_TARBALL_URL}" != "{{TROOPER_RUNTIME_TARBALL_URL}}" ]; then
-    dlog "Downloading Trooper org runtime bundle..."
+    dlog "Downloading encrypted Trooper org runtime bundle..."
     echo "[setup] Runtime bundle URL: ${TROOPER_RUNTIME_TARBALL_URL}"
     if [[ "$TROOPER_RUNTIME_TARBALL_URL" == https://api.github.com/repos/*/releases/assets/* ]]; then
-      curl -fsSL -H "Accept: application/octet-stream" "$TROOPER_RUNTIME_TARBALL_URL" -o /tmp/trooper-org-runtime.tar.gz || { echo "ERROR: failed to download runtime bundle from ${TROOPER_RUNTIME_TARBALL_URL}" >&2; exit 1; }
+      curl -fsSL -H "Accept: application/octet-stream" "$TROOPER_RUNTIME_TARBALL_URL" -o /tmp/trooper-org-runtime.tar.gz.enc || { echo "ERROR: failed to download runtime bundle from ${TROOPER_RUNTIME_TARBALL_URL}" >&2; exit 1; }
     else
-      curl -fsSL "$TROOPER_RUNTIME_TARBALL_URL" -o /tmp/trooper-org-runtime.tar.gz || { echo "ERROR: failed to download runtime bundle from ${TROOPER_RUNTIME_TARBALL_URL}" >&2; exit 1; }
+      curl -fsSL "$TROOPER_RUNTIME_TARBALL_URL" -o /tmp/trooper-org-runtime.tar.gz.enc || { echo "ERROR: failed to download runtime bundle from ${TROOPER_RUNTIME_TARBALL_URL}" >&2; exit 1; }
     fi
     if [ -n "${TROOPER_RUNTIME_TARBALL_SHA256:-}" ]; then
-      _runtime_actual_sha256="$(sha256sum /tmp/trooper-org-runtime.tar.gz | awk '{print $1}')"
+      _runtime_actual_sha256="$(sha256sum /tmp/trooper-org-runtime.tar.gz.enc | awk '{print $1}')"
       if [ "$_runtime_actual_sha256" != "$(printf '%s' "$TROOPER_RUNTIME_TARBALL_SHA256" | tr '[:upper:]' '[:lower:]')" ]; then
         echo "ERROR: runtime bundle checksum mismatch" >&2
         exit 1
@@ -2966,7 +2968,22 @@ else
     elif [ "$TROOPER_MANAGED_DEPLOYMENT" = "1" ]; then
       echo "[setup] WARNING: legacy promoted runtime has no checksum; upgrade to a checksum-pinned snapshot"
     fi
+    if [ -z "$TROOPER_RUNTIME_ENCRYPTION_PASSWORD" ] || [ -z "$TROOPER_RUNTIME_PLAINTEXT_SHA256" ]; then
+      echo "ERROR: encrypted runtime bundle is missing decryption metadata" >&2
+      exit 1
+    fi
+    RUNTIME_DECRYPT_PASSWORD="$TROOPER_RUNTIME_ENCRYPTION_PASSWORD" \
+      openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 \
+        -in /tmp/trooper-org-runtime.tar.gz.enc \
+        -out /tmp/trooper-org-runtime.tar.gz \
+        -pass env:RUNTIME_DECRYPT_PASSWORD || { echo "ERROR: failed to decrypt runtime bundle" >&2; exit 1; }
+    _runtime_plaintext_sha256="$(sha256sum /tmp/trooper-org-runtime.tar.gz | awk '{print $1}')"
+    if [ "$_runtime_plaintext_sha256" != "$(printf '%s' "$TROOPER_RUNTIME_PLAINTEXT_SHA256" | tr '[:upper:]' '[:lower:]')" ]; then
+      echo "ERROR: decrypted runtime bundle checksum mismatch" >&2
+      exit 1
+    fi
     tar -xzf /tmp/trooper-org-runtime.tar.gz -C /opt/trooper-org-runtime --strip-components=1 || { echo "ERROR: failed to extract runtime bundle" >&2; exit 1; }
+    rm -f /tmp/trooper-org-runtime.tar.gz /tmp/trooper-org-runtime.tar.gz.enc
     test -f /opt/trooper-org-runtime/server/org-runtime/runtime-manifest.json || { echo "ERROR: runtime bundle is missing its compatibility manifest" >&2; exit 1; }
     node - /opt/trooper-org-runtime/server/org-runtime/runtime-manifest.json /opt/trooper-org-runtime/.trooper-runtime-target.json "$TROOPER_RUNTIME_TARBALL_URL" "$TROOPER_RUNTIME_TARBALL_SHA256" <<'NODE'
 const fs = require('fs');
