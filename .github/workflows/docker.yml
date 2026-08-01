@@ -36,6 +36,9 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v5
         with:
+          # The OpenClaw base is digest-pinned (lib/base-image-pin.mjs), so
+          # pull:true no longer refreshes it — an immutable ref always resolves
+          # to the same manifest. It still re-pulls any tag-referenced layers.
           pull: true
           push: true
           tags: |

@@ -173,6 +173,36 @@ import {
   syncGatewayPlugin,
 } from './lib/gateway-plugins.mjs';
 import {
+  evaluateBridgeAuth,
+} from './lib/bridge-auth.mjs';
+import {
+  OPENCLAW_BASE_IMAGE,
+} from './lib/base-image-pin.mjs';
+import {
+  buildInterruptedAcpToolResultEvent,
+  listUnmatchedAcpToolUses,
+} from './lib/interrupted-tool-result.mjs';
+import {
+  orderMethodCandidates,
+  parseGatewayFeatures,
+  summarizeGatewayFeatures,
+} from './lib/gateway-capabilities-handshake.mjs';
+import {
+  createAcpEventStreamRegistry,
+} from './lib/acp-event-stream.mjs';
+import {
+  ACP_EVENT_RELAY_PLUGIN_ID,
+  buildAcpEventRelayPluginFiles,
+} from './lib/acp-event-relay-plugin.mjs';
+import {
+  applyCronJobPatch,
+  upsertCronJob,
+} from './lib/cron-jobs-store.mjs';
+import {
+  filterSessionsByKeys,
+  parseSessionStatusKeys,
+} from './lib/session-status-bulk.mjs';
+import {
  CodexDeviceAuthJobManager,
   DEFAULT_CODEX_ACP_CONTAINER_HOME,
   hasValidNativeCodexChatGptAuth,
@@ -808,6 +838,7 @@ const app = express();
 const PORT = parseInt(process.env.BRIDGE_PORT || '3002');
 const server = createServer(app);
 const BRIDGE_AUTH_TOKEN = process.env.BRIDGE_AUTH_TOKEN || '';
+const BRIDGE_ALLOW_UNAUTHENTICATED_DEV = process.env.BRIDGE_ALLOW_UNAUTHENTICATED_DEV === '1';
 // Control-plane-pushed env overrides (e.g. FIREBASE_PROJECT_ID backfill) must
 // load before Firebase init so direct browser auth works without an upgrade.
 loadRuntimeEnvOverridesAtBoot();
@@ -1936,6 +1967,49 @@ function ensureImageGenerationDefaultsPluginForGatewayStart(config, repairs) {
  }
 }
 
+// Bridge-owned telemetry plugins (run-completion push + ACP event relay) are
+// staged and installed by syncBridgeOwnedGatewayPlugins, but installation
+// alone does not enable them — they must be registered in config.plugins.
+// run-completion shipped without this registration for a while, so this also
+// repairs existing deployments.
+function ensureBridgeTelemetryPluginsForGatewayStart(config, repairs) {
+ if (!config.plugins || typeof config.plugins !== 'object' || Array.isArray(config.plugins)) config.plugins = {};
+ if (!config.plugins.entries || typeof config.plugins.entries !== 'object' || Array.isArray(config.plugins.entries)) {
+  config.plugins.entries = {};
+ }
+ const wanted = [
+  { id: RUN_COMPLETION_PLUGIN_ID, allowConversationAccess: false },
+  // Conversation access lets the relay carry tool activity for the shared
+  // ACP stream; content is capped in the plugin and only ever posted to the
+  // bridge's own /internal/acp-event on the docker host.
+  { id: ACP_EVENT_RELAY_PLUGIN_ID, allowConversationAccess: true },
+ ];
+ for (const plugin of wanted) {
+  const existing = config.plugins.entries[plugin.id];
+  const entry = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
+  if (entry.enabled !== true) {
+   entry.enabled = true;
+   repairs.push(`plugins.entries.${plugin.id}: enabled bridge telemetry plugin`);
+  }
+  if (plugin.allowConversationAccess) {
+   if (!entry.hooks || typeof entry.hooks !== 'object' || Array.isArray(entry.hooks)) entry.hooks = {};
+   if (entry.hooks.allowConversationAccess !== true) {
+    entry.hooks.allowConversationAccess = true;
+    repairs.push(`plugins.entries.${plugin.id}.hooks.allowConversationAccess: enabled activity relay`);
+   }
+  }
+  config.plugins.entries[plugin.id] = entry;
+  if (Array.isArray(config.plugins.allow) && !config.plugins.allow.includes(plugin.id)) {
+   config.plugins.allow.push(plugin.id);
+   repairs.push(`plugins.allow: added ${plugin.id}`);
+  }
+  if (Array.isArray(config.plugins.deny) && config.plugins.deny.includes(plugin.id)) {
+   config.plugins.deny = config.plugins.deny.filter((pluginId) => pluginId !== plugin.id);
+   repairs.push(`plugins.deny: removed ${plugin.id}`);
+  }
+ }
+}
+
 function prepareOpenClawConfigForGatewayStart(config) {
  const next = cloneJson(config);
  const repairs = [];
@@ -1943,6 +2017,7 @@ function prepareOpenClawConfigForGatewayStart(config) {
  sanitizeBravePluginConfigForGatewayStart(next, repairs);
  augmentImageGenerationFallbacksForGatewayStart(next, repairs);
  ensureImageGenerationDefaultsPluginForGatewayStart(next, repairs);
+ ensureBridgeTelemetryPluginsForGatewayStart(next, repairs);
 
  const providers = next?.models?.providers;
  if (providers && typeof providers === 'object' && !Array.isArray(providers)) {
@@ -2035,6 +2110,11 @@ function syncBridgeOwnedGatewayPlugins(reason = 'startup') {
    id: IMAGE_GENERATION_DEFAULTS_PLUGIN_ID,
    label: 'image-generation-defaults',
    files: buildImageGenerationDefaultsPluginFiles(),
+  },
+  {
+   id: ACP_EVENT_RELAY_PLUGIN_ID,
+   label: 'acp-event-relay',
+   files: buildAcpEventRelayPluginFiles({ bridgePort: PORT, token: BRIDGE_AUTH_TOKEN || '' }),
   },
  ];
  const results = {};
@@ -2371,10 +2451,14 @@ app.use((req, res, next) => {
    return res.status(401).json({ error: 'invalid_file_token' });
  }
  // Everything else (including /admin/*, /debug/*, /gateway/*, /agents/*, /config/*,
- // /webhook/*, /cron/*, /skills/*, /recording/*) requires bridge auth token
- if (!BRIDGE_AUTH_TOKEN) return next();
- const token = req.headers.authorization?.replace('Bearer ', '');
- if (token !== BRIDGE_AUTH_TOKEN) return res.status(401).json({ error: 'Unauthorized' });
+ // /webhook/*, /cron/*, /skills/*, /recording/*) requires bridge auth token.
+ // Fail closed when no token is configured (503) unless the dev flag opts out.
+ const auth = evaluateBridgeAuth({
+   configuredToken: BRIDGE_AUTH_TOKEN,
+   authorizationHeader: req.headers.authorization,
+   allowUnauthenticatedDev: BRIDGE_ALLOW_UNAUTHENTICATED_DEV,
+ });
+ if (!auth.ok) return res.status(auth.status).json(auth.body);
  next();
 });
 
@@ -2479,6 +2563,11 @@ class OpenClawGateway {
  this._historyQueue = [];
  this._historyMaxConcurrent = Math.max(1, Number(process.env.OPENCLAW_HISTORY_MAX_CONCURRENT || 3));
  this._historyCacheTtlMs = Math.max(250, Number(process.env.OPENCLAW_HISTORY_CACHE_TTL_MS || 2000));
+ // Negotiated capabilities from the connect handshake (hello-ok features).
+ // Kept across disconnects — they describe the gateway binary; the next
+ // successful handshake refreshes them.
+ this.gatewayFeatures = null;
+ this.lastConnectSnapshot = null;
 	 this.connect();
 	 }
 
@@ -2651,6 +2740,10 @@ class OpenClawGateway {
  this.connected = true;
  this.lastConnectedAt = Date.now();
  this.lastError = null;
+ // Capture what this gateway build advertises instead of rediscovering it
+ // later through error-string probes (see orderMethodCandidates callers).
+ this.gatewayFeatures = parseGatewayFeatures(result);
+ this.lastConnectSnapshot = result?.snapshot || null;
  // Clear sticky auth failures so health/UI stop reporting "missing scope" after a good connect.
  this.lastAuthError = null;
  this.lastAuthAt = null;
@@ -3468,23 +3561,26 @@ class OpenClawGateway {
   const safeRunId = typeof opts?.runId === 'string' ? opts.runId.trim() : '';
   const timeoutMs = Number.isFinite(Number(opts?.timeoutMs)) ? Number(opts.timeoutMs) : 10000;
   if (!safeSessionKey && !safeRunId) throw new Error('sessionKey or runId is required');
-  const nativeParams = {
-   ...(safeSessionKey ? { key: safeSessionKey } : {}),
-   ...(safeRunId ? { runId: safeRunId } : {}),
-  };
-  try {
-   const result = await this.request('sessions.abort', nativeParams, { timeoutMs });
-   return { ok: true, method: 'sessions.abort', ...(result || {}) };
-  } catch (err) {
-   if (!safeSessionKey) throw err;
-   console.warn(`[OpenClaw] sessions.abort failed; falling back to chat.abort: ${err.message}`);
-   const legacyParams = {
-    sessionKey: safeSessionKey,
-    ...(safeRunId ? { runId: safeRunId } : {}),
-   };
-   const result = await this.request('chat.abort', legacyParams, { timeoutMs });
-   return { ok: true, method: 'chat.abort', ...(result || {}) };
+  const paramsFor = (method) => method === 'chat.abort'
+   ? { sessionKey: safeSessionKey, ...(safeRunId ? { runId: safeRunId } : {}) }
+   : { ...(safeSessionKey ? { key: safeSessionKey } : {}), ...(safeRunId ? { runId: safeRunId } : {}) };
+  // Handshake-advertised support goes first; unadvertised names stay as
+  // fallback (features may under-report). chat.abort needs a sessionKey.
+  const candidates = orderMethodCandidates(this.gatewayFeatures, ['sessions.abort', 'chat.abort'])
+   .filter((method) => method !== 'chat.abort' || safeSessionKey);
+  let lastErr = null;
+  for (const method of candidates) {
+   try {
+    const result = await this.request(method, paramsFor(method), { timeoutMs });
+    return { ok: true, method, ...(result || {}) };
+   } catch (err) {
+    lastErr = err;
+    if (method !== candidates[candidates.length - 1]) {
+     console.warn(`[OpenClaw] ${method} failed; trying next abort method: ${err.message}`);
+    }
+   }
   }
+  throw lastErr || new Error('no abort method available');
  }
 
  async steerSession(sessionKey, message, opts = {}) {
@@ -4901,6 +4997,23 @@ const runTerminalMarkers = new RunTerminalMarkerStore();
 
 // ── Live agent event forwarding (cron, background runs → Trooper frontend) ──
 gateway._onAnyAgentEvent = (stream, data, runId) => {
+  // Push probe: if this frame belongs to an ACP child session someone is
+  // streaming, feed it into the shared stream's dedupe line and count it —
+  // /capabilities exposes whether this gateway emits agent frames for ACP
+  // children, which decides how much the relay plugin matters here.
+  const frameSessionKey = data?.sessionKey || data?.key || null;
+  if (frameSessionKey && acpEventStreams.indexBySessionKey(frameSessionKey)) {
+    acpEventPushStats.agentFramesObserved += 1;
+    acpEventPushStats.lastAt = Date.now();
+    acpEventStreams.ingestExternalEvents(frameSessionKey, [{
+      kind: stream,
+      type: stream,
+      tool: data?.name || data?.tool || undefined,
+      toolCallId: data?.toolCallId || data?.callId || undefined,
+      content: typeof data?.content === 'string' ? data.content.slice(0, 2000) : undefined,
+      runId: runId || undefined,
+    }], { source: 'acp_push' });
+  }
   // Only forward meaningful events, not high-frequency text chunks
   if (stream === 'tool_use' || stream === 'tool_result' || stream === 'lifecycle' || stream === 'compaction') {
     const eventType = stream === 'tool_use'
@@ -4989,6 +5102,10 @@ async function forwardToMissionControl(taskId, agentName, result, requestId) {
 
 // ── ACP Session Registry (tracks active ACP agent sessions) ─────────
 const acpSessionRegistry = new Map(); // sessionId -> { agent, sessionKey, status, spawnedAt, lastActivity, permissions, output }
+// Observability for the ACP push lane: agent WS frames matched to streamed
+// ACP children, and relay-plugin POSTs. Exposed via /capabilities so a
+// deployment can see whether push is flowing or polling is carrying it all.
+const acpEventPushStats = { agentFramesObserved: 0, lastAt: null, relayPostsObserved: 0, lastRelayAt: null };
 const acpHarnessRuntimeState = new Map(); // harness -> last observed auth/quota/runtime state
 // This cache is refreshed by the fixed in-container OpenCode config probe.
 // It contains a provider name and boolean only — never OpenCode config or keys.
@@ -9464,12 +9581,16 @@ app.get('/admin/stats', (req, res) => {
 
 // ── Admin: Service Management ────────────────────────────────────────────
 
-// Helper: verify bridge auth token for admin endpoints
+// Helper: verify bridge auth token for admin endpoints.
+// Fails closed when no token is configured (503) unless BRIDGE_ALLOW_UNAUTHENTICATED_DEV=1.
 function requireBridgeAuth(req, res) {
- if (!BRIDGE_AUTH_TOKEN) return true; // no token configured = dev mode
- const token = req.headers.authorization?.replace('Bearer ', '');
- if (token === BRIDGE_AUTH_TOKEN) return true;
- res.status(401).json({ error: 'Unauthorized — bridge auth token required' });
+ const auth = evaluateBridgeAuth({
+   configuredToken: BRIDGE_AUTH_TOKEN,
+   authorizationHeader: req.headers.authorization,
+   allowUnauthenticatedDev: BRIDGE_ALLOW_UNAUTHENTICATED_DEV,
+ });
+ if (auth.ok) return true;
+ res.status(auth.status).json(auth.body);
  return false;
 }
 
@@ -9957,12 +10078,14 @@ app.get('/admin/devices', async (req, res) => {
 async function approveOpenClawDevicePairingRequest(requestId) {
  const safeRequestId = String(requestId || '').trim();
  if (!safeRequestId) throw new Error('requestId is required');
- const attempts = [
-  { method: 'device.pair.approve', params: { requestId: safeRequestId } },
-  { method: 'device.pair.approve', params: { id: safeRequestId } },
-  { method: 'node.pair.approve', params: { requestId: safeRequestId } },
-  { method: 'node.pair.approve', params: { id: safeRequestId } },
- ];
+ // Method order comes from the handshake-advertised feature list (probe
+ // fallback preserved); the param-name permutation per method remains —
+ // features only name methods, not their parameter shapes.
+ const methods = orderMethodCandidates(gateway.gatewayFeatures, ['device.pair.approve', 'node.pair.approve']);
+ const attempts = methods.flatMap((method) => [
+  { method, params: { requestId: safeRequestId } },
+  { method, params: { id: safeRequestId } },
+ ]);
  const errors = [];
  for (const attempt of attempts) {
   const result = await gatewayRequestResult(attempt.method, attempt.params, { timeoutMs: 15000 });
@@ -10080,14 +10203,19 @@ app.get('/admin/nodes/status', async (req, res) => {
 async function removeNativeOpenClawNode(nodeId) {
  const safeNodeId = String(nodeId || '').trim();
  if (!safeNodeId) throw new Error('nodeId is required');
- const attempts = [
-  { method: 'node.pair.remove', params: { nodeId: safeNodeId } },
-  { method: 'node.pair.remove', params: { id: safeNodeId } },
-  { method: 'node.remove', params: { nodeId: safeNodeId } },
-  { method: 'nodes.remove', params: { nodeId: safeNodeId } },
-  { method: 'device.pair.remove', params: { deviceId: safeNodeId } },
-  { method: 'device.pair.remove', params: { id: safeNodeId } },
- ];
+ // Handshake-advertised methods first, probe fallback preserved; the param
+ // permutations per method remain (features name methods, not param shapes).
+ const paramVariants = {
+  'node.pair.remove': [{ nodeId: safeNodeId }, { id: safeNodeId }],
+  'node.remove': [{ nodeId: safeNodeId }],
+  'nodes.remove': [{ nodeId: safeNodeId }],
+  'device.pair.remove': [{ deviceId: safeNodeId }, { id: safeNodeId }],
+ };
+ const methods = orderMethodCandidates(
+  gateway.gatewayFeatures,
+  ['node.pair.remove', 'node.remove', 'nodes.remove', 'device.pair.remove'],
+ );
+ const attempts = methods.flatMap((method) => paramVariants[method].map((params) => ({ method, params })));
  const errors = [];
  for (const attempt of attempts) {
   try {
@@ -12200,6 +12328,54 @@ app.get('/cron/history', async (req, res) => {
 });
 
 // Cron: toggle job enabled/disabled
+// Atomic jobs.json write: temp file + rename, then re-read to verify. The
+// gateway also writes this file (agent cron tool); single bridge write path
+// plus verify keeps the read-modify-write window as small as it can be
+// without gateway-side locking.
+async function writeCronJobsStore(cronStorePath, data) {
+ const tmpPath = `${cronStorePath}.tmp-${process.pid}-${Date.now()}`;
+ await writeFile(tmpPath, JSON.stringify(data, null, 2));
+ await renameAsync(tmpPath, cronStorePath);
+ return JSON.parse(await readFile(cronStorePath, 'utf8'));
+}
+
+// Cron: deterministic create/upsert. The agent-facing cron tool remains for
+// agent-initiated schedules; control-plane schedulers use this instead of
+// prompting an LLM turn to write a timer.
+app.post('/cron/jobs', async (req, res) => {
+ try {
+  const cronStorePath = openclawConfigPath('cron', 'jobs.json');
+  const raw = await readFile(cronStorePath, 'utf8').catch(() => null);
+  const data = raw ? JSON.parse(raw) : { jobs: [] };
+  const requestedId = typeof req.body?.id === 'string' && req.body.id.trim()
+   ? req.body.id.trim()
+   : `trooper-${randomUUID()}`;
+  const result = upsertCronJob(data, req.body || {}, { id: requestedId });
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  await writeCronJobsStore(cronStorePath, result.store);
+  res.status(result.created ? 201 : 200).json({ success: true, job: result.job, created: result.created });
+ } catch (e) {
+  res.status(500).json({ error: e.message });
+ }
+});
+
+// Cron: whitelisted partial update (unknown gateway-owned fields preserved).
+app.patch('/cron/jobs/:id', async (req, res) => {
+ try {
+  const cronStorePath = openclawConfigPath('cron', 'jobs.json');
+  const raw = await readFile(cronStorePath, 'utf8').catch(() => null);
+  const data = raw ? JSON.parse(raw) : { jobs: [] };
+  const result = applyCronJobPatch(data, req.params.id, req.body || {});
+  if (!result.ok) {
+   return res.status(result.error === 'not_found' ? 404 : 400).json({ error: result.error });
+  }
+  await writeCronJobsStore(cronStorePath, result.store);
+  res.json({ success: true, job: result.job });
+ } catch (e) {
+  res.status(500).json({ error: e.message });
+ }
+});
+
 app.post('/cron/jobs/:id/toggle', async (req, res) => {
  const { enabled } = req.body;
  try {
@@ -14017,6 +14193,14 @@ function buildOpenClawCapabilitiesPayload() {
    nativeSteer: true,
    nativeAbort: 'sessions.abort',
   },
+  gatewayHandshake: {
+   features: summarizeGatewayFeatures(gateway?.gatewayFeatures),
+   negotiationSource: gateway?.gatewayFeatures ? 'connect_handshake' : 'probe_fallback',
+  },
+  acpEventPush: {
+   ...acpEventPushStats,
+   stream: acpEventStreams.getStats(),
+  },
   commitments: {
    enabledByOpenClawConfig: readOpenClawConfig()?.commitments?.enabled === true,
    supported: true,
@@ -14037,7 +14221,7 @@ function buildOpenClawCapabilitiesPayload() {
   },
   image: {
    customImage: process.env.OPENCLAW_DOCKER_IMAGE || 'ghcr.io/trooper-ai/trooper-gateway:latest',
-   baseImage: 'ghcr.io/openclaw/openclaw:latest',
+   baseImage: OPENCLAW_BASE_IMAGE,
    rebuildRequiredForLatestBase: true,
   },
   voice: buildVoiceCapabilitiesPayload(),
@@ -15650,6 +15834,23 @@ function captureAcpSessionHistory(local, history = []) {
  return freshEvents;
 }
 
+// On a failed/cancelled terminal, close any tool_use that never got a result
+// with an explicit interruption marker so observers (and anything replaying
+// the event stream) see the honest state instead of a silently open call.
+// Pairing treats prior markers as results, so this is idempotent.
+function appendAcpInterruptionMarkers(local) {
+ if (!local || !Array.isArray(local.events)) return [];
+ const markers = [];
+ for (const pending of listUnmatchedAcpToolUses(local.events)) {
+  const marker = buildInterruptedAcpToolResultEvent(pending);
+  marker.sequence = Number(local._eventSequence || 0) + 1;
+  local._eventSequence = marker.sequence;
+  local.events.push(marker);
+  markers.push(marker);
+ }
+ return markers;
+}
+
 function acpCommandToken(value) {
  const token = String(value ?? '').trim();
  if (!token || /[\r\n\0]/.test(token)) throw new Error('Invalid ACP command value');
@@ -15733,6 +15934,38 @@ async function closeGatewayAcpSession(sessionKey, parentSessionKey) {
  );
  return { ok: !/\b(error|failed|not found)\b/i.test(result.text), message: result.text };
 }
+
+// One shared poller per ACP session, however many SSE clients watch it.
+// Gateway I/O is injected so scheduling/fan-out/terminal logic stays
+// unit-testable (lib/acp-event-stream.mjs).
+const acpEventStreams = createAcpEventStreamRegistry({
+ fetchHistory: (sessionKey, limit, opts) => gateway.fetchSessionHistory(sessionKey, limit, opts),
+ fetchSnapshot: (sessionKey) => gateway.fetchSessionSnapshot(sessionKey),
+ captureHistory: (local, history) => captureAcpSessionHistory(local, history),
+ synthesizeInterruptionMarkers: (local) => appendAcpInterruptionMarkers(local),
+ normalizeEvent: normalizeBridgeEventPayload,
+ onTerminalCleanup: (local) => closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {}),
+ buildFinal: (local, { failed, status, timedOut }) => {
+  if (timedOut) {
+   return { type: 'error', content: 'ACP run timed out before a final response', status: 'timeout' };
+  }
+  const finalAssistant = [...(local.transcript || [])].reverse()
+   .find((entry) => String(entry?.role || '').toLowerCase() === 'assistant');
+  const finalText = messageText(finalAssistant);
+  const terminalStatus = failed ? (status || 'failed') : 'completed';
+  const content = failed ? stripAnsi(local.output || `ACP run ${status || 'failed'}`).trim() : finalText;
+  local.status = terminalStatus;
+  local.output = failed ? (local.output || finalText) : finalText;
+  local.lastActivity = Date.now();
+  return {
+   type: failed ? 'error' : 'done',
+   content,
+   exitCode: failed ? 1 : 0,
+   status: terminalStatus,
+   artifacts: local.artifacts || [],
+  };
+ },
+});
 
 async function reapTerminalGatewayAcpSessions(parentSessionKey) {
  const listed = await runGatewaySlashCommand('/acp sessions', parentSessionKey, { timeoutMs: 30000 });
@@ -15961,7 +16194,10 @@ app.post('/acp/sessions/:sessionId/steer', async (req, res) => {
  }
 });
 
-// POST /acp/sessions/:sessionId/stream — Stream ACP session response as SSE
+// POST /acp/sessions/:sessionId/stream — Stream ACP session response as SSE.
+// Backed by the shared per-session poller (lib/acp-event-stream.mjs): N
+// concurrent clients cost one gateway poll per tick, and a reconnecting
+// client passes replayFromSequence to resume without a gap.
 app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
  const { sessionId } = req.params;
  const local = acpSessionRegistry.get(sessionId);
@@ -15974,57 +16210,32 @@ app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
  'X-Accel-Buffering': 'no',
  });
 
- try {
- const startedAt = Date.now();
- let sentFinal = false;
- while (!res.writableEnded && Date.now() - startedAt < 2 * 60 * 60 * 1000) {
-  if (local.status === 'failed') {
-   const content = stripAnsi(local.output || 'ACP run failed').trim();
-   res.write(`data: ${JSON.stringify({ type: 'error', content, status: 'failed' })}\n\n`);
-   local.lastActivity = Date.now();
-   sentFinal = true;
-   void closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {});
-   break;
-  }
-  const history = await gateway.fetchSessionHistory(local.sessionKey, 200, { timeoutMs: 15000 }) || [];
-  const freshEvents = captureAcpSessionHistory(local, history);
-  for (const event of freshEvents) {
-   res.write(`data: ${JSON.stringify(event)}\n\n`);
-  }
-  const finalAssistant = [...(local.transcript || [])].reverse()
-   .find((entry) => String(entry?.role || '').toLowerCase() === 'assistant');
-  const finalText = messageText(finalAssistant);
-  const snapshot = await gateway.fetchSessionSnapshot(local.sessionKey);
-  const status = String(snapshot?.status || '').toLowerCase();
-  const terminal = ['completed', 'complete', 'done', 'idle', 'failed', 'cancelled', 'canceled'].includes(status);
-  if (terminal) {
-   const failed = ['failed', 'cancelled', 'canceled'].includes(status) || local.status === 'failed';
-   const terminalStatus = failed ? (status || 'failed') : 'completed';
-   res.write(`data: ${JSON.stringify({
-    type: failed ? 'error' : 'done',
-    content: failed ? stripAnsi(local.output || `ACP run ${status}`).trim() : finalText,
-    exitCode: failed ? 1 : 0,
-    status: terminalStatus,
-    artifacts: local.artifacts || [],
-   })}\n\n`);
-   local.status = terminalStatus;
-   local.output = failed ? (local.output || finalText) : finalText;
-   local.lastActivity = Date.now();
-   sentFinal = true;
-   void closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {});
-   break;
-  }
-  res.write(': keepalive\n\n');
-  await new Promise((resolve) => setTimeout(resolve, 1000));
- }
- if (!sentFinal && !res.writableEnded) {
-  res.write(`data: ${JSON.stringify({ type: 'error', content: 'ACP run timed out before a final response' })}\n\n`);
- }
- res.end();
- } catch (e) {
- res.write(`data: ${JSON.stringify({ type: 'error', content: e.message })}\n\n`);
- res.end();
- }
+ const replayFromSequence = Number(req.body?.replayFromSequence ?? req.query?.replayFromSequence ?? 0) || 0;
+ const writeFrame = (payload) => {
+  if (!res.writableEnded) res.write(`data: ${JSON.stringify(payload)}\n\n`);
+ };
+ const keepalive = setInterval(() => {
+  if (!res.writableEnded) res.write(': keepalive\n\n');
+ }, 1000);
+ let finished = false;
+ const finishStream = () => {
+  if (finished) return;
+  finished = true;
+  clearInterval(keepalive);
+  if (!res.writableEnded) res.end();
+ };
+ const unsubscribe = acpEventStreams.subscribe(sessionId, local, {
+  replayFromSequence,
+  onEvent: writeFrame,
+  onTerminal: (final) => {
+   writeFrame(final);
+   finishStream();
+  },
+ });
+ req.on('close', () => {
+  unsubscribe();
+  finishStream();
+ });
 });
 
 // POST /acp/sessions/:sessionId/cancel — Cancel running ACP operation
@@ -16138,6 +16349,27 @@ app.get('/api/session-status', async (req, res) => {
       return res.json({ ok: true, session: null, reason: 'not_found', lastRunTerminal });
     }
     res.json({ ok: true, session, lastRunTerminal });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Bulk variant for control-plane reconcilers: one sessions.list call
+// filtered to the requested keys instead of N single-session probes.
+app.get('/api/sessions/status', async (req, res) => {
+  try {
+    const parsed = parseSessionStatusKeys(req.query.keys);
+    if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+    if (!gateway.connected) {
+      // Unreachable gateway is UNKNOWN — reconcilers must not read it as lost.
+      return res.json({ ok: false, error: 'gateway_unreachable', sessions: null, fetchedAt: Date.now() });
+    }
+    const listResult = await gateway.request('sessions.list', {
+      limit: 500,
+      includeDerivedTitles: false,
+    }, { timeoutMs: 20000 });
+    const sessions = filterSessionsByKeys(listResult, parsed.keys);
+    res.json({ ok: true, sessions, fetchedAt: Date.now(), source: 'sessions.list' });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -17402,6 +17634,42 @@ app.post('/local-model/probe', async (req, res) => {
 // agent_end/session_end hooks inside the gateway POST here the moment a run
 // terminates — independent of the WS res frame the bridge otherwise needs.
 // Reachable from the container at host.docker.internal:PORT.
+// POST /internal/acp-event — batched session activity pushed by the
+// trooper-acp-event-relay gateway plugin. Same trust boundary as
+// /internal/run-complete: docker-local source or the bridge token.
+app.post('/internal/acp-event', (req, res) => {
+ try {
+  const remote = String(req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
+  const isLocal = remote === '::1'
+   || /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(remote);
+  const token = String(req.headers['x-trooper-bridge-token'] || '');
+  if (!isLocal && (!BRIDGE_AUTH_TOKEN || token !== BRIDGE_AUTH_TOKEN)) {
+   return res.status(403).json({ error: 'forbidden' });
+  }
+  const events = Array.isArray(req.body?.events) ? req.body.events : [];
+  acpEventPushStats.relayPostsObserved += 1;
+  acpEventPushStats.lastRelayAt = Date.now();
+  const bySession = new Map();
+  for (const event of events) {
+   const sessionKey = String(event?.sessionKey || '').trim();
+   if (!sessionKey) continue;
+   if (!bySession.has(sessionKey)) bySession.set(sessionKey, []);
+   bySession.get(sessionKey).push(event);
+  }
+  let accepted = 0;
+  let dropped = events.length - [...bySession.values()].reduce((sum, list) => sum + list.length, 0);
+  for (const [sessionKey, sessionEvents] of bySession) {
+   const result = acpEventStreams.ingestExternalEvents(sessionKey, sessionEvents, { source: 'acp_push' });
+   accepted += result.accepted;
+   dropped += result.dropped;
+  }
+  // 202: accepted-and-possibly-dropped — a child may already be closed/GC'd.
+  res.status(202).json({ ok: true, accepted, dropped });
+ } catch (error) {
+  res.status(500).json({ ok: false, error: error.message });
+ }
+});
+
 app.post('/internal/run-complete', (req, res) => {
  try {
   const remote = String(req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
