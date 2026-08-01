@@ -92,7 +92,7 @@ jobs:
             gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --prerelease \
               --title "$RELEASE_TAG" --notes "Encrypted runtime asset for a Hetzner snapshot build."
           gh release upload "$RELEASE_TAG" "$encrypted" --repo "$GITHUB_REPOSITORY" --clobber
-          url="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.assets[] | select(.name == "trooper-org-runtime.tar.gz.enc") | .browser_download_url')"
+          url="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.assets[] | select(.name == "trooper-org-runtime.tar.gz.enc") | .url')"
           [[ -n "$url" ]]
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "ciphertext_sha256=$encrypted_sha" >> "$GITHUB_OUTPUT"
