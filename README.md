@@ -55,7 +55,7 @@ See the [latest downloads](https://trooper.so/download) for all available builds
 
 | Plan                  | Price              | Best For                          | Highlights                              |
 |-----------------------|--------------------|-----------------------------------|-----------------------------------------|
-| **Local Install**     | $49 one-time       | Individuals & privacy-focused     | Runs on your machine, bring your own keys |
+| **Local Install**     | Free               | Individuals & privacy-focused     | Runs on your machine, bring your own keys |
 | **Solo Cloud**        | $149 one-time      | Solo users wanting always-on      | Lifetime hosted access                  |
 | **Trooper Cloud**     | $25/month          | Teams & power users               | Unlimited agents, team collaboration    |
 | **Enterprise**        | Custom             | Companies                         | Self-hosted, SSO, VPC, priority support |
