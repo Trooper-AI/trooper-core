@@ -1,0 +1,62 @@
+name: Download private Trooper source
+description: Fetch a selected private Trooper revision without checking it into this public repository.
+
+inputs:
+  ref:
+    description: Private Trooper branch, tag, or commit SHA
+    required: true
+  token:
+    description: "Fine-grained token with Contents: read on absurdfounder/Trooper"
+    required: true
+  destination:
+    description: Directory where the source is unpacked
+    required: false
+    default: private-trooper
+
+outputs:
+  sha:
+    description: Resolved immutable Trooper commit SHA
+    value: ${{ steps.download.outputs.sha }}
+
+runs:
+  using: composite
+  steps:
+    - id: download
+      shell: bash
+      env:
+        PRIVATE_REF: ${{ inputs.ref }}
+        PRIVATE_TOKEN: ${{ inputs.token }}
+        PRIVATE_DESTINATION: ${{ inputs.destination }}
+      run: |
+        set -euo pipefail
+        if [[ ! "$PRIVATE_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]] || [[ "$PRIVATE_REF" == *..* ]]; then
+          echo "::error::The requested Trooper ref is not valid."
+          exit 1
+        fi
+        if [ -z "$PRIVATE_TOKEN" ]; then
+          echo "::error::CRABSHQ_READ_TOKEN is not configured for the production-build environment."
+          exit 1
+        fi
+        echo "::add-mask::$PRIVATE_TOKEN"
+        sha="$(curl --fail --silent --show-error \
+          -H "Authorization: Bearer $PRIVATE_TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "https://api.github.com/repos/absurdfounder/Trooper/commits/$PRIVATE_REF" | jq -r .sha)"
+        if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "::error::Could not resolve an immutable commit for the requested Trooper ref."
+          exit 1
+        fi
+        archive="$RUNNER_TEMP/trooper-$sha.tar.gz"
+        destination="$GITHUB_WORKSPACE/$PRIVATE_DESTINATION"
+        mkdir -p "$destination"
+        curl --fail --silent --show-error --location \
+          -H "Authorization: Bearer $PRIVATE_TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          -o "$archive" \
+          "https://api.github.com/repos/absurdfounder/Trooper/tarball/$sha"
+        tar -xzf "$archive" -C "$destination" --strip-components=1
+        rm -f "$archive"
+        test -f "$destination/package.json"
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"

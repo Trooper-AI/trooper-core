@@ -1,0 +1,125 @@
+name: Build Hetzner Snapshot
+
+on:
+  workflow_dispatch:
+    inputs:
+      trooper_ref:
+        description: Private Trooper branch, tag, or commit SHA to bake
+        required: true
+        default: main
+      openclaw_bridge_sha:
+        description: trooper-core ref to bake
+        required: true
+        default: main
+      auto_promote:
+        description: Promote only after the full snapshot health check passes
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: core-hetzner-snapshot-${{ inputs.trooper_ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-snapshot:
+    name: Build and validate Hetzner snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: production-build
+    steps:
+      - name: Checkout public workflow definitions
+        uses: actions/checkout@v5
+
+      - name: Download private Trooper source
+        id: trooper
+        uses: ./.github/actions/download-private-trooper
+        with:
+          ref: ${{ inputs.trooper_ref }}
+          token: ${{ secrets.CRABSHQ_READ_TOKEN }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22.12.0
+
+      - name: Install and test Trooper
+        working-directory: private-trooper
+        run: |
+          set -euo pipefail
+          npm ci
+          npm audit --omit=dev --audit-level=high
+          npm run test:frontend
+          npm run build
+          npm --prefix server ci
+          npm --prefix server audit --omit=dev --audit-level=high
+          npm --prefix server test
+
+      - name: Resolve trooper-core SHA
+        id: bridge
+        env:
+          REF: ${{ inputs.openclaw_bridge_sha }}
+        run: |
+          set -euo pipefail
+          sha="$(git ls-remote https://github.com/Trooper-AI/trooper-core.git "refs/heads/$REF" "refs/tags/$REF" "$REF" | awk 'NR == 1 { print $1 }')"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Build encrypted snapshot runtime asset
+        id: runtime
+        working-directory: private-trooper
+        env:
+          RELEASE_TAG: encrypted-org-runtime-${{ steps.trooper.outputs.sha }}-${{ steps.bridge.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/build-org-runtime-bundle.sh scripts/verify-org-runtime-bundle-reproducible.sh
+          ./scripts/verify-org-runtime-bundle-reproducible.sh dist
+          plaintext=dist/trooper-org-runtime.tar.gz
+          encrypted=dist/trooper-org-runtime.tar.gz.enc
+          runtime_password="$(openssl rand -base64 48 | tr -d '\n')"
+          echo "::add-mask::$runtime_password"
+          export runtime_password
+          openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt \
+            -in "$plaintext" -out "$encrypted" -pass env:runtime_password
+          plaintext_sha="$(sha256sum "$plaintext" | awk '{print $1}')"
+          encrypted_sha="$(sha256sum "$encrypted" | awk '{print $1}')"
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --prerelease \
+              --title "$RELEASE_TAG" --notes "Encrypted runtime asset for a Hetzner snapshot build."
+          gh release upload "$RELEASE_TAG" "$encrypted" --repo "$GITHUB_REPOSITORY" --clobber
+          url="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.assets[] | select(.name == "trooper-org-runtime.tar.gz.enc") | .browser_download_url')"
+          [[ -n "$url" ]]
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "ciphertext_sha256=$encrypted_sha" >> "$GITHUB_OUTPUT"
+          echo "plaintext_sha256=$plaintext_sha" >> "$GITHUB_OUTPUT"
+          echo "RUNTIME_ENCRYPTION_PASSWORD=$runtime_password" >> "$GITHUB_ENV"
+
+      - name: Resolve immutable gateway image
+        id: gateway
+        run: |
+          set -euo pipefail
+          docker pull ghcr.io/trooper-ai/trooper-gateway:latest
+          image="$(docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/trooper-ai/trooper-gateway:latest)"
+          [[ "$image" =~ @sha256:[0-9a-f]{64}$ ]]
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Build and optionally promote snapshot
+        working-directory: private-trooper
+        env:
+          HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          SSH_PUBKEY: ${{ secrets.SNAPSHOT_SSH_PUBKEY }}
+          TROOPER_GIT_SHA: ${{ steps.trooper.outputs.sha }}
+          OPENCLAWBRIDGE_GIT_SHA: ${{ steps.bridge.outputs.sha }}
+          OPENCLAW_DOCKER_IMAGE: ${{ steps.gateway.outputs.image }}
+          TROOPER_RUNTIME_TARBALL_URL: ${{ steps.runtime.outputs.url }}
+          TROOPER_RUNTIME_TARBALL_SHA256: ${{ steps.runtime.outputs.ciphertext_sha256 }}
+          TROOPER_RUNTIME_PLAINTEXT_SHA256: ${{ steps.runtime.outputs.plaintext_sha256 }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SNAPSHOT_AUTO_PROMOTE: ${{ inputs.auto_promote && '1' || '0' }}
+        run: TROOPER_RUNTIME_ENCRYPTION_PASSWORD="$RUNTIME_ENCRYPTION_PASSWORD" node server/scripts/build-snapshot.mjs
