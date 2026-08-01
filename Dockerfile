@@ -2,7 +2,7 @@
 # reproducible; bump procedure lives in lib/base-image-pin.mjs, and
 # lib/base-image-pin.test.mjs enforces lockstep between this ARG default and
 # the constant exported there.
-ARG OPENCLAW_BASE_IMAGE=ghcr.io/openclaw/openclaw@sha256:25f5bacf51742c3231d7dd1d319fede009a9d5aeab8b6232cd309ac6475fe82c
+ARG OPENCLAW_BASE_IMAGE=ghcr.io/openclaw/openclaw@sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c
 FROM ${OPENCLAW_BASE_IMAGE}
 
 USER root
