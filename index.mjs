@@ -10971,12 +10971,18 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
     restartRequired,
   };
   } catch (error) {
+    let rollbackVerifier = null;
     if (bridgeActivated) {
       try {
         await runUpgradeCommand('bash', ['/opt/openclaw-bridge/scripts/update-bridge.sh', 'rollback'], {
           timeout: 30000,
         });
         console.warn('[upgrade] Restored previous bridge checkout after upgrade failure');
+        // The active bridge process is still executing the old-on-disk code
+        // until systemd starts it again. Schedule that restart out-of-process:
+        // restarting it inline would terminate this request mid-rollback and
+        // strand the server in an unreachable but "rolled back" state.
+        rollbackVerifier = await scheduleManagedRuntimeServiceRestart('bridge', operationId);
       } catch (rollbackError) {
         console.error('[upgrade] Failed to restore previous bridge checkout:', rollbackError.message);
         error.message = `${error.message}; bridge rollback also failed: ${rollbackError.message}`;
@@ -10988,6 +10994,7 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
       phase: bridgeActivated ? 'staging_rollback' : 'staging_failed',
       error: error.message,
       completedAt: new Date().toISOString(),
+      verifier: rollbackVerifier,
     });
     throw error;
   } finally {
