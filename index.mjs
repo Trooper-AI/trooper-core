@@ -14920,7 +14920,14 @@ const KNOWN_MODEL_ALIASES = {
 };
 
 const TROOPER_OPENROUTER_TIER_MODELS = [
- { id: 'openrouter/deepseek/deepseek-v4-pro', openrouterId: 'deepseek/deepseek-v4-pro', name: 'Trooper Auto', contextWindow: 128000 },
+ {
+  id: 'openrouter/deepseek/deepseek-v4-flash-0731',
+  openrouterId: 'deepseek/deepseek-v4-flash-0731',
+  name: 'Trooper Auto',
+  contextWindow: 128000,
+  // Prior Trooper Auto routing ids — stored configs referencing these upgrade in place.
+  legacyIds: ['openrouter/deepseek/deepseek-v4-pro', 'deepseek/deepseek-v4-pro', 'deepseek-v4-pro'],
+ },
  { id: 'openrouter/qwen/qwen3.7-max', openrouterId: 'qwen/qwen3.7-max', name: 'Trooper Premium', contextWindow: 128000 },
  { id: 'openrouter/moonshotai/kimi-k2.6', openrouterId: 'moonshotai/kimi-k2.6', name: 'Moonshot Kimi K2.6 (OR)', contextWindow: 128000 },
 ];
@@ -14929,7 +14936,9 @@ function normalizeModelId(model) {
  if (!model) return model;
  let m = String(model).trim();
  const trooperTier = TROOPER_OPENROUTER_TIER_MODELS.find((entry) =>
-  m.toLowerCase() === entry.id.toLowerCase() || m.toLowerCase() === entry.openrouterId.toLowerCase()
+  m.toLowerCase() === entry.id.toLowerCase()
+  || m.toLowerCase() === entry.openrouterId.toLowerCase()
+  || (entry.legacyIds || []).some((legacy) => m.toLowerCase() === legacy.toLowerCase())
  );
  if (trooperTier) return trooperTier.id;
  // Only normalize explicit known aliases. Never blanket-convert dots↔dashes across providers.
@@ -15286,7 +15295,7 @@ const _syncWarnings = [];
  openrouter: { key: openrouterKey, config: {
  baseUrl: 'https://openrouter.ai/api/v1', api: 'openai-completions',
  models: [
- { id: 'deepseek/deepseek-v4-pro', name: 'Trooper Auto', contextWindow: 128000 },
+ { id: 'deepseek/deepseek-v4-flash-0731', name: 'Trooper Auto', contextWindow: 128000 },
  { id: 'qwen/qwen3.7-max', name: 'Trooper Premium', contextWindow: 128000 },
  { id: 'moonshotai/kimi-k2.6', name: 'Moonshot Kimi K2.6 (OR)', contextWindow: 128000 },
  { id: 'anthropic/claude-sonnet-4-5', name: 'Claude Sonnet 4.5 (OR)', contextWindow: 200000 },
