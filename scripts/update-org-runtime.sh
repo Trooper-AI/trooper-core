@@ -3,13 +3,18 @@ set -euo pipefail
 
 RELEASE_URL="${TROOPER_RUNTIME_TARBALL_URL:-}"
 RELEASE_SHA256="$(printf '%s' "${TROOPER_RUNTIME_TARBALL_SHA256:-}" | tr '[:upper:]' '[:lower:]')"
+PLAINTEXT_SHA256="$(printf '%s' "${TROOPER_RUNTIME_PLAINTEXT_SHA256:-}" | tr '[:upper:]' '[:lower:]')"
+RUNTIME_ENCRYPTION="$(printf '%s' "${TROOPER_RUNTIME_BUNDLE_ENCRYPTION:-none}" | tr '[:upper:]' '[:lower:]')"
+RUNTIME_ENCRYPTION_PASSWORD="${TROOPER_RUNTIME_ENCRYPTION_PASSWORD:-}"
 INSTALL_DIR="${TROOPER_RUNTIME_INSTALL_DIR:-/opt/trooper-org-runtime}"
 NEXT_DIR="${INSTALL_DIR}.next"
 PREVIOUS_DIR="${INSTALL_DIR}.previous"
+TMP_ARCHIVE="$(mktemp /tmp/trooper-org-runtime-update.XXXXXX.archive)"
 TMP_TARBALL="$(mktemp /tmp/trooper-org-runtime-update.XXXXXX.tar.gz)"
 SKIP_RESTART="${TROOPER_RUNTIME_SKIP_RESTART:-0}"
 
 cleanup() {
+  rm -f "$TMP_ARCHIVE"
   rm -f "$TMP_TARBALL"
   rm -rf "$NEXT_DIR"
 }
@@ -28,24 +33,52 @@ if [[ "$RELEASE_URL" == *"/org-runtime-latest/"* ]]; then
   exit 1
 fi
 if [[ ! "$RELEASE_URL" =~ ^https://api\.github\.com/repos/[^/]+/[^/]+/releases/assets/[0-9]+$ ]] \
-  && [[ ! "$RELEASE_URL" =~ /releases/download/org-runtime-[a-fA-F0-9]{40}(-[a-fA-F0-9]{40})?/trooper-org-runtime\.tar\.gz([?#].*)?$ ]]; then
+  && [[ ! "$RELEASE_URL" =~ /releases/download/(org-runtime|encrypted-org-runtime)-[a-fA-F0-9]{40}(-[a-fA-F0-9]{40})?/trooper-org-runtime\.tar\.gz(\.enc)?([?#].*)?$ ]]; then
   echo "ERROR: runtime bundle URL is not an immutable promoted release asset" >&2
   exit 1
+fi
+if [[ "$RUNTIME_ENCRYPTION" != "none" && "$RUNTIME_ENCRYPTION" != "aes-256-cbc" ]]; then
+  echo "ERROR: unsupported runtime bundle encryption: $RUNTIME_ENCRYPTION" >&2
+  exit 1
+fi
+if [[ "$RUNTIME_ENCRYPTION" == "aes-256-cbc" ]]; then
+  if [[ ! "$PLAINTEXT_SHA256" =~ ^[a-f0-9]{64}$ ]]; then
+    echo "ERROR: encrypted runtime bundle requires a full plaintext sha256 digest" >&2
+    exit 1
+  fi
+  if [ "${#RUNTIME_ENCRYPTION_PASSWORD}" -lt 32 ]; then
+    echo "ERROR: encrypted runtime bundle requires a decryption password" >&2
+    exit 1
+  fi
 fi
 
 echo "[update-org-runtime] Downloading immutable runtime bundle..."
 if [[ "$RELEASE_URL" == https://api.github.com/repos/*/releases/assets/* ]]; then
-  curl -fsSL -H "Accept: application/octet-stream" "$RELEASE_URL" -o "$TMP_TARBALL"
+  curl -fsSL -H "Accept: application/octet-stream" "$RELEASE_URL" -o "$TMP_ARCHIVE"
 else
-  curl -fsSL "$RELEASE_URL" -o "$TMP_TARBALL"
+  curl -fsSL "$RELEASE_URL" -o "$TMP_ARCHIVE"
 fi
 
-ACTUAL_SHA256="$(sha256sum "$TMP_TARBALL" | awk '{print $1}')"
+ACTUAL_SHA256="$(sha256sum "$TMP_ARCHIVE" | awk '{print $1}')"
 if [ "$ACTUAL_SHA256" != "$RELEASE_SHA256" ]; then
   echo "ERROR: runtime bundle checksum mismatch: expected $RELEASE_SHA256, got $ACTUAL_SHA256" >&2
   exit 1
 fi
 echo "[update-org-runtime] Runtime checksum verified: $ACTUAL_SHA256"
+if [[ "$RUNTIME_ENCRYPTION" == "aes-256-cbc" ]]; then
+  echo "[update-org-runtime] Decrypting verified runtime bundle..."
+  RUNTIME_DECRYPT_PASSWORD="$RUNTIME_ENCRYPTION_PASSWORD" \
+    openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 \
+      -in "$TMP_ARCHIVE" -out "$TMP_TARBALL" -pass env:RUNTIME_DECRYPT_PASSWORD
+  ACTUAL_PLAINTEXT_SHA256="$(sha256sum "$TMP_TARBALL" | awk '{print $1}')"
+  if [ "$ACTUAL_PLAINTEXT_SHA256" != "$PLAINTEXT_SHA256" ]; then
+    echo "ERROR: decrypted runtime bundle checksum mismatch" >&2
+    exit 1
+  fi
+  echo "[update-org-runtime] Decrypted runtime checksum verified: $ACTUAL_PLAINTEXT_SHA256"
+else
+  mv "$TMP_ARCHIVE" "$TMP_TARBALL"
+fi
 
 rm -rf "$NEXT_DIR"
 mkdir -p "$NEXT_DIR"

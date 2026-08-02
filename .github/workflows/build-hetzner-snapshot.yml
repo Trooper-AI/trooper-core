@@ -75,13 +75,18 @@ jobs:
         env:
           RELEASE_TAG: encrypted-org-runtime-${{ steps.trooper.outputs.sha }}-${{ steps.bridge.outputs.sha }}
           GH_TOKEN: ${{ github.token }}
+          RAW_RUNTIME_ENCRYPTION_PASSWORD: ${{ secrets.RUNTIME_BUNDLE_ENCRYPTION_PASSWORD }}
         run: |
           set -euo pipefail
           chmod +x scripts/build-org-runtime-bundle.sh scripts/verify-org-runtime-bundle-reproducible.sh
           ./scripts/verify-org-runtime-bundle-reproducible.sh dist
           plaintext=dist/trooper-org-runtime.tar.gz
           encrypted=dist/trooper-org-runtime.tar.gz.enc
-          runtime_password="$(openssl rand -base64 48 | tr -d '\n')"
+          runtime_password="$(printf '%s' "${RAW_RUNTIME_ENCRYPTION_PASSWORD:-}" | tr -d '\r\n')"
+          if [ "${#runtime_password}" -lt 32 ]; then
+            echo "::error::RUNTIME_BUNDLE_ENCRYPTION_PASSWORD must be configured with at least 32 characters"
+            exit 1
+          fi
           echo "::add-mask::$runtime_password"
           export runtime_password
           openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt \
@@ -97,6 +102,7 @@ jobs:
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "ciphertext_sha256=$encrypted_sha" >> "$GITHUB_OUTPUT"
           echo "plaintext_sha256=$plaintext_sha" >> "$GITHUB_OUTPUT"
+          echo "encryption=aes-256-cbc" >> "$GITHUB_OUTPUT"
           echo "RUNTIME_ENCRYPTION_PASSWORD=$runtime_password" >> "$GITHUB_ENV"
 
       - name: Resolve immutable gateway image
@@ -121,6 +127,7 @@ jobs:
           TROOPER_RUNTIME_TARBALL_URL: ${{ steps.runtime.outputs.url }}
           TROOPER_RUNTIME_TARBALL_SHA256: ${{ steps.runtime.outputs.ciphertext_sha256 }}
           TROOPER_RUNTIME_PLAINTEXT_SHA256: ${{ steps.runtime.outputs.plaintext_sha256 }}
+          TROOPER_RUNTIME_BUNDLE_ENCRYPTION: ${{ steps.runtime.outputs.encryption }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SNAPSHOT_AUTO_PROMOTE: ${{ inputs.auto_promote && '1' || '0' }}
         run: TROOPER_RUNTIME_ENCRYPTION_PASSWORD="$RUNTIME_ENCRYPTION_PASSWORD" node server/scripts/build-snapshot.mjs

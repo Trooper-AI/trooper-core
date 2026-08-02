@@ -10844,7 +10844,7 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
     ? requestedOperationId
     : `upgrade-${Date.now()}-${randomBytes(4).toString('hex')}`;
   try {
-  const { scope, target } = validateRuntimeUpgradeRequest(request);
+  const { scope, target, runtimeEncryptionPassword } = validateRuntimeUpgradeRequest(request);
   beginRuntimeUpgradeState({ operationId, scope, target });
   const log = [];
   const step = (msg) => {
@@ -10926,6 +10926,9 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
         ...process.env,
         TROOPER_RUNTIME_TARBALL_URL: target.runtimeTarballUrl,
         TROOPER_RUNTIME_TARBALL_SHA256: target.runtimeTarballSha256,
+        TROOPER_RUNTIME_PLAINTEXT_SHA256: target.runtimeTarballPlaintextSha256,
+        TROOPER_RUNTIME_BUNDLE_ENCRYPTION: target.runtimeBundleEncryption,
+        TROOPER_RUNTIME_ENCRYPTION_PASSWORD: runtimeEncryptionPassword,
         TROOPER_RUNTIME_SKIP_RESTART: '1',
       },
       timeout: 240000,
