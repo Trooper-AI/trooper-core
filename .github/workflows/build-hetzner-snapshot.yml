@@ -65,7 +65,17 @@ jobs:
           REF: ${{ inputs.openclaw_bridge_sha }}
         run: |
           set -euo pipefail
-          sha="$(git ls-remote https://github.com/Trooper-AI/trooper-core.git "refs/heads/$REF" "refs/tags/$REF" "$REF" | awk 'NR == 1 { print $1 }')"
+          sha="$(git ls-remote https://github.com/Trooper-AI/trooper-core.git "refs/heads/$REF" "refs/tags/$REF" | awk 'NR == 1 { print $1 }')"
+          # `git ls-remote` only advertises refs, not necessarily a raw commit
+          # object. Fetch the exact input as a fallback so the documented full
+          # SHA form works just like a branch or tag.
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            sha="$(git rev-parse --verify "${REF}^{commit}" 2>/dev/null || true)"
+          fi
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            git fetch --quiet --depth 1 origin "$REF"
+            sha="$(git rev-parse FETCH_HEAD)"
+          fi
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
