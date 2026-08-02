@@ -2107,7 +2107,29 @@ function repairOpenClawConfigForGatewayStart(reason = 'gateway-start') {
 // future restart. Keep this best-effort: Docker may still be coming up, in
 // which case the server-listen retry below takes over.
 function syncBridgeOwnedGatewayPlugins(reason = 'startup') {
- const plugins = [
+ const plugins = buildBridgeOwnedGatewayPlugins();
+ const results = {};
+ for (const plugin of plugins) {
+  try {
+   const result = syncGatewayPlugin({
+    pluginId: plugin.id,
+    files: plugin.files,
+    mkdirSync,
+    writeFileSync,
+    execSync,
+   });
+   results[plugin.id] = result;
+   console.log(`[bridge] ${plugin.label} plugin synced (${reason}; installed=${result.installed}, extensionsOverwritten=${result.extensionsOverwritten})`);
+  } catch (error) {
+   results[plugin.id] = { error: String(error?.message || error) };
+   console.warn(`[bridge] ${plugin.label} plugin sync failed (${reason}): ${error.message}`);
+  }
+ }
+ return results;
+}
+
+function buildBridgeOwnedGatewayPlugins() {
+ return [
   {
    id: RUN_COMPLETION_PLUGIN_ID,
    label: 'run-completion',
@@ -2124,16 +2146,19 @@ function syncBridgeOwnedGatewayPlugins(reason = 'startup') {
    files: buildAcpEventRelayPluginFiles({ bridgePort: PORT, token: BRIDGE_AUTH_TOKEN || '' }),
   },
  ];
+}
+
+// Gateway plugin installation invokes Docker and can take minutes on a busy
+// host. Startup retries must therefore run in the existing worker boundary,
+// not on the bridge's HTTP event loop.
+async function syncBridgeOwnedGatewayPluginsAsync(reason = 'startup') {
  const results = {};
- for (const plugin of plugins) {
+ for (const plugin of buildBridgeOwnedGatewayPlugins()) {
   try {
-   const result = syncGatewayPlugin({
+   const result = await runGatewayPluginWorker('sync', {
     pluginId: plugin.id,
     files: plugin.files,
-    mkdirSync,
-    writeFileSync,
-    execSync,
-   });
+  }, 180000);
    results[plugin.id] = result;
    console.log(`[bridge] ${plugin.label} plugin synced (${reason}; installed=${result.installed}, extensionsOverwritten=${result.extensionsOverwritten})`);
   } catch (error) {
@@ -18156,8 +18181,8 @@ server.listen(PORT, '0.0.0.0', () => {
  };
  scheduleImageDefaultsActivation(startupGatewayPluginResults, 'startup-preflight');
  setTimeout(() => {
-  const retryResults = syncBridgeOwnedGatewayPlugins('startup-retry');
-  scheduleImageDefaultsActivation(retryResults, 'startup-retry');
+  void syncBridgeOwnedGatewayPluginsAsync('startup-retry')
+   .then((retryResults) => scheduleImageDefaultsActivation(retryResults, 'startup-retry'));
  }, 20_000);
  // Soft-start: strip unresolved env secrets + restart path if gateway is dead.
  try {
