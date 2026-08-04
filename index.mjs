@@ -52,6 +52,12 @@ import {
   mergeAcpTranscript,
   observeAcpSessionHistory,
 } from './lib/acp-session-observation.mjs';
+import {
+  acpParentSessionKey,
+  isAcpConversationBindingsUnavailableError,
+  resolveAcpControlSessionKey,
+  resolveAcpSpawnBindMode,
+} from './lib/acp-spawn-host.mjs';
 
 // Run DB migrations on startup
 migrate(sqlite);
@@ -15962,15 +15968,6 @@ app.post('/config/secrets/reload', async (req, res) => {
 
 // ── ACP (Agent Client Protocol) Endpoints ──────────────────────────────
 
-function acpParentSessionKey(channel = 'general') {
- const slug = String(channel || 'general')
-  .trim()
-  .toLowerCase()
-  .replace(/[^a-z0-9_-]+/g, '-')
-  .replace(/^-+|-+$/g, '') || 'general';
- return `agent:main:hook:trooper:acp:channel:${slug}`;
-}
-
 function parseMaybeJson(value) {
  if (typeof value !== 'string') return value;
  const text = value.trim();
@@ -16228,7 +16225,14 @@ async function reapTerminalGatewayAcpSessions(parentSessionKey) {
 async function spawnAcpRun({ agent, cwd, workerModel, model, modelSource, message, channel, projectRef, parentRunId, parentMessageId, parentSessionKey: requestedParentSessionKey, permissions }) {
  const task = String(message || '').trim();
  if (!task) throw new Error('message required to start an ACP run');
- const parentSessionKey = String(requestedParentSessionKey || '').trim() || acpParentSessionKey(channel);
+ // Host slash-commands on a dedicated ACP control session. Channel chat /
+ // Trooper Bridge / hook:trooper keys reject conversation bindings and used to
+ // fail spawn with "Conversation bindings are unavailable for webchat."
+ const parentSessionKey = resolveAcpControlSessionKey({
+  requestedParentSessionKey,
+  channel,
+ });
+ let bindMode = resolveAcpSpawnBindMode(parentSessionKey);
  const harness = String(agent || 'claude').trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '');
  const harnessMeta = ACP_HARNESS_CATALOG[harness];
  if (!harnessMeta) throw new Error(`Unsupported ACP harness: ${harness || '(missing)'}`);
@@ -16257,23 +16261,29 @@ async function spawnAcpRun({ agent, cwd, workerModel, model, modelSource, messag
   ? requestedWorkerModel
   : null;
  const label = `trooper-${harness}-${randomUUID().slice(0, 8)}`;
- const spawnParts = [
-  '/acp spawn',
-  harness,
-  '--mode persistent',
-  // ACPX must be bound to the parent conversation. `--bind off` creates an
-  // orphaned session: the work can finish, but neither the bridge nor Trooper
-  // can observe its live events or final response reliably.
-  '--bind here',
-  '--label',
-  acpCommandToken(label),
- ];
- if (cwd) spawnParts.push('--cwd', acpCommandToken(cwd));
- let spawnReply = await runGatewaySlashCommand(spawnParts.join(' '), parentSessionKey, { timeoutMs: 45000 });
+ const buildSpawnCommand = (mode) => {
+  const spawnParts = [
+   '/acp spawn',
+   harness,
+   '--mode persistent',
+   // Trooper hook/webchat hosts cannot use conversation bindings. Child
+   // activity is observed via history polling + trooper-acp-event-relay.
+   `--bind ${mode}`,
+   '--label',
+   acpCommandToken(label),
+  ];
+  if (cwd) spawnParts.push('--cwd', acpCommandToken(cwd));
+  return spawnParts.join(' ');
+ };
+ let spawnReply = await runGatewaySlashCommand(buildSpawnCommand(bindMode), parentSessionKey, { timeoutMs: 45000 });
+ if (bindMode === 'here' && isAcpConversationBindingsUnavailableError(spawnReply.text)) {
+  bindMode = 'off';
+  spawnReply = await runGatewaySlashCommand(buildSpawnCommand(bindMode), parentSessionKey, { timeoutMs: 45000 });
+ }
  if (/max concurrent sessions reached/i.test(spawnReply.text)) {
   const reaped = await reapTerminalGatewayAcpSessions(parentSessionKey).catch(() => []);
   if (reaped.length > 0) {
-   spawnReply = await runGatewaySlashCommand(spawnParts.join(' '), parentSessionKey, { timeoutMs: 45000 });
+   spawnReply = await runGatewaySlashCommand(buildSpawnCommand(bindMode), parentSessionKey, { timeoutMs: 45000 });
   }
  }
  const childSessionKey = parseAcpSessionKey(spawnReply.text);
@@ -16308,6 +16318,7 @@ async function spawnAcpRun({ agent, cwd, workerModel, model, modelSource, messag
   sessionKey: childSessionKey,
   runId: null,
   parentSessionKey,
+  bindMode,
   agent: harness,
   provider: harnessMeta.provider,
   workerModel: effectiveWorkerModel,
