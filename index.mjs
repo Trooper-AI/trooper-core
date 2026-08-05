@@ -202,6 +202,7 @@ import {
 } from './lib/gateway-capabilities-handshake.mjs';
 import {
   createAcpEventStreamRegistry,
+  looksLikeAcpFailureText,
 } from './lib/acp-event-stream.mjs';
 import {
   ACP_EVENT_RELAY_PLUGIN_ID,
@@ -16546,11 +16547,24 @@ app.delete('/acp/sessions/:sessionId', async (req, res) => {
 app.get('/acp/sessions/:sessionId', async (req, res) => {
  try {
  const { sessionId } = req.params;
- const local = acpSessionRegistry.get(sessionId) || {};
- const status = local?.sessionKey ? await gateway.fetchSessionSnapshot(local.sessionKey) : null;
- if (local?.sessionKey) {
-  const history = await gateway.fetchSessionHistory(local.sessionKey, 250, { timeoutMs: 15000 }) || [];
-  captureAcpSessionHistory(local, history);
+ const local = acpSessionRegistry.get(sessionId);
+ if (!local?.sessionKey) {
+  return res.status(404).json({
+   error: 'ACP session not found',
+   code: 'ACP_SESSION_NOT_FOUND',
+   sessionId,
+   status: 'closed',
+  });
+ }
+ const status = await gateway.fetchSessionSnapshot(local.sessionKey);
+ const history = await gateway.fetchSessionHistory(local.sessionKey, 250, { timeoutMs: 15000 }) || [];
+ captureAcpSessionHistory(local, history);
+ // If history/output shows a hard failure, surface Failed instead of a stale Working.
+ if (looksLikeAcpFailureText(local.output || '')
+   || looksLikeAcpFailureText(local.steerResponse || '')
+   || (Array.isArray(local.transcript) && local.transcript.some((entry) => looksLikeAcpFailureText(entry?.content || '')))) {
+  local.status = 'failed';
+  if (local.output) local.output = stripAnsi(local.output).trim();
  }
  res.json(serializeAcpSession(local, status || {}));
  } catch (e) {
