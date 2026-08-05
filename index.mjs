@@ -16353,22 +16353,34 @@ async function spawnAcpRun({ agent, cwd, workerModel, model, modelSource, messag
   artifacts: [],
   _historyKeys: new Set(),
   _eventSequence: 0,
+  _steerPending: true,
  });
  const steerCommand = `/acp steer --session ${acpCommandToken(childSessionKey)} ${task}`;
  void runGatewaySlashCommand(steerCommand, parentSessionKey, { timeoutMs: 2 * 60 * 60 * 1000 })
  .then((reply) => {
    const local = acpSessionRegistry.get(sessionId);
    if (!local) return;
+   local._steerPending = false;
    const text = stripAnsi(reply.text).trim();
    local.lastActivity = Date.now();
    local.steerResponse = text;
-   if (/\b(ACP_TURN_FAILED|Authentication required|Quota exceeded|UsageLimitExceeded)\b/i.test(text)) {
+   if (/\b(ACP_TURN_FAILED|Authentication required|Quota exceeded|UsageLimitExceeded|Unhandled error during turn|usage limit)\b/i.test(text)) {
     const failure = classifyAcpHarnessFailure(text);
     local.status = 'failed';
     local.output = text;
     local.errorKind = failure.errorKind;
     local.connectionStatus = failure.connectionStatus;
     setAcpHarnessRuntimeState(harness, failure);
+    // Push into the shared SSE poller immediately so Trooper Activity sees the
+    // UsageLimitExceeded (or auth) failure instead of a silent idle Done.
+    try {
+     acpEventStreams.ingestExternalEvents(local.sessionKey, [{
+      type: 'error',
+      content: text,
+      errorKind: failure.errorKind,
+      ts: Date.now(),
+     }]);
+    } catch {}
     void closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {});
    } else {
     setAcpHarnessRuntimeState(harness, { connectionStatus: 'connected', errorKind: null, lastError: null });
@@ -16377,6 +16389,7 @@ async function spawnAcpRun({ agent, cwd, workerModel, model, modelSource, messag
   .catch((error) => {
    const local = acpSessionRegistry.get(sessionId);
    if (!local) return;
+   local._steerPending = false;
    local.status = 'failed';
    local.output = stripAnsi(error?.message || String(error)).trim();
    const failure = classifyAcpHarnessFailure(local.output);
@@ -16384,6 +16397,14 @@ async function spawnAcpRun({ agent, cwd, workerModel, model, modelSource, messag
    local.connectionStatus = failure.connectionStatus;
    setAcpHarnessRuntimeState(harness, failure);
    local.lastActivity = Date.now();
+   try {
+    acpEventStreams.ingestExternalEvents(local.sessionKey, [{
+     type: 'error',
+     content: local.output,
+     errorKind: failure.errorKind,
+     ts: Date.now(),
+    }]);
+   } catch {}
    void closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {});
   });
  return acpSessionRegistry.get(sessionId);
