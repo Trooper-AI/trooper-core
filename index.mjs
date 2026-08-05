@@ -16039,11 +16039,20 @@ function serializeAcpSession(local = {}, extra = {}) {
  const capabilities = ptySupported
   ? [...new Set([...baseCapabilities.filter((item) => !/pty|terminal/i.test(item)), 'pty'])]
   : baseCapabilities.filter((item) => !/pty|terminal/i.test(item));
+ // OpenClaw session snapshots often carry the org chat LLM (e.g. deepseek via
+ // Trooper Auto). That is the parent controller model — not the Codex/Claude
+ // CLI runtime — so never surface it as this ACP session's model.
+ const snapshot = extra && typeof extra === 'object' ? { ...extra } : {};
+ delete snapshot.model;
+ delete snapshot.modelOverride;
+ delete snapshot.modelProvider;
  return {
   ...clean,
-  ...extra,
+  ...snapshot,
   capabilities,
   terminalCapability: ptySupported ? (clean.terminalCapability || 'pty') : null,
+  model: clean.model || null,
+  harness: clean.agent || clean.harness || snapshot.agent || null,
  };
 }
 
