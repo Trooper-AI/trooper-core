@@ -16032,7 +16032,19 @@ function serializeAcpSession(local = {}, extra = {}) {
  const clean = Object.fromEntries(
   Object.entries(local || {}).filter(([key]) => !key.startsWith('_')),
  );
- return { ...clean, ...extra };
+ // Live TUI attach is capability-gated. acpx does not expose worker PTY yet —
+ // only advertise when a session explicitly opts in via `_ptySupported`.
+ const ptySupported = Boolean(local?._ptySupported);
+ const baseCapabilities = Array.isArray(clean.capabilities) ? clean.capabilities.map(String) : [];
+ const capabilities = ptySupported
+  ? [...new Set([...baseCapabilities.filter((item) => !/pty|terminal/i.test(item)), 'pty'])]
+  : baseCapabilities.filter((item) => !/pty|terminal/i.test(item));
+ return {
+  ...clean,
+  ...extra,
+  capabilities,
+  terminalCapability: ptySupported ? (clean.terminalCapability || 'pty') : null,
+ };
 }
 
 function captureAcpSessionHistory(local, history = []) {
@@ -16604,6 +16616,49 @@ app.put('/acp/sessions/:sessionId/permissions', async (req, res) => {
  } catch (e) {
  res.status(500).json({ error: e.message });
  }
+});
+
+// ACP live PTY attach — contract only until OpenClaw/acpx exposes a worker TUI.
+// Advertise terminalCapability/pty on serializeAcpSession only when a real backend exists.
+const ACP_PTY_UNSUPPORTED = {
+  error: 'ACP_PTY_UNSUPPORTED',
+  code: 'ACP_PTY_UNSUPPORTED',
+  message: 'Live TUI attach is not available for this ACP runtime.',
+  supported: false,
+};
+
+function respondAcpPtyUnsupported(res) {
+  return res.status(501).json(ACP_PTY_UNSUPPORTED);
+}
+
+app.post('/acp/sessions/:sessionId/pty/open', async (req, res) => {
+  const local = acpSessionRegistry.get(req.params.sessionId);
+  if (!local?.sessionKey) return res.status(404).json({ error: 'ACP session not found', code: 'ACP_SESSION_NOT_FOUND' });
+  return respondAcpPtyUnsupported(res);
+});
+
+app.post('/acp/sessions/:sessionId/pty/:ptyId/input', async (req, res) => {
+  const local = acpSessionRegistry.get(req.params.sessionId);
+  if (!local?.sessionKey) return res.status(404).json({ error: 'ACP session not found', code: 'ACP_SESSION_NOT_FOUND' });
+  return respondAcpPtyUnsupported(res);
+});
+
+app.post('/acp/sessions/:sessionId/pty/:ptyId/resize', async (req, res) => {
+  const local = acpSessionRegistry.get(req.params.sessionId);
+  if (!local?.sessionKey) return res.status(404).json({ error: 'ACP session not found', code: 'ACP_SESSION_NOT_FOUND' });
+  return respondAcpPtyUnsupported(res);
+});
+
+app.post('/acp/sessions/:sessionId/pty/:ptyId/close', async (req, res) => {
+  const local = acpSessionRegistry.get(req.params.sessionId);
+  if (!local?.sessionKey) return res.status(404).json({ error: 'ACP session not found', code: 'ACP_SESSION_NOT_FOUND' });
+  return respondAcpPtyUnsupported(res);
+});
+
+app.get('/acp/sessions/:sessionId/pty/:ptyId/stream', async (req, res) => {
+  const local = acpSessionRegistry.get(req.params.sessionId);
+  if (!local?.sessionKey) return res.status(404).json({ error: 'ACP session not found', code: 'ACP_SESSION_NOT_FOUND' });
+  return respondAcpPtyUnsupported(res);
 });
 
 app.get('/exec-approvals', async (_req, res) => {
