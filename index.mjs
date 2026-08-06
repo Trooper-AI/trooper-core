@@ -46,6 +46,7 @@ import {
 import { db, sqlite, DB_PATH } from './db/index.mjs';
 import { migrate } from './db/migrate.mjs';
 import { parseSingleByteRange } from './lib/byte-range.mjs';
+import { clampDelayToDeadline, nextPollDelayMs, pollPageSize } from './lib/acp-poll-cadence.mjs';
 import { buildWeakFileEtag, getFileContentType, ifRangeAllowsRange } from './lib/file-http.mjs';
 import {
   mergeAcpArtifacts,
@@ -16133,8 +16134,15 @@ async function runGatewaySlashCommand(command, sessionKey, { timeoutMs = 30000 }
  const started = await startGatewaySlashCommand(message, sessionKey, { timeoutMs });
  const { idempotencyKey, startedAt } = started;
 
+ // Adaptive cadence and page size (lib/acp-poll-cadence.mjs). The reply almost always lands in
+ // the first second, so the first two seconds keep the original 200 ms polling and the fast case
+ // is unchanged. After that it backs off, and pages narrow once the baseline is established.
+ // This matters because runAcpSteerAndPublish passes a 2-hour timeout: the flat 200 ms / 150
+ // message loop meant ~36,000 fetches of 150 messages per active steer.
+ let pollIndex = 0;
  while (Date.now() - startedAt < timeoutMs) {
-  const history = await gateway.fetchSessionHistory(sessionKey, 150, { timeoutMs: 5000 }) || [];
+  const pageSize = pollPageSize(pollIndex);
+  const history = await gateway.fetchSessionHistory(sessionKey, pageSize, { timeoutMs: 5000 }) || [];
   const freshAssistant = history.filter((entry) =>
    String(entry?.role || '').toLowerCase() === 'assistant'
    && !beforeIds.has(acpCommandReplyIdentity(entry))
@@ -16147,7 +16155,11 @@ async function runGatewaySlashCommand(command, sessionKey, { timeoutMs = 30000 }
     idempotencyKey,
    };
   }
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  pollIndex += 1;
+  const elapsed = Date.now() - startedAt;
+  const delay = clampDelayToDeadline(nextPollDelayMs(elapsed), elapsed, timeoutMs);
+  if (delay <= 0) break;
+  await new Promise((resolve) => setTimeout(resolve, delay));
  }
  throw new Error(`OpenClaw command timed out: ${message.split(/\s+/).slice(0, 3).join(' ')}`);
 }
