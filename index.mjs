@@ -16376,60 +16376,97 @@ async function spawnAcpRun({ agent, cwd, workerModel, model, modelSource, messag
   _historyKeys: new Set(),
   _eventSequence: 0,
   _steerPending: true,
+  _spawnSteeredPrompt: task,
  });
  const steerCommand = `/acp steer --session ${acpCommandToken(childSessionKey)} ${task}`;
- void runGatewaySlashCommand(steerCommand, parentSessionKey, { timeoutMs: 2 * 60 * 60 * 1000 })
- .then((reply) => {
-   const local = acpSessionRegistry.get(sessionId);
-   if (!local) return;
-   local._steerPending = false;
-   const text = stripAnsi(reply.text).trim();
-   local.lastActivity = Date.now();
-   local.steerResponse = text;
-   if (/\b(ACP_TURN_FAILED|Authentication required|Quota exceeded|UsageLimitExceeded|Unhandled error during turn|usage limit)\b/i.test(text)) {
-    const failure = classifyAcpHarnessFailure(text);
-    local.status = 'failed';
-    local.output = text;
-    local.errorKind = failure.errorKind;
-    local.connectionStatus = failure.connectionStatus;
-    setAcpHarnessRuntimeState(harness, failure);
-    // Push into the shared SSE poller immediately so Trooper Activity sees the
-    // UsageLimitExceeded (or auth) failure instead of a silent idle Done.
-    try {
-     acpEventStreams.ingestExternalEvents(local.sessionKey, [{
-      type: 'error',
-      content: text,
-      errorKind: failure.errorKind,
-      ts: Date.now(),
-     }]);
-    } catch {}
-    void closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {});
-   } else {
-    setAcpHarnessRuntimeState(harness, { connectionStatus: 'connected', errorKind: null, lastError: null });
-   }
-  })
-  .catch((error) => {
-   const local = acpSessionRegistry.get(sessionId);
-   if (!local) return;
-   local._steerPending = false;
-   local.status = 'failed';
-   local.output = stripAnsi(error?.message || String(error)).trim();
-   const failure = classifyAcpHarnessFailure(local.output);
-   local.errorKind = failure.errorKind;
-   local.connectionStatus = failure.connectionStatus;
-   setAcpHarnessRuntimeState(harness, failure);
-   local.lastActivity = Date.now();
-   try {
-    acpEventStreams.ingestExternalEvents(local.sessionKey, [{
-     type: 'error',
-     content: local.output,
-     errorKind: failure.errorKind,
-     ts: Date.now(),
-    }]);
-   } catch {}
-   void closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {});
-  });
+ void runAcpSteerAndPublish(sessionId, steerCommand, parentSessionKey, { harness });
  return acpSessionRegistry.get(sessionId);
+}
+
+function looksLikeAcpSteerAck(text = '') {
+  const t = String(text || '').trim();
+  if (!t) return true;
+  if (t.length < 48) return true;
+  return /^(?:steered|ok(?:ay)?!?|accepted|queued|done\.?|session\s+\S+\s+steered)\b/i.test(t);
+}
+
+/** Fire `/acp steer` and publish the reply (or failure) into the shared SSE poller. */
+function runAcpSteerAndPublish(sessionId, steerCommand, parentSessionKey, { harness = null } = {}) {
+  const tracked = acpSessionRegistry.get(sessionId);
+  if (tracked) {
+    tracked._steerPending = true;
+    tracked.status = 'working';
+    tracked.lastActivity = Date.now();
+  }
+  return runGatewaySlashCommand(steerCommand, parentSessionKey, { timeoutMs: 2 * 60 * 60 * 1000 })
+    .then((reply) => {
+      const local = acpSessionRegistry.get(sessionId);
+      if (!local) return;
+      local._steerPending = false;
+      const text = stripAnsi(reply.text).trim();
+      local.lastActivity = Date.now();
+      local.steerResponse = text;
+      if (/\b(ACP_TURN_FAILED|Authentication required|Quota exceeded|UsageLimitExceeded|Unhandled error during turn|usage limit)\b/i.test(text)) {
+        const failure = classifyAcpHarnessFailure(text);
+        local.status = 'failed';
+        local.output = text;
+        local.errorKind = failure.errorKind;
+        local.connectionStatus = failure.connectionStatus;
+        if (harness || local.agent) setAcpHarnessRuntimeState(harness || local.agent, failure);
+        try {
+          acpEventStreams.ingestExternalEvents(local.sessionKey, [{
+            type: 'error',
+            content: text,
+            errorKind: failure.errorKind,
+            ts: Date.now(),
+          }]);
+        } catch {}
+        void closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {});
+        return;
+      }
+      setAcpHarnessRuntimeState(harness || local.agent, { connectionStatus: 'connected', errorKind: null, lastError: null });
+      // Synchronous steer replies often carry the real Codex/Claude answer.
+      // History polling can miss them — publish substantial replies into SSE.
+      if (text && !looksLikeAcpSteerAck(text) && !looksLikeAcpFailureText(text)) {
+        local.output = text;
+        if (!Array.isArray(local.transcript)) local.transcript = [];
+        local.transcript.push({
+          id: `steer:${Date.now()}`,
+          role: 'assistant',
+          content: text,
+          createdAt: Date.now(),
+        });
+        try {
+          acpEventStreams.ingestExternalEvents(local.sessionKey, [{
+            type: 'message',
+            role: 'assistant',
+            content: text,
+            ts: Date.now(),
+          }]);
+        } catch {}
+      }
+    })
+    .catch((error) => {
+      const local = acpSessionRegistry.get(sessionId);
+      if (!local) return;
+      local._steerPending = false;
+      local.status = 'failed';
+      local.output = stripAnsi(error?.message || String(error)).trim();
+      const failure = classifyAcpHarnessFailure(local.output);
+      local.errorKind = failure.errorKind;
+      local.connectionStatus = failure.connectionStatus;
+      if (harness || local.agent) setAcpHarnessRuntimeState(harness || local.agent, failure);
+      local.lastActivity = Date.now();
+      try {
+        acpEventStreams.ingestExternalEvents(local.sessionKey, [{
+          type: 'error',
+          content: local.output,
+          errorKind: failure.errorKind,
+          ts: Date.now(),
+        }]);
+      } catch {}
+      void closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {});
+    });
 }
 
 // GET /acp/sessions — List active ACP sessions
@@ -16487,10 +16524,44 @@ app.post('/acp/sessions/:sessionId/steer', async (req, res) => {
 // Backed by the shared per-session poller (lib/acp-event-stream.mjs): N
 // concurrent clients cost one gateway poll per tick, and a reconnecting
 // client passes replayFromSequence to resume without a gap.
+// When `message` is provided and spawn is not already steering that same
+// prompt, this endpoint steers the worker (reusable/follow-up sessions).
 app.post('/acp/sessions/:sessionId/stream', async (req, res) => {
  const { sessionId } = req.params;
  const local = acpSessionRegistry.get(sessionId);
  if (!local?.sessionKey) return res.status(404).json({ error: 'ACP session not found' });
+
+ const prompt = String(req.body?.message || '').trim();
+ if (prompt) {
+  const lastUser = [...(Array.isArray(local.transcript) ? local.transcript : [])]
+   .reverse()
+   .find((entry) => String(entry?.role || '').toLowerCase() === 'user');
+  const lastUserText = String(lastUser?.content || '').trim();
+  // Spawn already owns this prompt (pending or completed steer) — never double-fire.
+  const spawnOwnsPrompt = String(local._spawnSteeredPrompt || '') === prompt;
+  const hasAssistant = Boolean(String(local.output || '').trim())
+   || (Array.isArray(local.transcript) && local.transcript.some((entry) => (
+    String(entry?.role || '').toLowerCase() === 'assistant'
+    && String(entry?.content || '').trim()
+   )));
+  const alreadyFinishedPrompt = !local._steerPending
+   && lastUserText === prompt
+   && (hasAssistant || local.status === 'failed');
+  if (!spawnOwnsPrompt && !alreadyFinishedPrompt && !local._steerPending) {
+   if (!Array.isArray(local.transcript)) local.transcript = [];
+   if (lastUserText !== prompt) {
+    local.transcript.push({
+     id: `request:${Date.now()}`,
+     role: 'user',
+     content: prompt,
+     createdAt: Date.now(),
+    });
+   }
+   const parentKey = local.parentSessionKey || acpParentSessionKey(local.channel);
+   const steerCommand = `/acp steer --session ${acpCommandToken(local.sessionKey)} ${prompt}`;
+   void runAcpSteerAndPublish(sessionId, steerCommand, parentKey, { harness: local.agent });
+  }
+ }
 
  res.writeHead(200, {
  'Content-Type': 'text/event-stream',
