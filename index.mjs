@@ -47,6 +47,7 @@ import { db, sqlite, DB_PATH } from './db/index.mjs';
 import { migrate } from './db/migrate.mjs';
 import { parseSingleByteRange } from './lib/byte-range.mjs';
 import { clampDelayToDeadline, nextPollDelayMs, pollPageSize } from './lib/acp-poll-cadence.mjs';
+import { ensureAcpSessionTable, loadSessions, saveSessions } from './lib/acp-session-store.mjs';
 import { buildWeakFileEtag, getFileContentType, ifRangeAllowsRange } from './lib/file-http.mjs';
 import {
   mergeAcpArtifacts,
@@ -5142,6 +5143,42 @@ async function forwardToMissionControl(taskId, agentName, result, requestId) {
 
 // ── ACP Session Registry (tracks active ACP agent sessions) ─────────
 const acpSessionRegistry = new Map(); // sessionId -> { agent, sessionKey, status, spawnedAt, lastActivity, permissions, output }
+
+// The registry above is process-local, so every ACP session used to vanish on a bridge restart —
+// including sessions whose work was still running inside the gateway. lib/acp-session-store.mjs
+// snapshots it to SQLite and rehydrates it here.
+//
+// This is a sidecar rather than a rewrite: the registry is mutated in place at ~20 call sites
+// (`registry.get(id).lastActivity = ...`), and routing all of those through a store would be a
+// large change to live code. A periodic snapshot catches those mutations without touching any of
+// them. Persistence is best-effort throughout — a failure here must never take the bridge down.
+const ACP_SESSION_SNAPSHOT_INTERVAL_MS = 10_000;
+
+try {
+  ensureAcpSessionTable(sqlite);
+  for (const entry of loadSessions(sqlite)) {
+    acpSessionRegistry.set(entry.sessionId, entry);
+  }
+  if (acpSessionRegistry.size > 0) {
+    captureLog('info', `Restored ${acpSessionRegistry.size} ACP session(s) from the last bridge run`);
+  }
+} catch (err) {
+  captureLog('warn', `ACP session restore skipped: ${err?.message || err}`);
+}
+
+function snapshotAcpSessions() {
+  try {
+    saveSessions(sqlite, Array.from(acpSessionRegistry.values()));
+  } catch (err) {
+    captureLog('warn', `ACP session snapshot failed: ${err?.message || err}`);
+  }
+}
+
+// unref() so a pending snapshot timer never keeps the process alive on shutdown.
+setInterval(snapshotAcpSessions, ACP_SESSION_SNAPSHOT_INTERVAL_MS).unref();
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.once(signal, () => { snapshotAcpSessions(); });
+}
 // Observability for the ACP push lane: agent WS frames matched to streamed
 // ACP children, and relay-plugin POSTs. Exposed via /capabilities so a
 // deployment can see whether push is flowing or polling is carrying it all.
