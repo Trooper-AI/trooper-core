@@ -48,6 +48,7 @@ import { migrate } from './db/migrate.mjs';
 import { parseSingleByteRange } from './lib/byte-range.mjs';
 import { clampDelayToDeadline, nextPollDelayMs, pollPageSize } from './lib/acp-poll-cadence.mjs';
 import { ensureAcpSessionTable, loadSessions, saveSessions } from './lib/acp-session-store.mjs';
+import { readCanonicalStartupScript } from './lib/startup-script-source.mjs';
 import { buildWeakFileEtag, getFileContentType, ifRangeAllowsRange } from './lib/file-http.mjs';
 import {
   mergeAcpArtifacts,
@@ -2340,47 +2341,20 @@ function isGatewayMissingScopeError(message = '') {
 function ensureOpenClawStartupScript({ reason = 'repair' } = {}) {
  const startupPath = '/opt/openclaw-data/startup.sh';
  if (!existsSync('/opt/openclaw-data')) return { changed: false, skipped: true, reason: 'missing-openclaw-data-dir' };
- const next = `#!/bin/bash
-set -e
-GATEWAY_PORT="\${1:-18789}"
-GATEWAY_PORT="\$(printf '%s' "\$GATEWAY_PORT" | tr -cd '0-9')"
-if [ -z "\$GATEWAY_PORT" ] || [ "\$GATEWAY_PORT" -lt 1 ] || [ "\$GATEWAY_PORT" -gt 65535 ]; then
-  echo "[startup] Invalid gateway port '\${1:-}', falling back to 18789"
-  GATEWAY_PORT=18789
-fi
 
-export NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache
-export JITI_CACHE_DIR=/var/tmp/jiti
-export OPENCLAW_TMPDIR=/home/node/.cache/openclaw/tmp
-export OPENCLAW_NATIVE_HOOK_RELAY_DIR=/home/node/.cache/openclaw/native-hook-relays
-export TMPDIR="$OPENCLAW_TMPDIR"
-export TMP="$OPENCLAW_TMPDIR"
-export TEMP="$OPENCLAW_TMPDIR"
-export OPENCLAW_NO_RESPAWN=1
+ // Read the canonical script shipped with the bridge rather than carrying a copy here. The old
+ // inline template had drifted behind startup.sh — no ACPX bootstrap fallback, no persistent
+ // CLI-home symlinks, no fast permission pass — so every repair silently downgraded a correct
+ // file. See lib/startup-script-source.mjs.
+ const canonical = readCanonicalStartupScript();
+ if (!canonical) {
+  // No trustworthy source: leave whatever is on disk alone. Doing nothing is always better than
+  // overwriting a working script with something we cannot vouch for.
+  console.warn('[OpenClaw] startup script repair skipped: no canonical startup.sh found');
+  return { changed: false, skipped: true, reason: 'missing-canonical-startup-script' };
+ }
+ const next = canonical.text;
 
-mkdir -p "$NODE_COMPILE_CACHE" "$JITI_CACHE_DIR" "$OPENCLAW_TMPDIR" "$OPENCLAW_NATIVE_HOOK_RELAY_DIR" 2>/dev/null || true
-chown -R 1000:1000 "$NODE_COMPILE_CACHE" "$JITI_CACHE_DIR" /home/node/.cache/openclaw 2>/dev/null || true
-chmod 755 "$NODE_COMPILE_CACHE" "$JITI_CACHE_DIR" "$OPENCLAW_TMPDIR" "$OPENCLAW_NATIVE_HOOK_RELAY_DIR" 2>/dev/null || true
-
-run_as_node() {
-  if [ "$(id -u)" = "0" ]; then
-    su -s /bin/bash node -c "$1"
-  else
-    bash -lc "$1"
-  fi
-}
-
-echo "[startup] Running openclaw doctor repair (auto-heal config)..."
-run_as_node "TMPDIR=$TMPDIR TMP=$TMP TEMP=$TEMP OPENCLAW_TMPDIR=$OPENCLAW_TMPDIR OPENCLAW_NATIVE_HOOK_RELAY_DIR=$OPENCLAW_NATIVE_HOOK_RELAY_DIR JITI_CACHE_DIR=$JITI_CACHE_DIR NODE_COMPILE_CACHE=$NODE_COMPILE_CACHE OPENCLAW_NO_RESPAWN=1 node dist/index.js doctor --repair" 2>&1 \\
-  || run_as_node "TMPDIR=$TMPDIR TMP=$TMP TEMP=$TEMP OPENCLAW_TMPDIR=$OPENCLAW_TMPDIR OPENCLAW_NATIVE_HOOK_RELAY_DIR=$OPENCLAW_NATIVE_HOOK_RELAY_DIR JITI_CACHE_DIR=$JITI_CACHE_DIR NODE_COMPILE_CACHE=$NODE_COMPILE_CACHE OPENCLAW_NO_RESPAWN=1 node dist/index.js doctor --fix" 2>&1 \\
-  || echo "[startup] WARNING: doctor repair failed (non-fatal)"
-
-if [ "$(id -u)" = "0" ]; then
-  exec su -s /bin/bash node -c "DISPLAY=:99 TMPDIR=$TMPDIR TMP=$TMP TEMP=$TEMP OPENCLAW_TMPDIR=$OPENCLAW_TMPDIR OPENCLAW_NATIVE_HOOK_RELAY_DIR=$OPENCLAW_NATIVE_HOOK_RELAY_DIR JITI_CACHE_DIR=$JITI_CACHE_DIR NODE_COMPILE_CACHE=$NODE_COMPILE_CACHE OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind lan --port '$GATEWAY_PORT'"
-else
-  exec bash -lc "DISPLAY=:99 TMPDIR=$TMPDIR TMP=$TMP TEMP=$TEMP OPENCLAW_TMPDIR=$OPENCLAW_TMPDIR OPENCLAW_NATIVE_HOOK_RELAY_DIR=$OPENCLAW_NATIVE_HOOK_RELAY_DIR JITI_CACHE_DIR=$JITI_CACHE_DIR NODE_COMPILE_CACHE=$NODE_COMPILE_CACHE OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind lan --port '$GATEWAY_PORT'"
-fi
-`;
  let current = '';
  try { current = readFileSync(startupPath, 'utf8'); } catch {}
  if (current === next) return { changed: false, path: startupPath, reason };
@@ -2388,8 +2362,8 @@ fi
   if (current) writeFileSync(`${startupPath}.bak.${Date.now()}`, current);
  } catch {}
  writeFileSync(startupPath, next, { mode: 0o755 });
- console.log(`[OpenClaw] startup script repaired (${reason})`);
- return { changed: true, path: startupPath, reason };
+ console.log(`[OpenClaw] startup script repaired from ${canonical.path} (${reason})`);
+ return { changed: true, path: startupPath, reason, source: canonical.path };
 }
 
 function ensureOpenClawComposeOverride({ reason = 'repair' } = {}) {
