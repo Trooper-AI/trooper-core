@@ -73,6 +73,7 @@ import { createServer } from 'http';
 import { initFirebaseAuth, firebaseRestAuth } from './lib/firebase-auth.mjs';
 import { isOrgMember, writeOrgMembers, readOrgMembers } from './lib/org-members.mjs';
 import { applyRuntimeEnvOverrides, loadRuntimeEnvOverridesAtBoot } from './lib/runtime-env-overrides.mjs';
+import { sortLogLinesChronologically, isJournalBootMarker } from './lib/log-lines.mjs';
 import { verifyDirectFileAccessToken } from './lib/file-access-token.mjs';
 import { BridgeWSServer } from './lib/ws-server.mjs';
 import { handleChatMessage } from './lib/chat-handler.mjs';
@@ -10688,18 +10689,30 @@ app.get('/admin/raw-logs/all', (req, res) => {
      } catch {}
    }
 
-   const bridgeLines = bridgeOut.split('\n').filter(Boolean).map(l => ({ source: 'bridge', line: l }));
-   const gatewayLines = gatewayOut.split('\n').filter(Boolean).map(l => ({ source: 'gateway', line: l }));
-   
-   let all = [...bridgeLines, ...gatewayLines];
-   if (search) {
-     all = all.filter(l => l.line.toLowerCase().includes(search.toLowerCase()));
-   }
-   // Keep last N
-   all = all.slice(-lines * 2);
+   const bridgeRaw = bridgeOut.split('\n').filter(Boolean);
+   const gatewayRaw = gatewayOut.split('\n').filter(Boolean);
+   const tagged = [
+     ...bridgeRaw.map((line) => ({ source: 'bridge', line })),
+     ...gatewayRaw.map((line) => ({ source: 'gateway', line })),
+   ].filter((entry) => !search || entry.line.toLowerCase().includes(search.toLowerCase()));
+
+   const sortedText = sortLogLinesChronologically(tagged.map((entry) => entry.line));
+   const sourceByOriginal = new Map(tagged.map((entry) => [entry.line, entry.source]));
+   let all = sortedText.map((line) => {
+     const original = sourceByOriginal.has(line)
+       ? line
+       : line.replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+/, '');
+     return {
+       source: sourceByOriginal.get(line)
+         || sourceByOriginal.get(original)
+         || (isJournalBootMarker(original) ? 'bridge' : 'gateway'),
+       line,
+     };
+   });
+   all = all.slice(-Math.max(lines * 2, 50));
    
    res.json({ 
-     sources: { bridge: bridgeLines.length, gateway: gatewayLines.length },
+     sources: { bridge: bridgeRaw.length, gateway: gatewayRaw.length },
      total: all.length,
      lines: all,
    });
@@ -14365,6 +14378,11 @@ app.get('/logs', (req, res) => {
  }
  if (service === 'all' || service === 'bridge' || collectAllForLocalModels) {
  try { logs.bridge = execSync(`journalctl -u openclaw-bridge --no-pager -n ${safeLines} --output=short-iso 2>&1`, { timeout: 5000 }).toString(); } catch (e) { logs.bridge = e.message; }
+ }
+ // Stamp journal Boot markers and keep each service block chronological.
+ for (const key of Object.keys(logs)) {
+   if (typeof logs[key] !== 'string') continue;
+   logs[key] = sortLogLinesChronologically(logs[key].split('\n').filter(Boolean)).join('\n');
  }
  if (collectAllForLocalModels) {
   return res.json({ logs: filterLocalModelLogs(logs), service: 'local-models', timestamp: Date.now() });
