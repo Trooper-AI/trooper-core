@@ -10761,6 +10761,34 @@ function runUpgradeCommand(command, args, options = {}) {
   });
 }
 
+/**
+ * Free Docker disk before pulling a new gateway image.
+ * Keeps images referenced by running/stopped containers (including the live
+ * gateway) and only drops unused layers / build cache / untagged leftovers.
+ */
+async function reclaimDockerDiskForGatewayUpgrade(step = () => {}) {
+  const soft = async (args, label) => {
+    try {
+      const out = await runUpgradeCommand('docker', args, { timeout: 120000 });
+      if (out) step(`${label}: ${out.split('\n').slice(-2).join(' | ')}`);
+      else step(`${label}: done`);
+    } catch (error) {
+      step(`${label}: skipped (${error.message})`);
+    }
+  };
+
+  await soft(['builder', 'prune', '-f'], 'Docker builder prune');
+  await soft(['image', 'prune', '-f'], 'Docker dangling image prune');
+  // Drop unused images not attached to any container. The current gateway
+  // container keeps its image; prior digest pins from older upgrades go away.
+  await soft(['image', 'prune', '-a', '-f'], 'Docker unused image prune');
+
+  try {
+    const df = await runUpgradeCommand('df', ['-h', '/', '/var/lib/docker'], { timeout: 5000 });
+    step(`Disk after Docker reclaim:\n${df}`);
+  } catch {}
+}
+
 // 90s was not enough on a small, loaded VPS: a docker image pull + gateway
 // boot while a render/transcode is running routinely exceeds it, so upgrades
 // were marked "Gateway did not become healthy: fetch failed" even though the
@@ -10942,8 +10970,32 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
 
   if (['all', 'gateway'].includes(scope)) {
     patchRuntimeUpgradeState({ phase: 'gateway_upgrade' });
+    // CX23 disks fill with prior gateway digests + builder cache. Preflight only
+    // blocks "nearly full"; pull still needs room for new layers beside the
+    // running image. Reclaim unused Docker data before staging the pull.
+    step('Reclaiming unused Docker images/cache before gateway pull');
+    try {
+      await reclaimDockerDiskForGatewayUpgrade(step);
+    } catch (pruneError) {
+      step(`Docker reclaim warning (continuing): ${pruneError.message}`);
+    }
     step(`Pulling promoted gateway image ${target.gatewayImage}`);
-    await runUpgradeCommand('docker', ['pull', target.gatewayImage], { timeout: 180000 });
+    try {
+      await runUpgradeCommand('docker', ['pull', target.gatewayImage], { timeout: 180000 });
+    } catch (pullError) {
+      const detail = String(pullError.stderr || pullError.stdout || pullError.message || '');
+      if (/no space left on device/i.test(detail) || pullError.code === 'ENOSPC') {
+        const err = new Error(
+          'Gateway image pull failed: no space left on the VPS disk. '
+          + 'Old Docker images/cache were pruned but the volume is still too full for a new gateway pull. '
+          + 'Free disk on the server (docker system df; remove old media/logs) or resize the CX23 volume, then Upgrade again.',
+        );
+        err.code = 'upgrade_disk_full';
+        err.cause = pullError;
+        throw err;
+      }
+      throw pullError;
+    }
     await runUpgradeCommand('docker', ['tag', target.gatewayImage, 'openclaw:local'], { timeout: 15000 });
     await runUpgradeCommand('docker', ['compose', 'up', '-d', '--force-recreate'], {
       cwd: '/opt/openclaw',
