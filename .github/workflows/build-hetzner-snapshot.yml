@@ -47,16 +47,20 @@ jobs:
         with:
           node-version: 22.12.0
 
+      - name: Upgrade npm
+        working-directory: private-trooper
+        run: npm install --global npm@11
+
       - name: Install and test Trooper
         working-directory: private-trooper
         run: |
           set -euo pipefail
           npm ci
-          npm audit --omit=dev --audit-level=high
+          node scripts/audit-gate.mjs .
           npm run test:frontend
           npm run build
           npm --prefix server ci
-          npm --prefix server audit --omit=dev --audit-level=high
+          node scripts/audit-gate.mjs server
           npm --prefix server test
 
       - name: Resolve trooper-core SHA
