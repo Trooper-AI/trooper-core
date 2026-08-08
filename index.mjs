@@ -10762,11 +10762,12 @@ function runUpgradeCommand(command, args, options = {}) {
 }
 
 /**
- * Free Docker disk before pulling a new gateway image.
- * Keeps images referenced by running/stopped containers (including the live
- * gateway) and only drops unused layers / build cache / untagged leftovers.
+ * Drop unused Docker images/cache.
+ * Keeps only images referenced by containers (the live gateway). Prior
+ * digest-pinned trooper-gateway images from older upgrades are deleted —
+ * once the new gateway is healthy we do not need them on the VPS.
  */
-async function reclaimDockerDiskForGatewayUpgrade(step = () => {}) {
+async function reclaimDockerDiskForGatewayUpgrade(step = () => {}, { reason = 'reclaim' } = {}) {
   const soft = async (args, label) => {
     try {
       const out = await runUpgradeCommand('docker', args, { timeout: 120000 });
@@ -10777,15 +10778,33 @@ async function reclaimDockerDiskForGatewayUpgrade(step = () => {}) {
     }
   };
 
+  step(`Docker reclaim (${reason}): pruning unused images/cache`);
   await soft(['builder', 'prune', '-f'], 'Docker builder prune');
   await soft(['image', 'prune', '-f'], 'Docker dangling image prune');
-  // Drop unused images not attached to any container. The current gateway
-  // container keeps its image; prior digest pins from older upgrades go away.
+  // Removes every image not attached to a container — i.e. previous
+  // ghcr.io/trooper-ai/trooper-gateway@sha256:… pins left behind by upgrades.
   await soft(['image', 'prune', '-a', '-f'], 'Docker unused image prune');
+
+  // prune -a can drop the openclaw:local name while keeping the image ID via
+  // the running container. Re-pin the tag so compose/version checks stay sane.
+  try {
+    const container = process.env.OPENCLAW_GATEWAY_CONTAINER || 'openclaw-openclaw-gateway-1';
+    const imageId = await runUpgradeCommand(
+      'docker',
+      ['inspect', '--format', '{{.Image}}', container],
+      { timeout: 10000 },
+    );
+    if (imageId) {
+      await runUpgradeCommand('docker', ['tag', imageId, 'openclaw:local'], { timeout: 15000 });
+      step('Re-pinned openclaw:local to the running gateway image');
+    }
+  } catch (error) {
+    step(`openclaw:local re-pin skipped (${error.message})`);
+  }
 
   try {
     const df = await runUpgradeCommand('df', ['-h', '/', '/var/lib/docker'], { timeout: 5000 });
-    step(`Disk after Docker reclaim:\n${df}`);
+    step(`Disk after Docker reclaim (${reason}):\n${df}`);
   } catch {}
 }
 
@@ -10973,11 +10992,10 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
     // CX23 disks fill with prior gateway digests + builder cache. Preflight only
     // blocks "nearly full"; pull still needs room for new layers beside the
     // running image. Reclaim unused Docker data before staging the pull.
-    step('Reclaiming unused Docker images/cache before gateway pull');
     try {
-      await reclaimDockerDiskForGatewayUpgrade(step);
+      await reclaimDockerDiskForGatewayUpgrade(step, { reason: 'pre-pull' });
     } catch (pruneError) {
-      step(`Docker reclaim warning (continuing): ${pruneError.message}`);
+      step(`Docker pre-pull reclaim warning (continuing): ${pruneError.message}`);
     }
     step(`Pulling promoted gateway image ${target.gatewayImage}`);
     try {
@@ -11003,6 +11021,13 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
     });
     await waitForGatewayUpgradeHealth();
     step('Promoted gateway image is healthy');
+    // Old digest-pinned images are unused once the new container is live —
+    // drop them immediately so CX23 disks do not accumulate ~4GB/upgrade.
+    try {
+      await reclaimDockerDiskForGatewayUpgrade(step, { reason: 'post-live' });
+    } catch (pruneError) {
+      step(`Docker post-live reclaim warning (continuing): ${pruneError.message}`);
+    }
   }
 
   if (['all', 'bridge'].includes(scope)) {
