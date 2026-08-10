@@ -154,11 +154,23 @@ jobs:
           ssh_key_ids="$(api GET /ssh_keys | jq -c '[.ssh_keys[].id]')"
           if [ -n "${DESKTOP_FLEET_SSH_PUBKEY:-}" ]; then
             key_name="trooper-desktop-fleet-gha"
+            # Match by name first, then by public key (Hetzner rejects duplicate fingerprints).
             existing_key="$(api GET "/ssh_keys?name=${key_name}" | jq -r '.ssh_keys[0].id // empty')"
             if [ -z "$existing_key" ]; then
-              existing_key="$(api POST /ssh_keys "$(jq -nc --arg name "$key_name" --arg public_key "$DESKTOP_FLEET_SSH_PUBKEY" '{name:$name,public_key:$public_key}')" | jq -r '.ssh_key.id')"
+              existing_key="$(api GET /ssh_keys | jq -r --arg pk "$DESKTOP_FLEET_SSH_PUBKEY" '.ssh_keys[] | select(.public_key == $pk) | .id' | head -n1)"
             fi
-            ssh_key_ids="$(jq -nc --argjson ids "$ssh_key_ids" --argjson k "$existing_key" '$ids + [($k|tonumber)] | unique')"
+            if [ -z "$existing_key" ]; then
+              create_json="$(api POST /ssh_keys "$(jq -nc --arg name "$key_name" --arg public_key "$DESKTOP_FLEET_SSH_PUBKEY" '{name:$name,public_key:$public_key}')" || true)"
+              existing_key="$(jq -r '.ssh_key.id // empty' <<<"$create_json")"
+              if [ -z "$existing_key" ]; then
+                existing_key="$(api GET /ssh_keys | jq -r --arg pk "$DESKTOP_FLEET_SSH_PUBKEY" '.ssh_keys[] | select(.public_key == $pk) | .id' | head -n1)"
+              fi
+            fi
+            if [ -n "$existing_key" ]; then
+              ssh_key_ids="$(jq -nc --argjson ids "$ssh_key_ids" --argjson k "$existing_key" '$ids + [($k|tonumber)] | unique')"
+            else
+              echo "::warning::DESKTOP_FLEET_SSH_PUBKEY could not be registered; using account SSH keys only"
+            fi
           fi
           echo "SSH key ids: $ssh_key_ids"
 
