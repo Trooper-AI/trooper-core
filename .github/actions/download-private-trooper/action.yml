@@ -66,8 +66,14 @@ runs:
           echo "::error::Could not resolve an immutable commit for the requested Trooper ref."
           exit 1
         fi
-        archive="$RUNNER_TEMP/trooper-$sha.tar.gz"
-        destination="$GITHUB_WORKSPACE/$PRIVATE_DESTINATION"
+        runner_temp="$RUNNER_TEMP"
+        workspace="$GITHUB_WORKSPACE"
+        if command -v cygpath >/dev/null 2>&1; then
+          runner_temp="$(cygpath -u "$RUNNER_TEMP")"
+          workspace="$(cygpath -u "$GITHUB_WORKSPACE")"
+        fi
+        archive="$runner_temp/trooper-$sha.tar.gz"
+        destination="$workspace/$PRIVATE_DESTINATION"
         mkdir -p "$destination"
         curl --fail --silent --show-error --location \
           -H "Authorization: Bearer $selected_token" \
