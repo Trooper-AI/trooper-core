@@ -17,7 +17,8 @@ on:
         type: string
 
 concurrency:
-  group: ios-testflight-${{ github.ref }}
+  # App Store Connect permits only one active Distribution certificate request.
+  group: trooper-ios-signing
   cancel-in-progress: false
 
 jobs:

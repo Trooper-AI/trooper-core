@@ -17,7 +17,9 @@ on:
         type: string
 
 concurrency:
-  group: capacitor-ios-testflight-${{ github.ref }}
+  # Share the signing lock with the native iOS workflow so temporary
+  # Distribution certificate creation cannot race.
+  group: trooper-ios-signing
   cancel-in-progress: false
 
 jobs:
