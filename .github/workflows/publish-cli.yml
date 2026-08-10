@@ -1,0 +1,96 @@
+name: Publish Trooper CLI
+
+on:
+  workflow_dispatch:
+    inputs:
+      trooper_ref:
+        description: Private Trooper branch, tag, or commit SHA containing the CLI
+        required: true
+        default: main
+      dry_run:
+        description: "Run npm publish without publishing"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  publish-cli:
+    runs-on: ubuntu-latest
+    environment: production-build
+    defaults:
+      run:
+        working-directory: private-trooper
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout public workflow definitions
+        uses: actions/checkout@v5
+
+      - name: Download private Trooper source
+        id: trooper
+        uses: ./.github/actions/download-private-trooper
+        with:
+          ref: ${{ inputs.trooper_ref || 'main' }}
+          token: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          fallback-token: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22.12.0"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Require npm token
+        if: ${{ inputs.dry_run != 'true' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "NPM_TOKEN is not configured; add an npm automation token before publishing the public CLI."
+            exit 1
+          fi
+
+      - name: Validate CLI package
+        run: |
+          node --check packages/cli/bin/trooper.js
+          npm pack --dry-run ./packages/cli
+
+      - name: Pack public CLI artifact
+        run: |
+          set -euo pipefail
+          mkdir -p dist-cli
+          npm pack ./packages/cli --pack-destination dist-cli
+          mv dist-cli/trooper-cli-*.tgz dist-cli/trooper-cli.tgz
+          shasum -a 256 dist-cli/trooper-cli.tgz > dist-cli/trooper-cli.tgz.sha256
+
+      - name: Publish public CLI release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release delete cli-latest \
+            --repo "${{ github.repository }}" \
+            --cleanup-tag \
+            --yes >/dev/null 2>&1 || true
+          gh release create cli-latest \
+            dist-cli/trooper-cli.tgz \
+            dist-cli/trooper-cli.tgz.sha256 \
+            --repo "${{ github.repository }}" \
+            --title "Trooper CLI" \
+            --notes "Latest Trooper local-host setup CLI."
+
+      - name: Publish CLI to npm when configured
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm publish ./packages/cli --access public --dry-run
+          else
+            npm publish ./packages/cli --access public
+          fi

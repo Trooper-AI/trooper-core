@@ -1,0 +1,116 @@
+name: Build Windows app
+
+on:
+  workflow_dispatch:
+    inputs:
+      trooper_ref:
+        description: Private Trooper branch, tag, or commit SHA to build
+        required: true
+        default: main
+
+concurrency:
+  group: windows-release
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    environment: production-build
+    defaults:
+      run:
+        working-directory: private-trooper
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout public workflow definitions
+        uses: actions/checkout@v5
+
+      - name: Download private Trooper source
+        id: trooper
+        uses: ./.github/actions/download-private-trooper
+        with:
+          ref: ${{ inputs.trooper_ref || 'main' }}
+          token: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          fallback-token: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: private-trooper/package-lock.json
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: private-trooper/src-tauri
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Preflight updater signing secret
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw "Missing TAURI_SIGNING_PRIVATE_KEY. Add the Tauri updater private key to GitHub Secrets before publishing desktop auto-updates."
+          }
+
+      - name: Build NSIS installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx tauri build --bundles nsis
+
+      - name: Prepare stable download
+        shell: pwsh
+        run: |
+          $Installer = Get-ChildItem "src-tauri/target/release/bundle/nsis/*.exe" | Select-Object -First 1
+          if (-not $Installer) { throw "No NSIS installer was produced." }
+          $Signature = Get-ChildItem "src-tauri/target/release/bundle/nsis/*.exe.sig" | Select-Object -First 1
+          if (-not $Signature) { throw "No updater signature was produced. Configure TAURI_SIGNING_PRIVATE_KEY." }
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Copy-Item $Installer.FullName "release/Trooper-Windows-x64-Setup.exe"
+          Copy-Item $Signature.FullName "release/Trooper-Windows-x64-Setup.exe.sig"
+          Get-FileHash "release/Trooper-Windows-x64-Setup.exe" -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  Trooper-Windows-x64-Setup.exe" } |
+            Set-Content "release/Trooper-Windows-x64-Setup.exe.sha256"
+          $Version = node -p "require('./package.json').version"
+          $SignatureText = Get-Content "release/Trooper-Windows-x64-Setup.exe.sig" -Raw
+          $Manifest = @{
+            version = $Version
+            notes = "Latest signed Trooper desktop update."
+            pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            platforms = @{
+              "windows-x86_64" = @{
+                signature = $SignatureText.Trim()
+                url = "https://github.com/Trooper-AI/trooper-core/releases/download/windows-latest/Trooper-Windows-x64-Setup.exe"
+              }
+            }
+          } | ConvertTo-Json -Depth 6
+          Set-Content "release/latest.json" $Manifest
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Trooper-Windows-x64
+          path: private-trooper/release/*
+
+      - name: Publish stable Windows download
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view windows-latest --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+            gh release create windows-latest \
+              --repo "${{ github.repository }}" \
+              --title "Trooper for Windows" \
+              --notes "Latest Windows desktop installer. The app updates automatically as new builds are published."
+          gh release upload windows-latest release/* \
+            --repo "${{ github.repository }}" \
+            --clobber

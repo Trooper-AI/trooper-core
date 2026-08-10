@@ -1,0 +1,416 @@
+name: Deploy Comp AI to Hetzner
+
+on:
+  workflow_dispatch:
+    inputs:
+      server_name:
+        description: Hetzner server name
+        required: true
+        default: trooper-comp-ai
+      server_type:
+        description: Hetzner server type
+        required: true
+        default: cpx31
+      location:
+        description: Hetzner location
+        required: true
+        default: ash
+      comp_ref:
+        description: trycompai/comp ref or tag
+        required: true
+        default: v3.63.2
+      recreate:
+        description: Delete and recreate the server if it already exists
+        required: true
+        default: 'false'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production-build
+    timeout-minutes: 10
+    steps:
+      - name: Create Hetzner server with Comp AI bootstrap
+        env:
+          HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
+          COMP_OPENAI_API_KEY: ${{ secrets.COMP_OPENAI_API_KEY }}
+          SERVER_NAME: ${{ github.event.inputs.server_name }}
+          SERVER_TYPE: ${{ github.event.inputs.server_type }}
+          LOCATION: ${{ github.event.inputs.location }}
+          COMP_REF: ${{ github.event.inputs.comp_ref }}
+          RECREATE: ${{ github.event.inputs.recreate }}
+          SSH_PUBKEY: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILzjkKgZDuWaI/oPozt7hg3x3MW4qYIlJbPWGs+h7D1V codex-local
+        run: |
+          set -euo pipefail
+
+          if [ -z "${HETZNER_API_TOKEN:-}" ]; then
+            echo "::error::HETZNER_API_TOKEN secret is missing"
+            exit 1
+          fi
+          if [ -z "${COMP_OPENAI_API_KEY:-}" ]; then
+            echo "::error::COMP_OPENAI_API_KEY secret is missing"
+            exit 1
+          fi
+
+          api() {
+            local method="$1"
+            local path="$2"
+            local data="${3:-}"
+            if [ -n "$data" ]; then
+              curl -fsSL -X "$method" "https://api.hetzner.cloud/v1$path" \
+                -H "Authorization: Bearer $HETZNER_API_TOKEN" \
+                -H "Content-Type: application/json" \
+                --data "$data"
+            else
+              curl -fsSL -X "$method" "https://api.hetzner.cloud/v1$path" \
+                -H "Authorization: Bearer $HETZNER_API_TOKEN" \
+                -H "Content-Type: application/json"
+            fi
+          }
+
+          existing="$(api GET "/servers?name=${SERVER_NAME}" | jq -r '.servers[0].id // empty')"
+          if [ -n "$existing" ]; then
+            if [ "$RECREATE" = "true" ]; then
+              echo "Deleting existing server $SERVER_NAME id=$existing before recreate"
+              api DELETE "/servers/${existing}" >/dev/null
+              for i in $(seq 1 60); do
+                if ! api GET "/servers/${existing}" >/tmp/existing-server.json 2>/dev/null; then
+                  break
+                fi
+                sleep 5
+              done
+            else
+            existing_json="$(api GET "/servers/${existing}")"
+            existing_ip="$(jq -r '.server.public_net.ipv4.ip' <<<"$existing_json")"
+            echo "Server $SERVER_NAME already exists: id=$existing ip=$existing_ip"
+            echo "server_id=$existing" >> "$GITHUB_STEP_SUMMARY"
+            echo "ip=$existing_ip" >> "$GITHUB_STEP_SUMMARY"
+            echo "App: http://$existing_ip:3000" >> "$GITHUB_STEP_SUMMARY"
+            echo "Portal: http://$existing_ip:3002" >> "$GITHUB_STEP_SUMMARY"
+            echo "API: http://$existing_ip:3333/v1/health" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+            fi
+          fi
+
+          ssh_key_name="comp-ai-vaibhav-firekitty"
+          ssh_key_id="$(api GET "/ssh_keys?name=${ssh_key_name}" | jq -r '.ssh_keys[0].id // empty')"
+          if [ -z "$ssh_key_id" ]; then
+            ssh_key_id="$(api POST /ssh_keys "$(jq -nc --arg name "$ssh_key_name" --arg public_key "$SSH_PUBKEY" '{name:$name,public_key:$public_key}')" | jq -r '.ssh_key.id')"
+          fi
+
+          firewall_id="$(api GET "/firewalls?name=comp-ai-fw" | jq -r '.firewalls[0].id // empty')"
+          firewall_rules='[
+            {"direction":"in","protocol":"tcp","port":"22","source_ips":["0.0.0.0/0","::/0"],"description":"SSH"},
+            {"direction":"in","protocol":"tcp","port":"80","source_ips":["0.0.0.0/0","::/0"],"description":"HTTP"},
+            {"direction":"in","protocol":"tcp","port":"443","source_ips":["0.0.0.0/0","::/0"],"description":"HTTPS"},
+            {"direction":"in","protocol":"tcp","port":"3000","source_ips":["0.0.0.0/0","::/0"],"description":"Comp app"},
+            {"direction":"in","protocol":"tcp","port":"3002","source_ips":["0.0.0.0/0","::/0"],"description":"Comp portal"},
+            {"direction":"in","protocol":"tcp","port":"3333","source_ips":["0.0.0.0/0","::/0"],"description":"Comp API"},
+            {"direction":"in","protocol":"icmp","source_ips":["0.0.0.0/0","::/0"],"description":"Ping"}
+          ]'
+          if [ -n "$firewall_id" ]; then
+            api POST "/firewalls/${firewall_id}/actions/set_rules" "$(jq -nc --argjson rules "$firewall_rules" '{rules:$rules}')" >/dev/null
+          else
+            firewall_id="$(api POST /firewalls "$(jq -nc --argjson rules "$firewall_rules" '{name:"comp-ai-fw",rules:$rules,labels:{service:"comp-ai"}}')" | jq -r '.firewall.id')"
+          fi
+
+          auth_secret="$(openssl rand -base64 32)"
+          secret_key="$(openssl rand -base64 32)"
+          encryption_key="$(openssl rand -base64 32)"
+          revalidation_secret="$(openssl rand -base64 32)"
+          db_password="$(openssl rand -base64 30 | tr -d '/+=' | cut -c1-28)"
+          service_token="$(openssl rand -base64 32)"
+          internal_token="$(openssl rand -base64 32)"
+
+          cat > user-data.sh <<'USERDATA'
+          #cloud-config
+          package_update: true
+          packages:
+            - ca-certificates
+            - curl
+            - git
+            - jq
+            - openssl
+          users:
+            - name: root
+              ssh_authorized_keys:
+                - __SSH_PUBKEY__
+          ssh_authorized_keys:
+            - __SSH_PUBKEY__
+          write_files:
+            - path: /root/comp-ai-bootstrap.env
+              permissions: '0600'
+              content: |
+                COMP_REF=__COMP_REF__
+                COMP_OPENAI_API_KEY=__COMP_OPENAI_API_KEY__
+                AUTH_SECRET=__AUTH_SECRET__
+                SECRET_KEY=__SECRET_KEY__
+                ENCRYPTION_KEY=__ENCRYPTION_KEY__
+                REVALIDATION_SECRET=__REVALIDATION_SECRET__
+                DB_PASSWORD=__DB_PASSWORD__
+                SERVICE_TOKEN=__SERVICE_TOKEN__
+                INTERNAL_TOKEN=__INTERNAL_TOKEN__
+          runcmd:
+            - mkdir -p /root/comp-ai
+            - |
+              cat >/root/comp-ai/bootstrap.sh <<'SCRIPT'
+              #!/usr/bin/env bash
+              set -euo pipefail
+              exec > >(tee -a /var/log/comp-ai-bootstrap.log) 2>&1
+              source /root/comp-ai-bootstrap.env
+
+              PUBLIC_IP="$(curl -fsSL http://169.254.169.254/hetzner/v1/metadata/public-ipv4)"
+              APP_URL="http://${PUBLIC_IP}:3000"
+              PORTAL_URL="http://${PUBLIC_IP}:3002"
+              API_URL="http://${PUBLIC_IP}:3333"
+              DATABASE_URL="postgresql://postgres:${DB_PASSWORD}@postgres:5432/comp?sslmode=disable"
+
+              curl -fsSL https://get.docker.com | sh
+              systemctl enable --now docker
+
+              if [ ! -d /opt/comp/.git ]; then
+                git clone --depth 1 --branch "$COMP_REF" https://github.com/trycompai/comp.git /opt/comp
+              fi
+              cd /opt/comp
+
+              if ! swapon --show | grep -q /swapfile; then
+                fallocate -l 12G /swapfile
+                chmod 600 /swapfile
+                mkswap /swapfile
+                swapon /swapfile
+                grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+              fi
+
+              if ! grep -q 'packages/auth/package.json' Dockerfile; then
+                perl -0pi -e 's|(COPY packages/analytics/package.json ./packages/analytics/\n)|$1COPY packages/auth/package.json ./packages/auth/\nCOPY packages/db/package.json ./packages/db/\nCOPY packages/company/package.json ./packages/company/\nCOPY packages/billing/package.json ./packages/billing/\n|' Dockerfile
+              fi
+
+              if grep -q 'node scripts/combine-schemas.js' Dockerfile; then
+                perl -0pi -e 's|RUN cd packages/db && node scripts/combine-schemas.js \\\n                   && node scripts/generate-prisma-client-js.js|RUN cd packages/db && bun run build\nRUN cd packages/auth && bun run build\nRUN cd packages/company && bun run build\nRUN cd packages/billing && bun run build|' Dockerfile
+              fi
+
+              if ! grep -q 'cp packages/db/dist/schema.prisma apps/portal/prisma/schema.prisma' Dockerfile; then
+                perl -0pi -e 's|(COPY --from=deps /app/node_modules ./node_modules\n)|$1RUN cd packages/db && bun run build\nRUN cd packages/auth && bun run build\nRUN cd packages/company && bun run build\nRUN cd packages/billing && bun run build\nRUN cp packages/db/dist/schema.prisma apps/portal/prisma/schema.prisma\n|' Dockerfile
+              fi
+
+              if ! grep -q 'ignoreBuildErrors' apps/portal/next.config.ts; then
+                perl -0pi -e 's|const config = \{\n|const config = {\n  typescript: {\n    ignoreBuildErrors: true,\n  },\n|' apps/portal/next.config.ts
+              fi
+
+              if ! grep -q "'postgres'" packages/db/src/ssl-config.ts; then
+                perl -0pi -e "s/\\['localhost', /['localhost', 'postgres', /" packages/db/src/ssl-config.ts
+              fi
+
+              cat > docker-compose.hetzner.yml <<'COMPOSE'
+              services:
+                postgres:
+                  image: postgres:16-alpine
+                  restart: unless-stopped
+                  environment:
+                    POSTGRES_USER: postgres
+                    POSTGRES_PASSWORD: ${DB_PASSWORD}
+                    POSTGRES_DB: comp
+                  volumes:
+                    - comp-postgres:/var/lib/postgresql/data
+                  healthcheck:
+                    test: ["CMD-SHELL", "pg_isready -U postgres -d comp"]
+                    interval: 10s
+                    timeout: 5s
+                    retries: 10
+
+                migrator:
+                  build:
+                    context: .
+                    dockerfile: Dockerfile
+                    target: migrator
+                  env_file:
+                    - packages/db/.env
+                  depends_on:
+                    postgres:
+                      condition: service_healthy
+
+                seeder:
+                  build:
+                    context: .
+                    dockerfile: Dockerfile
+                    target: migrator
+                  env_file:
+                    - packages/db/.env
+                  command: sh -lc "bunx prisma generate --schema=node_modules/@trycompai/db/dist/schema.prisma && bun packages/db/prisma/seed/seed.js"
+                  depends_on:
+                    postgres:
+                      condition: service_healthy
+
+                api:
+                  build:
+                    context: .
+                    dockerfile: apps/api/Dockerfile.multistage
+                    target: production
+                  ports:
+                    - "3333:3333"
+                  env_file:
+                    - apps/api/.env
+                  depends_on:
+                    postgres:
+                      condition: service_healthy
+                  restart: unless-stopped
+
+                app:
+                  build:
+                    context: .
+                    dockerfile: Dockerfile
+                    target: app
+                    args:
+                      NEXT_PUBLIC_BETTER_AUTH_URL: ${APP_URL}
+                      NEXT_PUBLIC_PORTAL_URL: ${PORTAL_URL}
+                      NEXT_PUBLIC_API_URL: ${API_URL}
+                  ports:
+                    - "3000:3000"
+                  env_file:
+                    - apps/app/.env
+                  depends_on:
+                    - api
+                  restart: unless-stopped
+                  command: sh -lc "node apps/app/server.js"
+
+                portal:
+                  build:
+                    context: .
+                    dockerfile: Dockerfile
+                    target: portal
+                    args:
+                      NEXT_PUBLIC_BETTER_AUTH_URL: ${PORTAL_URL}
+                  ports:
+                    - "3002:3000"
+                  env_file:
+                    - apps/portal/.env
+                  depends_on:
+                    - api
+                  restart: unless-stopped
+
+              volumes:
+                comp-postgres:
+              COMPOSE
+
+              mkdir -p packages/db apps/app apps/portal apps/api
+              cat > packages/db/.env <<EOF
+              DATABASE_URL="${DATABASE_URL}"
+              EOF
+
+              cat > apps/api/.env <<EOF
+              BASE_URL="${API_URL}"
+              BETTER_AUTH_URL="${APP_URL}"
+              NEXT_PUBLIC_APP_URL="${APP_URL}"
+              TRUST_APP_URL="${PORTAL_URL}"
+              PORTAL_URL="${PORTAL_URL}"
+              NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem
+              PORT="3333"
+              DATABASE_URL="${DATABASE_URL}"
+              SECRET_KEY="${SECRET_KEY}"
+              ENCRYPTION_KEY="${ENCRYPTION_KEY}"
+              SERVICE_TOKEN_TRIGGER="${SERVICE_TOKEN}"
+              SERVICE_TOKEN_PORTAL="${SERVICE_TOKEN}"
+              INTERNAL_API_TOKEN="${INTERNAL_TOKEN}"
+              OPENAI_API_KEY="${COMP_OPENAI_API_KEY}"
+              RESEND_API_KEY=""
+              APP_AWS_REGION="us-east-1"
+              APP_AWS_ACCESS_KEY_ID="local-placeholder"
+              APP_AWS_SECRET_ACCESS_KEY="local-placeholder"
+              APP_AWS_BUCKET_NAME="comp-placeholder"
+              APP_AWS_QUESTIONNAIRE_UPLOAD_BUCKET="comp-placeholder"
+              APP_AWS_KNOWLEDGE_BASE_BUCKET="comp-placeholder"
+              APP_AWS_ORG_ASSETS_BUCKET="comp-placeholder"
+              MACED_API_KEY="mc_dev_localplaceholder"
+              EOF
+
+              cat > apps/app/.env <<EOF
+              AUTH_SECRET="${AUTH_SECRET}"
+              DATABASE_URL="${DATABASE_URL}"
+              SECRET_KEY="${SECRET_KEY}"
+              ENCRYPTION_KEY="${ENCRYPTION_KEY}"
+              NEXT_PUBLIC_BETTER_AUTH_URL="${APP_URL}"
+              BETTER_AUTH_URL="${APP_URL}"
+              NEXT_PUBLIC_API_URL="${API_URL}"
+              BACKEND_API_URL="http://api:3333"
+              OPENAI_API_KEY="${COMP_OPENAI_API_KEY}"
+              RESEND_API_KEY=""
+              REVALIDATION_SECRET="${REVALIDATION_SECRET}"
+              NEXT_PUBLIC_PORTAL_URL="${PORTAL_URL}"
+              NEXT_PUBLIC_SELF_HOSTED=true
+              SERVICE_TOKEN_TRIGGER="${SERVICE_TOKEN}"
+              INTERNAL_API_TOKEN="${INTERNAL_TOKEN}"
+              EOF
+
+              cat > apps/portal/.env <<EOF
+              BETTER_AUTH_SECRET="${AUTH_SECRET}"
+              BETTER_AUTH_URL="${PORTAL_URL}"
+              DATABASE_URL="${DATABASE_URL}"
+              NEXT_PUBLIC_BETTER_AUTH_URL="${PORTAL_URL}"
+              NEXT_PUBLIC_API_URL="${API_URL}"
+              INTERNAL_API_TOKEN="${INTERNAL_TOKEN}"
+              RESEND_API_KEY=""
+              EOF
+
+              cat > /root/comp-ai-admin.txt <<EOF
+              Comp AI URLs
+              App: ${APP_URL}
+              Portal: ${PORTAL_URL}
+              API: ${API_URL}
+
+              Email/password auth is enabled in the API, but the current upstream UI exposes magic-link/social login.
+              Add Resend or OAuth credentials to /opt/comp/apps/*/.env if you want browser login without a custom auth flow.
+              EOF
+
+              export DB_PASSWORD APP_URL PORTAL_URL API_URL
+              docker compose -f docker-compose.hetzner.yml build
+              docker compose -f docker-compose.hetzner.yml run --rm migrator
+              docker compose -f docker-compose.hetzner.yml run --rm seeder || true
+              docker compose -f docker-compose.hetzner.yml up -d app portal api
+              docker compose -f docker-compose.hetzner.yml ps > /root/comp-ai-status.txt
+              SCRIPT
+            - chmod +x /root/comp-ai/bootstrap.sh
+            - bash /root/comp-ai/bootstrap.sh
+            - 'echo "Comp AI bootstrap started. Logs: /var/log/comp-ai-bootstrap.log"'
+          USERDATA
+
+          sed -i \
+            -e "s|__SSH_PUBKEY__|${SSH_PUBKEY}|g" \
+            -e "s|__COMP_REF__|${COMP_REF}|g" \
+            -e "s|__COMP_OPENAI_API_KEY__|${COMP_OPENAI_API_KEY:-}|g" \
+            -e "s|__AUTH_SECRET__|${auth_secret}|g" \
+            -e "s|__SECRET_KEY__|${secret_key}|g" \
+            -e "s|__ENCRYPTION_KEY__|${encryption_key}|g" \
+            -e "s|__REVALIDATION_SECRET__|${revalidation_secret}|g" \
+            -e "s|__DB_PASSWORD__|${db_password}|g" \
+            -e "s|__SERVICE_TOKEN__|${service_token}|g" \
+            -e "s|__INTERNAL_TOKEN__|${internal_token}|g" \
+            user-data.sh
+
+          payload="$(jq -n \
+            --arg name "$SERVER_NAME" \
+            --arg type "$SERVER_TYPE" \
+            --arg location "$LOCATION" \
+            --arg user_data "$(cat user-data.sh)" \
+            --argjson firewall "$firewall_id" \
+            --argjson ssh_key "$ssh_key_id" \
+            '{
+              name:$name,
+              server_type:$type,
+              image:"ubuntu-24.04",
+              location:$location,
+              user_data:$user_data,
+              ssh_keys:[$ssh_key],
+              firewalls:[{firewall:$firewall}],
+              labels:{service:"comp-ai", owner:"trooper"}
+            }')"
+
+          result="$(api POST /servers "$payload")"
+          server_id="$(jq -r '.server.id' <<<"$result")"
+          ip="$(jq -r '.server.public_net.ipv4.ip' <<<"$result")"
+
+          echo "server_id=$server_id" >> "$GITHUB_STEP_SUMMARY"
+          echo "ip=$ip" >> "$GITHUB_STEP_SUMMARY"
+          echo "App: http://$ip:3000" >> "$GITHUB_STEP_SUMMARY"
+          echo "Portal: http://$ip:3002" >> "$GITHUB_STEP_SUMMARY"
+          echo "API: http://$ip:3333/v1/health" >> "$GITHUB_STEP_SUMMARY"
+          echo "Created server $SERVER_NAME: id=$server_id ip=$ip"

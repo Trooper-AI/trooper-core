@@ -1,0 +1,67 @@
+name: Restore Previous Stable Snapshot
+
+on:
+  workflow_dispatch:
+    inputs:
+      trooper_ref:
+        description: Private Trooper branch, tag, or commit SHA containing rollback logic
+        required: true
+        default: main
+      expected_current_stable_image_id:
+        description: 'Current stable image ID that must be active before rollback'
+        required: true
+        type: string
+      expected_previous_stable_image_id:
+        description: 'Previous stable image ID to restore'
+        required: true
+        type: string
+      reason:
+        description: 'Incident or rollback reason'
+        required: true
+        type: string
+
+concurrency:
+  group: golden-snapshot-pointer
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  rollback:
+    name: Restore verified previous pointer
+    runs-on: ubuntu-latest
+    environment: production-build
+    defaults:
+      run:
+        working-directory: private-trooper
+    timeout-minutes: 10
+    steps:
+      - name: Checkout public workflow definitions
+        uses: actions/checkout@v5
+
+      - name: Download private Trooper source
+        id: trooper
+        uses: ./.github/actions/download-private-trooper
+        with:
+          ref: ${{ inputs.trooper_ref || 'main' }}
+          token: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          fallback-token: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22.12.0'
+          cache: 'npm'
+          cache-dependency-path: private-trooper/server/package-lock.json
+
+      - name: Install server dependencies
+        working-directory: private-trooper/server
+        run: npm ci
+
+      - name: Restore the previous stable snapshot pointer
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          EXPECTED_CURRENT_STABLE_IMAGE_ID: ${{ inputs.expected_current_stable_image_id }}
+          EXPECTED_PREVIOUS_STABLE_IMAGE_ID: ${{ inputs.expected_previous_stable_image_id }}
+        run: node server/scripts/rollback-golden-snapshot.mjs
