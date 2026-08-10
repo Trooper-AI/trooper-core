@@ -12,7 +12,7 @@ on:
         required: false
         type: string
       build_number:
-        description: "Optional CFBundleVersion override. Defaults to the run number."
+        description: "Optional CFBundleVersion override. Defaults to a UTC timestamp."
         required: false
         type: string
 
@@ -208,13 +208,20 @@ jobs:
           cp -R dist/. apps/capacitor/dist/
           npm --prefix apps/capacitor run ios:sync
 
+      - name: Resolve App Store build number
+        env:
+          REQUESTED_BUILD_NUMBER: ${{ inputs.build_number }}
+        run: |
+          set -euo pipefail
+          BUILD_NUMBER="${REQUESTED_BUILD_NUMBER:-$(date -u +%Y%m%d%H%M)}"
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+
       - name: Build signed Capacitor iOS IPA
         env:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
           DEVELOPMENT_TEAM: ${{ env.APPLE_TEAM_ID }}
           MARKETING_VERSION: ${{ inputs.marketing_version || '1.0.3' }}
-          BUILD_NUMBER: ${{ inputs.build_number || github.run_number }}
         run: |
           set -euo pipefail
           APPLE_API_KEY_PATH="$API_PRIVATE_KEYS_DIR/AuthKey_${APPLE_API_KEY_ID}.p8"
