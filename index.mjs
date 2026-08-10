@@ -208,6 +208,7 @@ import {
   createAcpEventStreamRegistry,
   looksLikeAcpFailureText,
   buildAcpRuleObservation,
+  acpErrorKindForRuleReason,
 } from './lib/acp-event-stream.mjs';
 import { arbitrateSessionState } from './lib/acp-state-rules.mjs';
 import {
@@ -16791,7 +16792,8 @@ app.get('/acp/sessions/:sessionId', async (req, res) => {
   });
   if (verdict.status === 'failed' && local.status !== 'failed') {
    local.status = 'failed';
-   if (verdict.reason) local.errorKind = local.errorKind || `acp_${verdict.reason}`;
+   const mappedKind = acpErrorKindForRuleReason(verdict.reason);
+   if (mappedKind) local.errorKind = local.errorKind || mappedKind;
   }
   const nextAttention = verdict.attention || null;
   if ((local.attention || null) !== nextAttention) {
