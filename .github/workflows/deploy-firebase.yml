@@ -24,8 +24,6 @@ jobs:
       run:
         working-directory: private-trooper
     timeout-minutes: 25
-    # Repo-level FIREBASE_TOKEN — do not gate on a missing GitHub Environment
-    # named "production" (that name is not configured and caused startup_failure).
     steps:
       - name: Checkout public workflow definitions
         uses: actions/checkout@v5
@@ -38,14 +36,18 @@ jobs:
           token: ${{ secrets.CRABSHQ_READ_TOKEN }}
           fallback-token: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
 
-      - name: Preflight Firebase deployment token
+      - name: Configure Firebase service account
         env:
-          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
         run: |
-          if [ -z "${FIREBASE_TOKEN:-}" ]; then
-            echo "::error::FIREBASE_TOKEN is not configured in the production-build environment."
+          if [ -z "${FIREBASE_SERVICE_ACCOUNT_JSON:-}" ]; then
+            echo "::error::FIREBASE_SERVICE_ACCOUNT_JSON is not configured in the production-build environment."
             exit 1
           fi
+          credentials="$RUNNER_TEMP/firebase-service-account.json"
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT_JSON" > "$credentials"
+          chmod 600 "$credentials"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$credentials" >> "$GITHUB_ENV"
 
       - name: Setup Node
         uses: actions/setup-node@v5
@@ -70,10 +72,7 @@ jobs:
           npx --yes firebase-tools@14.20.0 deploy \
             --only functions,firestore:rules,database \
             --project ai-copilot-104 \
-            --token "$FIREBASE_TOKEN" \
             --non-interactive
-        env:
-          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
 
       - name: Record deployment
         run: |
