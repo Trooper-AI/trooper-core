@@ -80,7 +80,7 @@ jobs:
           HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
           DESKTOP_FLEET_AUTH_TOKEN: ${{ secrets.DESKTOP_FLEET_AUTH_TOKEN }}
           DESKTOP_FLEET_SSH_PUBKEY: ${{ secrets.DESKTOP_FLEET_SSH_PUBKEY }}
-          TROOPER_REPO_CLONE_TOKEN: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          TROOPER_REPO_CLONE_TOKEN: ${{ secrets.TROOPER_REPO_CLONE_TOKEN || secrets.CRABSHQ_READ_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
           BASE_SERVER_NAME: ${{ github.event.inputs.server_name }}
           SERVER_TYPE: ${{ github.event.inputs.server_type }}
@@ -89,7 +89,7 @@ jobs:
           REPO_REF: ${{ github.event.inputs.repo_ref }}
           RECREATE: ${{ github.event.inputs.recreate }}
           HOST_COUNT: ${{ github.event.inputs.count }}
-          GITHUB_REPOSITORY: absurdfounder/Trooper
+          TROOPER_SOURCE_REPO: absurdfounder/Trooper
         run: |
           set -euo pipefail
 
@@ -174,13 +174,18 @@ jobs:
           fi
           echo "SSH key ids: $ssh_key_ids"
 
-          # Repo URL for host clone — private Trooper needs a token (PAT or GITHUB_TOKEN)
-          REPO_URL="https://github.com/${GITHUB_REPOSITORY}.git"
+          # Repo URL for host clone — private Trooper needs a token (PAT).
+          # Do NOT use GITHUB_REPOSITORY: Actions reserves it to the workflow repo
+          # (Trooper-AI/trooper-core when dispatched from public), which clones the
+          # wrong tree and breaks desktop-api install.
+          SOURCE_REPO="${TROOPER_SOURCE_REPO:-absurdfounder/Trooper}"
+          REPO_URL="https://github.com/${SOURCE_REPO}.git"
           CLONE_TOKEN="${TROOPER_REPO_CLONE_TOKEN:-${GITHUB_TOKEN:-}}"
           if [ -n "$CLONE_TOKEN" ]; then
             echo "::add-mask::$CLONE_TOKEN"
-            REPO_URL="https://x-access-token:${CLONE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            REPO_URL="https://x-access-token:${CLONE_TOKEN}@github.com/${SOURCE_REPO}.git"
           fi
+          echo "Source repo: ${SOURCE_REPO}"
 
           COUNT="${HOST_COUNT:-1}"
           if ! [[ "$COUNT" =~ ^[0-9]+$ ]] || [ "$COUNT" -lt 1 ]; then COUNT=1; fi
