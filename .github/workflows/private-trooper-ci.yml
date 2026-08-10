@@ -1,0 +1,110 @@
+name: Private Trooper CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      trooper_ref:
+        description: Private Trooper branch, tag, or commit SHA to test
+        required: true
+        default: main
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: private-trooper
+    timeout-minutes: 25
+    steps:
+      - name: Checkout public workflow definitions
+        uses: actions/checkout@v5
+
+      - name: Download private Trooper source
+        id: trooper
+        uses: ./.github/actions/download-private-trooper
+        with:
+          ref: ${{ inputs.trooper_ref || 'main' }}
+          token: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          fallback-token: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22.12.0'
+          cache: npm
+          cache-dependency-path: |
+            private-trooper/package-lock.json
+            private-trooper/server/package-lock.json
+            private-trooper/functions/package-lock.json
+
+      - name: Upgrade npm (registry retired the legacy quick-audit endpoint; npm 10 still falls back to it for URL-sourced deps and gets a hard 400)
+        run: npm install -g npm@11
+
+      - name: Install web dependencies
+        run: npm ci
+
+      - name: Audit web production dependencies
+        run: node scripts/audit-gate.mjs .
+
+      - name: Lint critical lib modules (TDZ / no-use-before-define)
+        run: npm run lint
+
+      - name: Module smoke imports
+        run: npm run test:smoke
+
+      - name: Test web app
+        run: npm run test:frontend
+
+      - name: Build web app
+        run: npm run build
+
+      - name: Install server dependencies
+        working-directory: private-trooper/server
+        run: npm ci
+
+      - name: Audit server production dependencies
+        working-directory: private-trooper/server
+        run: node ../scripts/audit-gate.mjs .
+
+      - name: Test server
+        working-directory: private-trooper/server
+        run: npm test
+
+      - name: Install Chrome for Trooper Page Agent benchmark
+        run: ./server/node_modules/.bin/playwright-core install --with-deps chromium
+
+      - name: Test Trooper Page Agent reliability
+        env:
+          TROOPER_E2E_REPEATS: '3'
+          TROOPER_E2E_REPORT: ${{ runner.temp }}/trooper-page-agent-reliability.json
+        run: xvfb-run --auto-servernum npm run extension:chrome:reliability
+
+      - name: Publish Trooper Page Agent benchmark summary
+        if: always()
+        run: |
+          if [ -f "${{ runner.temp }}/trooper-page-agent-reliability.json" ]; then
+            node scripts/write-trooper-page-agent-summary.mjs "${{ runner.temp }}/trooper-page-agent-reliability.json" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload Trooper Page Agent benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trooper-page-agent-reliability
+          path: ${{ runner.temp }}/trooper-page-agent-reliability.json
+          if-no-files-found: ignore
+
+      - name: Install function dependencies
+        working-directory: private-trooper/functions
+        run: npm ci
+
+      - name: Audit function production dependencies
+        working-directory: private-trooper/functions
+        run: node ../scripts/audit-gate.mjs .
+
+      - name: Test functions and Firebase security rules
+        run: npx --yes firebase-tools@14.20.0 emulators:exec --only firestore,database "npm --prefix functions test"

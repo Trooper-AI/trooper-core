@@ -1,0 +1,86 @@
+name: Deploy Firebase Functions & Rules
+
+on:
+  workflow_dispatch:
+    inputs:
+      trooper_ref:
+        description: Private Trooper branch, tag, or commit SHA to deploy
+        required: true
+        default: main
+      reason:
+        description: Why this production deployment is needed
+        required: true
+        type: string
+
+concurrency:
+  group: firebase-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production-build
+    defaults:
+      run:
+        working-directory: private-trooper
+    timeout-minutes: 25
+    # Repo-level FIREBASE_TOKEN — do not gate on a missing GitHub Environment
+    # named "production" (that name is not configured and caused startup_failure).
+    steps:
+      - name: Checkout public workflow definitions
+        uses: actions/checkout@v5
+
+      - name: Download private Trooper source
+        id: trooper
+        uses: ./.github/actions/download-private-trooper
+        with:
+          ref: ${{ inputs.trooper_ref || 'main' }}
+          token: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          fallback-token: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+
+      - name: Preflight Firebase deployment token
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+        run: |
+          if [ -z "${FIREBASE_TOKEN:-}" ]; then
+            echo "::error::FIREBASE_TOKEN is not configured in the production-build environment."
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22.12.0'
+          cache: npm
+          cache-dependency-path: private-trooper/functions/package-lock.json
+
+      - name: Install function dependencies
+        run: npm ci
+        working-directory: private-trooper/functions
+
+      - name: Audit function production dependencies
+        run: npm audit --omit=dev --audit-level=high
+        working-directory: private-trooper/functions
+
+      - name: Verify functions and security rules
+        run: npx --yes firebase-tools@14.20.0 emulators:exec --only firestore,database "npm --prefix functions test"
+
+      - name: Deploy selected commit to Firebase
+        run: |
+          npx --yes firebase-tools@14.20.0 deploy \
+            --only functions,firestore:rules,database \
+            --project ai-copilot-104 \
+            --token "$FIREBASE_TOKEN" \
+            --non-interactive
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+
+      - name: Record deployment
+        run: |
+          {
+            echo "## Firebase production deployment"
+            echo ""
+            echo "- Private Trooper commit: \`${{ steps.trooper.outputs.sha }}\`"
+            echo "- Actor: \`${GITHUB_ACTOR}\`"
+            echo "- Reason: ${{ inputs.reason }}"
+          } >> "$GITHUB_STEP_SUMMARY"

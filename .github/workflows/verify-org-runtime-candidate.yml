@@ -1,0 +1,91 @@
+name: Verify Org Runtime Candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      trooper_ref:
+        description: Private Trooper branch, tag, or commit SHA to verify
+        required: true
+        default: main
+
+concurrency:
+  group: build-org-runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-org-runtime:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: private-trooper
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout public workflow definitions
+        uses: actions/checkout@v5
+
+      - name: Download private Trooper source
+        id: trooper
+        uses: ./.github/actions/download-private-trooper
+        with:
+          ref: ${{ inputs.trooper_ref || 'main' }}
+          token: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          fallback-token: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22.12.0'
+          cache: npm
+          cache-dependency-path: |
+            private-trooper/package-lock.json
+            private-trooper/server/package-lock.json
+
+      - name: Install web dependencies
+        run: npm ci
+
+      - name: Audit web production dependencies
+        run: node scripts/audit-gate.mjs .
+
+      - name: Test web app
+        run: npm run test:frontend
+
+      - name: Build web app
+        run: npm run build
+
+      - name: Install server dependencies
+        working-directory: private-trooper/server
+        run: npm ci
+
+      - name: Audit server production dependencies
+        working-directory: private-trooper/server
+        run: node ../scripts/audit-gate.mjs .
+
+      - name: Test server
+        working-directory: private-trooper/server
+        run: npm test
+
+      - name: Build runtime bundle
+        run: |
+          chmod +x scripts/build-org-runtime-bundle.sh scripts/verify-org-runtime-bundle-reproducible.sh
+          ./scripts/verify-org-runtime-bundle-reproducible.sh dist
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trooper-org-runtime-${{ steps.trooper.outputs.sha }}
+          path: private-trooper/dist/trooper-org-runtime.tar.gz
+          if-no-files-found: error
+
+      - name: Record candidate
+        run: |
+          {
+            echo "## Runtime candidate verified"
+            echo
+            echo "- Commit: \`${{ steps.trooper.outputs.sha }}\`"
+            echo "- Artifact: \`trooper-org-runtime-${{ steps.trooper.outputs.sha }}\`"
+            echo "- Promotion: not automatic"
+            echo
+            echo "A verified snapshot must publish this commit as an immutable release asset,"
+            echo "pass smoke tests, and be promoted before customer VPSes can consume it."
+          } >> "$GITHUB_STEP_SUMMARY"

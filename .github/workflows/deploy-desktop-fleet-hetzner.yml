@@ -1,0 +1,388 @@
+# Deploy one or more Trooper desktop-fleet hosts on Hetzner Cloud.
+#
+# Required secrets:
+#   HETZNER_API_TOKEN          — Hetzner Cloud API token (write)
+# Optional secrets:
+#   DESKTOP_FLEET_AUTH_TOKEN   — shared bearer for desktop-api (generated if missing)
+#   DESKTOP_FLEET_SSH_PUBKEY   — SSH public key to inject (or uses Hetzner account keys)
+#   TROOPER_REPO_CLONE_TOKEN   — if private repo clone needed on the host
+#
+# After success, the job summary prints TROOPER_DESKTOP_FLEET_HOSTS lines to paste
+# into the control plane (Render/Railway env) or org fleet config.
+
+name: Deploy Desktop Fleet Host (Hetzner)
+
+on:
+  workflow_dispatch:
+    inputs:
+      server_name:
+        description: Hetzner server name (unique)
+        required: true
+        default: trooper-desktop-fleet-01
+      server_type:
+        description: Hetzner server type (RAM-heavy recommended for multi-seat)
+        required: true
+        default: cpx31
+      location:
+        description: Hetzner location (fsn1, nbg1, hel1, ash, hil, sin)
+        required: true
+        default: fsn1
+      max_desktops:
+        description: Max concurrent desktop seats on this host (pool supports up to 24; size by RAM ~900MB/seat)
+        required: true
+        default: '16'
+      repo_ref:
+        description: Git ref of absurdfounder/Trooper to install on the host
+        required: true
+        default: main
+      recreate:
+        description: Delete and recreate if the server name already exists
+        required: true
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+        default: 'false'
+      count:
+        description: How many hosts to create (names get -N suffix when >1)
+        required: true
+        default: '1'
+
+concurrency:
+  group: deploy-desktop-fleet-hetzner
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production-build
+    defaults:
+      run:
+        working-directory: private-trooper
+    timeout-minutes: 45
+    steps:
+      - name: Checkout public workflow definitions
+        uses: actions/checkout@v5
+
+      - name: Download private Trooper source
+        id: trooper
+        uses: ./.github/actions/download-private-trooper
+        with:
+          ref: ${{ inputs.repo_ref }}
+          token: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          fallback-token: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+
+      - name: Deploy desktop fleet host(s) on Hetzner
+        env:
+          HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
+          DESKTOP_FLEET_AUTH_TOKEN: ${{ secrets.DESKTOP_FLEET_AUTH_TOKEN }}
+          DESKTOP_FLEET_SSH_PUBKEY: ${{ secrets.DESKTOP_FLEET_SSH_PUBKEY }}
+          TROOPER_REPO_CLONE_TOKEN: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          BASE_SERVER_NAME: ${{ github.event.inputs.server_name }}
+          SERVER_TYPE: ${{ github.event.inputs.server_type }}
+          LOCATION: ${{ github.event.inputs.location }}
+          MAX_DESKTOPS: ${{ github.event.inputs.max_desktops }}
+          REPO_REF: ${{ github.event.inputs.repo_ref }}
+          RECREATE: ${{ github.event.inputs.recreate }}
+          HOST_COUNT: ${{ github.event.inputs.count }}
+          GITHUB_REPOSITORY: absurdfounder/Trooper
+        run: |
+          set -euo pipefail
+
+          if [ -z "${HETZNER_API_TOKEN:-}" ]; then
+            echo "::error::HETZNER_API_TOKEN secret is missing"
+            exit 1
+          fi
+
+          api() {
+            local method="$1"
+            local path="$2"
+            local data="${3:-}"
+            local tmp http body
+            tmp="$(mktemp)"
+            if [ -n "$data" ]; then
+              http="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "https://api.hetzner.cloud/v1$path" \
+                -H "Authorization: Bearer $HETZNER_API_TOKEN" \
+                -H "Content-Type: application/json" \
+                --data "$data" || true)"
+            else
+              http="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "https://api.hetzner.cloud/v1$path" \
+                -H "Authorization: Bearer $HETZNER_API_TOKEN" \
+                -H "Content-Type: application/json" || true)"
+            fi
+            body="$(cat "$tmp")"
+            rm -f "$tmp"
+            if [ -z "$http" ] || [ "$http" -ge 400 ]; then
+              echo "::error::Hetzner API ${method} ${path} -> HTTP ${http:-curl_fail}"
+              echo "$body" | head -c 4000 >&2
+              return 1
+            fi
+            printf '%s' "$body"
+          }
+
+          AUTH_TOKEN="${DESKTOP_FLEET_AUTH_TOKEN:-}"
+          if [ -z "$AUTH_TOKEN" ]; then
+            AUTH_TOKEN="$(openssl rand -hex 24)"
+            echo "::add-mask::$AUTH_TOKEN"
+            echo "Generated DESKTOP_FLEET_AUTH_TOKEN (not stored in secrets — copy from summary)"
+          else
+            echo "::add-mask::$AUTH_TOKEN"
+          fi
+
+          # Firewall: SSH + HTTP (Caddy) + optional direct API for debug
+          FW_NAME="trooper-desktop-fleet-fw"
+          firewall_id="$(api GET "/firewalls?name=${FW_NAME}" | jq -r '.firewalls[0].id // empty')"
+          firewall_rules='[
+            {"direction":"in","protocol":"tcp","port":"22","source_ips":["0.0.0.0/0","::/0"],"description":"SSH"},
+            {"direction":"in","protocol":"tcp","port":"80","source_ips":["0.0.0.0/0","::/0"],"description":"HTTP Caddy"},
+            {"direction":"in","protocol":"tcp","port":"443","source_ips":["0.0.0.0/0","::/0"],"description":"HTTPS"},
+            {"direction":"in","protocol":"tcp","port":"4567","source_ips":["0.0.0.0/0","::/0"],"description":"desktop-api direct"},
+            {"direction":"in","protocol":"icmp","source_ips":["0.0.0.0/0","::/0"],"description":"Ping"}
+          ]'
+          if [ -n "$firewall_id" ]; then
+            api POST "/firewalls/${firewall_id}/actions/set_rules" "$(jq -nc --argjson rules "$firewall_rules" '{rules:$rules}')" >/dev/null || true
+          else
+            firewall_id="$(api POST /firewalls "$(jq -nc --argjson rules "$firewall_rules" --arg name "$FW_NAME" '{name:$name,rules:$rules,labels:{service:"trooper-desktop-fleet"}}')" | jq -r '.firewall.id')"
+          fi
+          echo "Firewall id=$firewall_id"
+
+          # SSH keys: prefer account keys; optionally ensure one from secret
+          ssh_key_ids="$(api GET /ssh_keys | jq -c '[.ssh_keys[].id]')"
+          if [ -n "${DESKTOP_FLEET_SSH_PUBKEY:-}" ]; then
+            key_name="trooper-desktop-fleet-gha"
+            existing_key="$(api GET "/ssh_keys?name=${key_name}" | jq -r '.ssh_keys[0].id // empty')"
+            if [ -z "$existing_key" ]; then
+              existing_key="$(api POST /ssh_keys "$(jq -nc --arg name "$key_name" --arg public_key "$DESKTOP_FLEET_SSH_PUBKEY" '{name:$name,public_key:$public_key}')" | jq -r '.ssh_key.id')"
+            fi
+            ssh_key_ids="$(jq -nc --argjson ids "$ssh_key_ids" --argjson k "$existing_key" '$ids + [($k|tonumber)] | unique')"
+          fi
+          echo "SSH key ids: $ssh_key_ids"
+
+          # Repo URL for host clone — private Trooper needs a token (PAT or GITHUB_TOKEN)
+          REPO_URL="https://github.com/${GITHUB_REPOSITORY}.git"
+          CLONE_TOKEN="${TROOPER_REPO_CLONE_TOKEN:-${GITHUB_TOKEN:-}}"
+          if [ -n "$CLONE_TOKEN" ]; then
+            echo "::add-mask::$CLONE_TOKEN"
+            REPO_URL="https://x-access-token:${CLONE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          fi
+
+          COUNT="${HOST_COUNT:-1}"
+          if ! [[ "$COUNT" =~ ^[0-9]+$ ]] || [ "$COUNT" -lt 1 ]; then COUNT=1; fi
+          if [ "$COUNT" -gt 10 ]; then
+            echo "::error::count max is 10 per run"
+            exit 1
+          fi
+
+          FLEET_LINES=()
+          SUMMARY_ROWS=()
+
+          for i in $(seq 1 "$COUNT"); do
+            if [ "$COUNT" -eq 1 ]; then
+              SERVER_NAME="$BASE_SERVER_NAME"
+            else
+              SERVER_NAME="${BASE_SERVER_NAME}-$(printf '%02d' "$i")"
+            fi
+            echo "::group::Host $SERVER_NAME"
+
+            existing="$(api GET "/servers?name=${SERVER_NAME}" | jq -r '.servers[0].id // empty')"
+            if [ -n "$existing" ]; then
+              if [ "$RECREATE" = "true" ]; then
+                echo "Deleting existing server $SERVER_NAME id=$existing"
+                api DELETE "/servers/${existing}" >/dev/null
+                for _ in $(seq 1 60); do
+                  if ! api GET "/servers/${existing}" >/dev/null 2>&1; then break; fi
+                  sleep 5
+                done
+              else
+                existing_json="$(api GET "/servers/${existing}")"
+                existing_ip="$(jq -r '.server.public_net.ipv4.ip' <<<"$existing_json")"
+                echo "Server already exists id=$existing ip=$existing_ip (set recreate=true to rebuild)"
+                existing_domain="$(printf '%s' "$existing_ip" | tr '.' '-').sslip.io"
+                FLEET_LINES+=("https://${existing_domain}|${AUTH_TOKEN}")
+                SUMMARY_ROWS+=("| \`$SERVER_NAME\` | $existing | $existing_ip | existing |")
+                echo "::endgroup::"
+                continue
+              fi
+            fi
+
+            # Build cloud-init with a repo script (keeps this workflow file valid YAML).
+            USER_DATA="$(
+              DESKTOP_API_AUTH_TOKEN="$AUTH_TOKEN" \
+              DESKTOP_MAX_SESSIONS="$MAX_DESKTOPS" \
+              TROOPER_REPO_REF="$REPO_REF" \
+              TROOPER_REPO_URL="$REPO_URL" \
+              python3 deploy/desktop-fleet/build-cloud-init.py
+            )"
+
+            # Ensure ssh_keys is a JSON array of numbers (empty OK)
+            if [ -z "$ssh_key_ids" ] || [ "$ssh_key_ids" = "null" ]; then
+              ssh_key_ids='[]'
+            fi
+            ud_bytes="$(printf '%s' "$USER_DATA" | wc -c | tr -d ' ')"
+            echo "user_data size=${ud_bytes} bytes (Hetzner limit ~32KiB)"
+
+            create_body="$(jq -nc \
+              --arg name "$SERVER_NAME" \
+              --arg stype "$SERVER_TYPE" \
+              --arg loc "$LOCATION" \
+              --argjson keys "$ssh_key_ids" \
+              --argjson fw "$firewall_id" \
+              --arg ud "$USER_DATA" \
+              '{
+                name: $name,
+                server_type: $stype,
+                image: "ubuntu-24.04",
+                location: $loc,
+                start_after_create: true,
+                ssh_keys: $keys,
+                firewalls: (if $fw == 0 or $fw == null then [] else [{firewall: $fw}] end),
+                user_data: $ud,
+                labels: {
+                  service: "trooper-desktop-fleet",
+                  role: "desktop-host",
+                  managed_by: "github-actions"
+                }
+              }')"
+
+            echo "Creating Hetzner server $SERVER_NAME ($SERVER_TYPE @ $LOCATION)..."
+            if ! create_resp="$(api POST /servers "$create_body")"; then
+              echo "Primary create failed; retrying once with cx33/nbg1 fallback types..."
+              for try in "cpx31:nbg1" "cpx21:fsn1" "cx33:fsn1" "cx33:nbg1"; do
+                t="${try%%:*}"
+                l="${try##*:}"
+                echo "Trying $t @ $l ..."
+                create_body="$(jq -nc \
+                  --arg name "$SERVER_NAME" \
+                  --arg stype "$t" \
+                  --arg loc "$l" \
+                  --argjson keys "$ssh_key_ids" \
+                  --argjson fw "$firewall_id" \
+                  --arg ud "$USER_DATA" \
+                  '{
+                    name: $name,
+                    server_type: $stype,
+                    image: "ubuntu-24.04",
+                    location: $loc,
+                    start_after_create: true,
+                    ssh_keys: $keys,
+                    firewalls: (if $fw == 0 or $fw == null then [] else [{firewall: $fw}] end),
+                    user_data: $ud,
+                    labels: {
+                      service: "trooper-desktop-fleet",
+                      role: "desktop-host",
+                      managed_by: "github-actions"
+                    }
+                  }')"
+                if create_resp="$(api POST /servers "$create_body")"; then
+                  echo "Created with fallback $t @ $l"
+                  break
+                fi
+              done
+              if [ -z "${create_resp:-}" ]; then
+                echo "::error::All Hetzner create attempts failed"
+                exit 1
+              fi
+            fi
+            server_id="$(jq -r '.server.id' <<<"$create_resp")"
+            server_ip="$(jq -r '.server.public_net.ipv4.ip' <<<"$create_resp")"
+            echo "Created id=$server_id ip=$server_ip"
+
+            # Wait for running
+            for _ in $(seq 1 60); do
+              st="$(api GET "/servers/${server_id}" | jq -r '.server.status')"
+              echo "status=$st"
+              [ "$st" = "running" ] && break
+              sleep 5
+            done
+
+            # Wait for desktop-api via Caddy (cloud-init can take several minutes)
+            echo "Waiting for http://${server_ip}/desktop-api/health ..."
+            healthy=0
+            for _ in $(seq 1 90); do
+              code="$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 5 \
+                -H "Authorization: Bearer ${AUTH_TOKEN}" \
+                "http://${server_ip}/desktop-api/health" || true)"
+              if [ "$code" = "200" ]; then
+                echo "Healthy: $(cat /tmp/health.json)"
+                healthy=1
+                break
+              fi
+              # also try direct port
+              code2="$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 5 \
+                -H "Authorization: Bearer ${AUTH_TOKEN}" \
+                "http://${server_ip}:4567/health" || true)"
+              if [ "$code2" = "200" ]; then
+                echo "Healthy on :4567: $(cat /tmp/health.json)"
+                healthy=1
+                break
+              fi
+              sleep 10
+            done
+
+            if [ "$healthy" != "1" ]; then
+              echo "::warning::Server $SERVER_NAME up but health not confirmed yet — cloud-init may still be running. Check /var/log/trooper-desktop-host-install.log on the host."
+              SUMMARY_ROWS+=("| \`$SERVER_NAME\` | $server_id | $server_ip | pending-health |")
+            else
+              SUMMARY_ROWS+=("| \`$SERVER_NAME\` | $server_id | $server_ip | healthy |")
+            fi
+
+            server_domain="$(printf '%s' "$server_ip" | tr '.' '-').sslip.io"
+            FLEET_LINES+=("https://${server_domain}|${AUTH_TOKEN}")
+            echo "::endgroup::"
+          done
+
+          {
+            echo "## Desktop fleet hosts"
+            echo ""
+            echo "| Name | Server ID | IP | Status |"
+            echo "|------|-----------|----|--------|"
+            for row in "${SUMMARY_ROWS[@]}"; do echo "$row"; done
+            echo ""
+            echo "### Control plane env"
+            echo ""
+            echo '```bash'
+            echo "TROOPER_DESKTOP_PROFILE=fleet-ondemand"
+            joined="$(IFS=,; echo "${FLEET_LINES[*]}")"
+            echo "TROOPER_DESKTOP_FLEET_HOSTS=\"${joined}\""
+            echo '```'
+            echo ""
+            echo "### JSON form"
+            echo ""
+            echo '```json'
+            idx=0
+            echo -n '['
+            first=1
+            for line in "${FLEET_LINES[@]}"; do
+              host_url="$(echo "$line" | cut -d'|' -f1)"
+              tok="$(echo "$line" | cut -d'|' -f2)"
+              idx=$((idx + 1))
+              [ $first -eq 1 ] || echo -n ','
+              first=0
+              jq -nc --arg id "desktop-fleet-$(printf '%02d' "$idx")" \
+                --arg url "$host_url" --arg token "$tok" --argjson max "${MAX_DESKTOPS}" \
+                '{nodeId:$id,nodeUrl:$url,authToken:$token,maxConcurrentDesktops:$max}'
+            done
+            echo ']'
+            echo '```'
+            echo ""
+            echo "Set org \`desktopProfile: fleet-ondemand\` (or process env) to route leases to this fleet."
+            echo "Auth token is masked in logs; copy from the env block above if generated in this run."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Also write artifact-friendly file
+          mkdir -p /tmp/desktop-fleet-out
+          printf '%s\n' "${FLEET_LINES[@]}" > /tmp/desktop-fleet-out/TROOPER_DESKTOP_FLEET_HOSTS.txt
+          echo "hosts_file=/tmp/desktop-fleet-out/TROOPER_DESKTOP_FLEET_HOSTS.txt"
+
+      - name: Upload fleet host registration snippet
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-fleet-hosts
+          path: /tmp/desktop-fleet-out/
+          if-no-files-found: ignore
+          retention-days: 14

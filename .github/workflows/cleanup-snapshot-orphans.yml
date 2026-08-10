@@ -1,0 +1,40 @@
+name: Cleanup Snapshot Builder Orphans
+
+on:
+  workflow_dispatch:
+    inputs:
+      trooper_ref:
+        description: Private Trooper branch, tag, or commit SHA containing cleanup logic
+        required: true
+        default: main
+  schedule:
+    # Weekly safety-net sweep, in case both build-snapshot's `if: always()`
+    # cleanup AND its own post-build sweep both failed.
+    - cron: '17 4 * * 0'
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    environment: production-build
+    defaults:
+      run:
+        working-directory: private-trooper
+    timeout-minutes: 5
+    steps:
+      - name: Checkout public workflow definitions
+        uses: actions/checkout@v5
+
+      - name: Download private Trooper source
+        id: trooper
+        uses: ./.github/actions/download-private-trooper
+        with:
+          ref: ${{ inputs.trooper_ref || 'main' }}
+          token: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          fallback-token: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Sweep orphans
+        env:
+          HETZNER_API_TOKEN: ${{ secrets.HETZNER_API_TOKEN }}
+        run: node server/scripts/find-orphan-builders.mjs
