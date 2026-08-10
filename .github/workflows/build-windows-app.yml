@@ -57,7 +57,7 @@ jobs:
           NODE_OPTIONS: --max-old-space-size=4096
         run: |
           npm run prebuild
-          npx tauri build --bundles nsis --config '{"build":{"beforeBuildCommand":"node scripts/run-with-system-node.mjs node_modules/vite/bin/vite.js build"},"bundle":{"createUpdaterArtifacts":false}}'
+          npx tauri build --bundles nsis --config '{"build":{"beforeBuildCommand":"node scripts/run-with-system-node.mjs node_modules/vite/bin/vite.js build","beforeBundleCommand":""},"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Prepare stable download
         shell: pwsh
