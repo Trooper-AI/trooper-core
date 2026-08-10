@@ -207,7 +207,15 @@ import {
 import {
   createAcpEventStreamRegistry,
   looksLikeAcpFailureText,
+  buildAcpRuleObservation,
 } from './lib/acp-event-stream.mjs';
+import { arbitrateSessionState } from './lib/acp-state-rules.mjs';
+import {
+  acpStatePacksStatus,
+  classifyAcpObservation,
+  explainAcpObservation,
+  reloadAcpStatePacks,
+} from './lib/acp-state-packs.mjs';
 import {
   ACP_EVENT_RELAY_PLUGIN_ID,
   buildAcpEventRelayPluginFiles,
@@ -14538,6 +14546,7 @@ function buildOpenClawCapabilitiesPayload() {
    ...acpEventPushStats,
    stream: acpEventStreams.getStats(),
   },
+  acpStatePacks: acpStatePacksStatus(),
   commitments: {
    enabledByOpenClawConfig: readOpenClawConfig()?.commitments?.enabled === true,
    supported: true,
@@ -16316,6 +16325,9 @@ const acpEventStreams = createAcpEventStreamRegistry({
  captureHistory: (local, history) => captureAcpSessionHistory(local, history),
  synthesizeInterruptionMarkers: (local) => appendAcpInterruptionMarkers(local),
  normalizeEvent: normalizeBridgeEventPayload,
+ // Declarative state packs (lib/acp-state-packs.mjs): failure classification with
+ // structured reasons plus awaiting_user approval-prompt attention (refs OC-12).
+ stateRules: { classify: classifyAcpObservation, arbitrate: arbitrateSessionState },
  onTerminalCleanup: (local) => closeGatewayAcpSession(local.sessionKey, local.parentSessionKey).catch(() => {}),
  buildFinal: (local, { failed, status, timedOut }) => {
   if (timedOut) {
@@ -16769,6 +16781,25 @@ app.get('/acp/sessions/:sessionId', async (req, res) => {
  const status = await gateway.fetchSessionSnapshot(local.sessionKey);
  const history = await gateway.fetchSessionHistory(local.sessionKey, 250, { timeoutMs: 15000 }) || [];
  captureAcpSessionHistory(local, history);
+ // Rule packs first: structured failure reasons plus awaiting_user attention for
+ // clients that only poll this route (no live stream poller running). Attention is
+ // edge-triggered here too so the hold window in the stream poller stays honest.
+ try {
+  const verdict = arbitrateSessionState({
+   structuredStatus: local.status,
+   ruleResult: classifyAcpObservation(local.agent, buildAcpRuleObservation(local, { snapshotStatus: status?.status ?? null })),
+  });
+  if (verdict.status === 'failed' && local.status !== 'failed') {
+   local.status = 'failed';
+   if (verdict.reason) local.errorKind = local.errorKind || `acp_${verdict.reason}`;
+  }
+  const nextAttention = verdict.attention || null;
+  if ((local.attention || null) !== nextAttention) {
+   local.attention = nextAttention;
+   local.attentionReason = nextAttention ? (verdict.reason || null) : null;
+   local.attentionSince = nextAttention ? Date.now() : null;
+  }
+ } catch { /* rules must never break the detail route */ }
  // If history/output shows a hard failure, surface Failed instead of a stale Working.
  if (looksLikeAcpFailureText(local.output || '')
    || looksLikeAcpFailureText(local.steerResponse || '')
@@ -16779,6 +16810,55 @@ app.get('/acp/sessions/:sessionId', async (req, res) => {
  res.json(serializeAcpSession(local, status || {}));
  } catch (e) {
  res.status(500).json({ error: e.message });
+ }
+});
+
+// GET /acp/sessions/:sessionId/explain — per-rule evidence trace for the state
+// packs: which rules matched, on exactly which text, and what won. This is the
+// debugging surface that makes rule packs maintainable (port of `agent explain`).
+app.get('/acp/sessions/:sessionId/explain', async (req, res) => {
+ try {
+ const { sessionId } = req.params;
+ const local = acpSessionRegistry.get(sessionId);
+ if (!local?.sessionKey) {
+  return res.status(404).json({
+   error: 'ACP session not found',
+   code: 'ACP_SESSION_NOT_FOUND',
+   sessionId,
+   status: 'closed',
+  });
+ }
+ // Same gather as the detail route so the trace reflects exactly what live
+ // classification sees; gateway hiccups degrade to local-only evidence.
+ const snapshot = await gateway.fetchSessionSnapshot(local.sessionKey).catch(() => null);
+ const history = await gateway.fetchSessionHistory(local.sessionKey, 250, { timeoutMs: 15000 }).catch(() => null);
+ if (Array.isArray(history)) captureAcpSessionHistory(local, history);
+ const observation = buildAcpRuleObservation(local, { snapshotStatus: snapshot?.status ?? null });
+ res.json({
+  sessionId,
+  status: local.status || null,
+  attention: local.attention || null,
+  attentionReason: local.attentionReason || null,
+  snapshotStatus: snapshot?.status ?? null,
+  observation: {
+   textBytes: observation.text.length,
+   errorTextBytes: observation.errorText.length,
+  },
+  ...explainAcpObservation(local.agent, observation),
+ });
+ } catch (e) {
+ res.status(500).json({ error: e.message });
+ }
+});
+
+// POST /gateway/acp-state-packs/reload — hot-swap the state rule packs from the
+// override directory without a bridge restart (herdr-style manifest reload).
+app.post('/gateway/acp-state-packs/reload', (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+  res.json({ ok: true, status: reloadAcpStatePacks() });
+ } catch (e) {
+  res.status(500).json({ ok: false, error: e.message });
  }
 });
 
