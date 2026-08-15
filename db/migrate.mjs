@@ -140,6 +140,23 @@ export function migrate(sqlite) {
       UNIQUE(run_id, seq)
     );
 
+    -- Observe-only tool-call ledger (lib/tool-ledger.mjs). Records what the
+    -- bridge saw; never read by dispatch. No FK to runs on purpose: run_id is
+    -- usually a gateway runId with no runs-table row.
+    CREATE TABLE IF NOT EXISTS tool_ledger (
+      id TEXT PRIMARY KEY,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+      session_key TEXT,
+      run_id TEXT,
+      tool_call_id TEXT,
+      tool TEXT NOT NULL,
+      args_hash TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'observed',
+      dup_of TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_tool_ledger_dup ON tool_ledger(tool, args_hash, created_at);
+    CREATE INDEX IF NOT EXISTS idx_tool_ledger_call ON tool_ledger(tool_call_id);
+
     CREATE TABLE IF NOT EXISTS config (
       key TEXT PRIMARY KEY,
       value TEXT,
