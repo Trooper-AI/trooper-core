@@ -10,6 +10,7 @@ process.on('unhandledRejection', (err) => {
 // (workspace files, tools, memory, session persistence, sub-agent spawning)
 import { captureLog, recordRun, getLogs, getStats } from './lib/log-buffer.mjs';
 import { withGatewayAttachments } from './lib/gateway-attachments.mjs';
+import { resolveSpillSettings } from './lib/tool-result-spill.mjs';
 import express from 'express';
 import {
   BRIDGE_EVENT_PAYLOAD_VERSION,
@@ -259,6 +260,18 @@ import {
   RunTerminalMarkerStore,
   buildRunCompletionPluginFiles,
 } from './lib/run-completion-plugin.mjs';
+import {
+  createToolLedger,
+  resolveToolLedgerMode,
+} from './lib/tool-ledger.mjs';
+import {
+  createRunWatchdog,
+  resolveRunWatchdogConfig,
+} from './lib/run-watchdog.mjs';
+import {
+  createTapeRecorder,
+  resolveTapeDir,
+} from './lib/tape.mjs';
 import {
   IMAGE_GENERATION_DEFAULTS_PLUGIN_ID,
   buildImageGenerationDefaultsPluginFiles,
@@ -3820,6 +3833,10 @@ class OpenClawGateway {
        childSessionKey: overrides.childSessionKey ?? payload?.childSessionKey ?? null,
        childRunId: overrides.childRunId ?? payload?.childRunId ?? payload?.subAgentRunId ?? null,
      });
+     // Observe-only tool ledger tap (#2) — this wrapper is the single choke
+     // point every normalized event passes through once; observeBridgeEvent
+     // filters to tool events, dedupes by eventId, and never throws.
+     if (toolLedger) toolLedger.observeBridgeEvent(eventName, normalized);
      rawOnEvent(eventName, normalized);
    }
    : null;
@@ -5020,6 +5037,35 @@ const gateway = new OpenClawGateway(OPENCLAW_URL, OPENCLAW_GATEWAY_TOKEN);
 // trooper-run-completion gateway plugin — pollable long after the SSE died.
 const runTerminalMarkers = new RunTerminalMarkerStore();
 
+// ── Observe-only tool ledger (#2) ───────────────────────────────────
+// Records every tool call/outcome the normalized event stream sees so
+// duplicate work across retries/replays is visible. Never blocks or modifies
+// dispatch. TROOPER_TOOL_LEDGER=off disables the tap.
+const toolLedger = resolveToolLedgerMode(process.env) === 'off'
+ ? null
+ : createToolLedger({ sqlite });
+
+// ── TAPE recorder (#15) — OFF unless TROOPER_TAPE_DIR is set ────────
+// Records every inbound gateway frame as JSONL for offline replay
+// (lib/tape.mjs). Wrapping _handleFrame (not ws.on('message')) survives
+// reconnects — the ws object is recreated on every reconnect. When the env
+// var is unset nothing is wrapped, so the hot path is untouched.
+const TROOPER_TAPE_DIR = resolveTapeDir(process.env);
+if (TROOPER_TAPE_DIR) {
+ try {
+  const gatewayTape = createTapeRecorder({ dir: TROOPER_TAPE_DIR });
+  const _originalHandleFrame = gateway._handleFrame.bind(gateway);
+  gateway._handleFrame = (frame) => {
+   gatewayTape.record('in', frame);
+   return _originalHandleFrame(frame);
+  };
+  console.log(`[tape] Recording inbound gateway frames to ${gatewayTape.path}`);
+  console.warn('[tape] ⚠ Tapes capture auth handshakes, approval payloads, and all content VERBATIM — treat tape files like credentials and delete them after use.');
+ } catch (err) {
+  console.warn(`[tape] Recorder disabled: ${err.message}`);
+ }
+}
+
 // ── Live agent event forwarding (cron, background runs → Trooper frontend) ──
 gateway._onAnyAgentEvent = (stream, data, runId) => {
   // Push probe: if this frame belongs to an ACP child session someone is
@@ -5075,6 +5121,27 @@ gateway._onAnyAgentEvent = (stream, data, runId) => {
     bridgeWS.broadcast('agent:background_event', payload);
   }
 };
+
+// ── Orphan-run watchdog (#1b) ───────────────────────────────────────
+// Chat/task `runs` rows can be stranded at status='running' forever when the
+// bridge restarts mid-run or the gateway dies without a terminal frame (see
+// the lifecycleResolveTimer comment in runAgentStreaming). The watchdog scans
+// for those rows and appends an explicit synthetic close — append-only, never
+// rewriting history. Kill switch: TROOPER_RUN_WATCHDOG_MS=0.
+const runWatchdogConfig = resolveRunWatchdogConfig(process.env);
+const runWatchdog = createRunWatchdog({
+  sqlite,
+  intervalMs: runWatchdogConfig.intervalMs,
+  orphanMs: runWatchdogConfig.orphanMs,
+  ownedOrphanMs: runWatchdogConfig.ownedOrphanMs,
+  resolvePendingRunExternally: (args) => gateway.resolvePendingRunExternally(args),
+  broadcast: (type, payload) => bridgeWS.broadcast(type, payload),
+  log: {
+    info: (msg, meta) => captureLog('info', msg, meta),
+    warn: (msg, meta) => captureLog('warn', msg, meta),
+  },
+});
+runWatchdog.start();
 
 // ── Cached company docs (synced from Render via /agents/company-context) ──
 let cachedCompanyDocs = '';
@@ -10598,7 +10665,7 @@ app.delete('/admin/data-purge', async (req, res) => {
 
    // Purge SQLite tables
    const tablesToPurge = ['messages', 'tasks', 'task_comments', 'task_subtasks', 'runs', 'run_events',
-     'memories', 'memory_conflicts', 'activities', 'notifications', 'contexts', 'conversations'];
+     'tool_ledger', 'memories', 'memory_conflicts', 'activities', 'notifications', 'contexts', 'conversations'];
    for (const table of tablesToPurge) {
      try { sqlite.prepare(`DELETE FROM ${table}`).run(); } catch {}
    }
@@ -10606,6 +10673,14 @@ app.delete('/admin/data-purge', async (req, res) => {
    // Clear workspace files (keep directory structure)
    try {
      execSync('rm -rf /home/node/.openclaw/workspace/* 2>/dev/null', { timeout: 10000 });
+   } catch {}
+
+   // Clear spilled tool-result bodies — full tool outputs whose DB rows only
+   // kept an excerpt + locator live here; a purge that leaves them behind
+   // would not be a purge (lib/tool-result-spill.mjs).
+   try {
+     const { dir: spillDir } = resolveSpillSettings(process.env);
+     if (spillDir) execSync(`rm -rf ${JSON.stringify(spillDir)} 2>/dev/null`, { timeout: 10000 });
    } catch {}
 
    // Clear cron jobs

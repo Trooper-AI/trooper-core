@@ -1,0 +1,9 @@
+{"seq":1,"dir":"in","t":1755000000000,"frame":{"type":"res","id":"req-1","ok":true,"payload":{"status":"accepted","runId":"run-tape-1"}}}
+{"seq":2,"dir":"in","t":1755000000100,"frame":{"type":"event","event":"agent","payload":{"runId":"run-tape-1","stream":"lifecycle","data":{"phase":"start"}}}}
+{"seq":3,"dir":"in","t":1755000000200,"frame":{"type":"event","event":"agent","payload":{"runId":"run-tape-1","stream":"assistant","data":{"text":"Let me check."}}}}
+{"seq":4,"dir":"in","t":1755000000300,"frame":{"type":"event","event":"agent","payload":{"runId":"run-tape-1","stream":"tool","data":{"phase":"start","name":"exec","toolCallId":"call-1","args":{"command":"echo hello"}}}}}
+{"seq":5,"dir":"in","t":1755000000400,"frame":{"type":"event","event":"agent","payload":{"runId":"run-tape-1","stream":"tool","data":{"phase":"end","name":"exec","toolCallId":"call-1","result":"hello\n"}}}}
+{"seq":6,"dir":"in","t":1755000000500,"frame":{"type":"event","event":"agent","payload":{"runId":"run-tape-1","stream":"tool_use","data":{"name":"read","toolCallId":"call-2","input":{"path":"/workspace/notes.txt"}}}}}
+{"seq":7,"dir":"in","t":1755000000600,"frame":{"type":"event","event":"agent","payload":{"runId":"run-tape-1","stream":"tool_result","data":{"name":"read","toolCallId":"call-2","content":"synthetic file body","is_error":false}}}}
+{"seq":8,"dir":"in","t":1755000000700,"frame":{"type":"event","event":"agent","payload":{"runId":"run-tape-1","stream":"lifecycle","data":{"phase":"end"}}}}
+{"seq":9,"dir":"in","t":1755000000800,"frame":{"type":"res","id":"req-1","ok":true,"payload":{"status":"ok","result":{"payloads":[{"text":"Done — hello."}]}}}}

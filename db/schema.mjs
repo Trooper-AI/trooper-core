@@ -141,6 +141,23 @@ export const runEvents = sqliteTable('run_events', {
   timestamp: integer('timestamp').notNull(),
 });
 
+// ── tool_ledger ───────────────────────────────────────────────────────
+// Observe-only ledger of tool calls seen by the bridge (lib/tool-ledger.mjs).
+// Never consulted by dispatch — it records what happened so duplicate work
+// across retries/replays is visible. No FK to runs: run_id here is usually a
+// gateway runId that has no runs-table row.
+export const toolLedger = sqliteTable('tool_ledger', {
+  id: text('id').primaryKey(),
+  created_at: integer('created_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+  session_key: text('session_key'),
+  run_id: text('run_id'),
+  tool_call_id: text('tool_call_id'),
+  tool: text('tool').notNull(),
+  args_hash: text('args_hash').notNull(),
+  status: text('status').notNull().default('observed'), // observed|succeeded|failed
+  dup_of: text('dup_of'),           // id of the earlier ledger row this call duplicates
+});
+
 // ── config ────────────────────────────────────────────────────────────
 export const config = sqliteTable('config', {
   key: text('key').primaryKey(),
