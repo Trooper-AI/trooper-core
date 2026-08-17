@@ -50,6 +50,7 @@ jobs:
           name: private-trooper
           path: private-trooper
           include-hidden-files: true
+          if-no-files-found: error
           retention-days: 1
 
   build-snapshot:
@@ -68,7 +69,25 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: private-trooper
-          path: private-trooper
+          path: ${{ runner.temp }}/private-trooper-artifact
+
+      - name: Place Trooper source at private-trooper
+        run: |
+          set -euo pipefail
+          rm -rf private-trooper
+          src="${{ runner.temp }}/private-trooper-artifact"
+          if [ -f "$src/package.json" ]; then
+            mv "$src" private-trooper
+          elif [ -f "$src/private-trooper/package.json" ]; then
+            mv "$src/private-trooper" private-trooper
+          else
+            echo "::error::Trooper artifact did not contain package.json"
+            find "$src" -maxdepth 3 -type f | head -50
+            exit 1
+          fi
+          test -f private-trooper/package.json
+          test -f private-trooper/scripts/verify-org-runtime-bundle-reproducible.sh
+          chmod +x private-trooper/scripts/*.sh
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
