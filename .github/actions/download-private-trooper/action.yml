@@ -72,16 +72,13 @@ runs:
           runner_temp="$(cygpath -u "$RUNNER_TEMP")"
           workspace="$(cygpath -u "$GITHUB_WORKSPACE")"
         fi
-        archive="$runner_temp/trooper-$sha.tar.gz"
         destination="$workspace/$PRIVATE_DESTINATION"
-        mkdir -p "$destination"
-        curl --fail --silent --show-error --location \
-          -H "Authorization: Bearer $selected_token" \
-          -H "Accept: application/vnd.github+json" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          -o "$archive" \
-          "https://api.github.com/repos/absurdfounder/Trooper/tarball/$sha"
-        tar -xzf "$archive" -C "$destination" --strip-components=1
-        rm -f "$archive"
+        rm -rf "$destination"
+        git clone --filter=blob:none --no-checkout \
+          "https://x-access-token:${selected_token}@github.com/absurdfounder/Trooper.git" \
+          "$destination"
+        git -C "$destination" fetch --depth 1 origin "$sha"
+        git -C "$destination" checkout --force FETCH_HEAD
+        rm -rf "$destination/.git"
         test -f "$destination/package.json"
         echo "sha=$sha" >> "$GITHUB_OUTPUT"
