@@ -109,10 +109,25 @@ jobs:
             -in "$plaintext" -out "$encrypted" -pass env:runtime_password
           plaintext_sha="$(sha256sum "$plaintext" | awk '{print $1}')"
           encrypted_sha="$(sha256sum "$encrypted" | awk '{print $1}')"
-          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --prerelease \
-              --title "$RELEASE_TAG" --notes "Encrypted runtime asset for a Hetzner snapshot build."
-          gh release upload "$RELEASE_TAG" "$encrypted" --repo "$GITHUB_REPOSITORY" --clobber
+          for attempt in 1 2 3 4 5; do
+            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              break
+            fi
+            if gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --prerelease \
+              --title "$RELEASE_TAG" --notes "Encrypted runtime asset for a Hetzner snapshot build."; then
+              break
+            fi
+            echo "GitHub release create attempt ${attempt} failed; retrying..."
+            sleep $((attempt * 8))
+          done
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+          for attempt in 1 2 3 4 5; do
+            if gh release upload "$RELEASE_TAG" "$encrypted" --repo "$GITHUB_REPOSITORY" --clobber; then
+              break
+            fi
+            echo "GitHub release upload attempt ${attempt} failed; retrying..."
+            sleep $((attempt * 8))
+          done
           url="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.assets[] | select(.name == "trooper-org-runtime.tar.gz.enc") | .url')"
           [[ -n "$url" ]]
           echo "url=$url" >> "$GITHUB_OUTPUT"
