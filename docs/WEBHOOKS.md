@@ -71,6 +71,7 @@ Fields:
 | `agent` | Registered agent (name or slug) that handles events. Must exist on the bridge. |
 | `instructions` | Standing prompt prefixed to every event — this is where "what to do when this fires" lives. |
 | `sessionMode` | `isolated` (default): every event runs in a fresh session. `shared`: all events for this hook land in one continuous session so the agent keeps context across deliveries. |
+| `workflowId` | Optional. When set, events run that Mission Control saved workflow instead of waking `agent` — see "Workflow-bound hooks" below. |
 | `token` | The `whsec_…` secret external callers must present. Shown in full on the management surface only. |
 
 Other management calls:
@@ -199,7 +200,44 @@ Retries: send the provider's delivery id as `X-Idempotency-Key` (or
 `status: "duplicate"` with the original `eventId` instead of waking the
 agent twice.
 
-## 5. Security notes
+## 5. Workflow-bound hooks
+
+A hook targets one of two things. By default the event wakes `agent`. Set
+`workflowId` and the event instead runs that Mission Control **saved
+workflow** — the same graphs the Workflows page builds, which is how a
+webhook becomes a workflow's trigger alongside `schedule` (cron) and
+`chat_command`.
+
+```bash
+curl -sS -X PATCH "$BRIDGE/webhook/manage/wh_…" \
+  -H "Authorization: Bearer $BRIDGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"workflowId": "wf_1a2b3c"}'      # null unbinds it, restoring agent wakes
+```
+
+What changes when a hook is workflow-bound:
+
+- The bridge does **not** wake an agent. It forwards the event to Mission
+  Control (`POST /api/runtime-webhooks/:orgId/event`) over the same
+  runtime-callback channel the email surface uses, authenticated with
+  `x-runtime-secret` + `x-org-runtime-token` — never the hook's own token.
+- The inbound response is `202` with `target: "workflow"`, the `workflowId`,
+  and the workflow's `runId` when Mission Control returns one. There is no
+  `sessionKey`, because no agent session is created; follow the run in the
+  Workflows UI instead.
+- The hook's `agent` stays stored and is ignored while bound, so unbinding
+  restores agent wakes. A workflow hook fires even if that fallback agent has
+  since left the bridge.
+- `?sync=1` does not apply — workflow runs are always asynchronous.
+- Delivery receipts record `target: "workflow"` and the `workflowId`, and
+  reaching Mission Control is what marks them accepted. The workflow's own
+  success or failure is tracked by the workflow run, not the receipt.
+
+`503 mission_control_not_configured` means the bridge has no
+`MISSION_CONTROL_URL` / `RUNTIME_AUTH_SECRET` / `ORG_ID`, so it cannot reach
+the workflow engine.
+
+## 6. Security notes
 
 - The hook token authorizes exactly one thing: firing that one hook. It is
   not the bridge token; external systems never see bridge auth.

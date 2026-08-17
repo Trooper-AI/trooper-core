@@ -176,6 +176,9 @@ export const webhooks = sqliteTable('webhooks', {
   token: text('token').notNull(),               // whsec_… bearer secret
   instructions: text('instructions'),           // standing prompt prefix per event
   session_mode: text('session_mode').notNull().default('isolated'), // isolated|shared
+  // When set, events run this Mission Control saved workflow instead of waking
+  // agent_slug. agent_slug stays populated so unbinding restores agent wakes.
+  workflow_id: text('workflow_id'),
   enabled: integer('enabled').notNull().default(1),
   fire_count: integer('fire_count').notNull().default(0),
   last_fired_at: integer('last_fired_at'),
@@ -192,7 +195,9 @@ export const webhookDeliveries = sqliteTable('webhook_deliveries', {
   webhook_id: text('webhook_id').notNull(),
   idempotency_key: text('idempotency_key'),
   status: text('status').notNull().default('accepted'), // accepted|completed|failed|rejected
-  via: text('via'),                             // websocket|hook-fallback
+  via: text('via'),                             // websocket|hook-fallback|mission-control
+  target: text('target').notNull().default('agent'), // agent|workflow
+  workflow_id: text('workflow_id'),
   session_key: text('session_key'),
   payload_excerpt: text('payload_excerpt'),
   result_excerpt: text('result_excerpt'),

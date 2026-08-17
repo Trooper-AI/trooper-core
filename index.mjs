@@ -94,6 +94,7 @@ import {
 import {
   WEBHOOK_DELIVERY_KEEP,
   buildWebhookSessionKey,
+  buildWorkflowRunRequest,
   extractInboundToken,
   formatWebhookWakeMessage,
   generateWebhookCredentials,
@@ -12293,6 +12294,7 @@ app.post('/webhook/manage', (req, res) => {
   token: creds.token,
   instructions: normalized.webhook.instructions,
   session_mode: normalized.webhook.sessionMode,
+  workflow_id: normalized.webhook.workflowId,
   enabled: normalized.webhook.enabled ? 1 : 0,
   fire_count: 0,
   created_at: now,
@@ -12324,6 +12326,7 @@ app.patch('/webhook/manage/:id', (req, res) => {
  if (normalized.updates.instructions !== undefined) updates.instructions = normalized.updates.instructions;
  if (normalized.updates.sessionMode !== undefined) updates.session_mode = normalized.updates.sessionMode;
  if (normalized.updates.enabled !== undefined) updates.enabled = normalized.updates.enabled ? 1 : 0;
+ if (normalized.updates.workflowId !== undefined) updates.workflow_id = normalized.updates.workflowId;
  if (normalized.updates.agent !== undefined) {
   const { slug, registered } = findRegisteredAgentForWebhook(normalized.updates.agent);
   if (!registered) return res.status(404).json({ error: `Agent "${normalized.updates.agent}" is not registered on this bridge` });
@@ -12380,6 +12383,67 @@ app.post('/webhook/in/:hookId', express.urlencoded({ extended: true, limit: '2mb
  const receivedAt = Date.now();
  const payload = req.body;
  const payloadExcerpt = previewString(typeof payload === 'string' ? payload : JSON.stringify(payload), 2000);
+
+ // Workflow-bound hooks run a Mission Control saved workflow instead of
+ // waking an agent — Mission Control owns workflow execution, so the event is
+ // forwarded over the same runtime-callback channel email uses. Checked before
+ // the agent lookup: a workflow hook fires even if its fallback agent has
+ // since left the bridge.
+ if (hook.workflow_id) {
+  db.insert(webhookDeliveriesTable).values({
+   id: eventId, webhook_id: hook.id, idempotency_key: idempotencyKey || null,
+   status: 'accepted', target: 'workflow', workflow_id: hook.workflow_id,
+   payload_excerpt: payloadExcerpt, received_at: receivedAt,
+  }).run();
+  db.update(webhooksTable).set({ fire_count: (hook.fire_count || 0) + 1, last_fired_at: receivedAt })
+   .where(eq(webhooksTable.id, hook.id)).run();
+  pruneWebhookDeliveries(hook.id);
+
+  if (!MISSION_CONTROL_URL || !RUNTIME_AUTH_SECRET || !ORG_ID) {
+   updateWebhookDelivery(eventId, { status: 'failed', via: 'mission-control', error: 'mission_control_not_configured' });
+   return res.status(503).json({ error: 'mission_control_not_configured', eventId });
+  }
+  const request = buildWorkflowRunRequest({
+   hookName: hook.name, hookId: hook.id, eventId,
+   instructions: hook.instructions || '', payload,
+  });
+  try {
+   const mcRes = await fetch(
+    `${MISSION_CONTROL_URL.replace(/\/+$/, '')}/api/runtime-webhooks/${encodeURIComponent(ORG_ID)}/event`,
+    {
+     method: 'POST',
+     headers: {
+      'content-type': 'application/json',
+      'x-runtime-secret': RUNTIME_AUTH_SECRET,
+      'x-org-runtime-token': ORG_RUNTIME_TOKEN,
+     },
+     body: JSON.stringify({ workflowId: hook.workflow_id, request, hookId: hook.id, eventId }),
+     signal: AbortSignal.timeout(15000),
+    },
+   );
+   const data = await mcRes.json().catch(() => ({}));
+   if (!mcRes.ok) {
+    updateWebhookDelivery(eventId, { status: 'failed', via: 'mission-control', error: data?.error || `mission control status ${mcRes.status}` });
+    return res.status(502).json({ status: 'failed', eventId, workflowId: hook.workflow_id, ...data });
+   }
+   // The workflow is still running, so no finished_at — the receipt records
+   // the handoff, and the workflow run owns the outcome from here (same shape
+   // as the agent hook-fallback path, which also cannot observe completion).
+   try {
+    db.update(webhookDeliveriesTable).set({
+     via: 'mission-control',
+     result_excerpt: previewString(data?.runId ? `workflow run ${data.runId}` : 'workflow run started', 500),
+    }).where(eq(webhookDeliveriesTable.id, eventId)).run();
+   } catch {}
+   return res.status(202).json({
+    status: 'accepted', eventId, target: 'workflow',
+    workflowId: hook.workflow_id, runId: data?.runId || null, via: 'mission-control',
+   });
+  } catch (err) {
+   updateWebhookDelivery(eventId, { status: 'failed', via: 'mission-control', error: err.message });
+   return res.status(502).json({ error: err.message, eventId });
+  }
+ }
 
  const { slug, registered } = findRegisteredAgentForWebhook(hook.agent_slug);
  if (!registered) {
