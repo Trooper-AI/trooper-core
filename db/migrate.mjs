@@ -376,6 +376,39 @@ export function migrate(sqlite) {
       updated_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
     );
 
+    CREATE TABLE IF NOT EXISTS webhooks (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      agent_slug TEXT NOT NULL,
+      token TEXT NOT NULL,
+      instructions TEXT,
+      session_mode TEXT NOT NULL DEFAULT 'isolated',
+      workflow_id TEXT,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      fire_count INTEGER NOT NULL DEFAULT 0,
+      last_fired_at INTEGER,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
+    );
+
+    CREATE TABLE IF NOT EXISTS webhook_deliveries (
+      id TEXT PRIMARY KEY,
+      webhook_id TEXT NOT NULL,
+      idempotency_key TEXT,
+      status TEXT NOT NULL DEFAULT 'accepted',
+      via TEXT,
+      target TEXT NOT NULL DEFAULT 'agent',
+      workflow_id TEXT,
+      session_key TEXT,
+      payload_excerpt TEXT,
+      result_excerpt TEXT,
+      error TEXT,
+      received_at INTEGER NOT NULL,
+      finished_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_hook
+      ON webhook_deliveries (webhook_id, received_at DESC);
+
   `);
 
   // Defensive: if an earlier migrate created cf_tasks without `payload`
@@ -385,6 +418,21 @@ export function migrate(sqlite) {
     sqlite.exec(`ALTER TABLE cf_tasks ADD COLUMN payload TEXT`);
   } catch (err) {
     if (!/duplicate column name/i.test(err?.message || '')) throw err;
+  }
+
+  // Same defensive pattern for the webhook workflow-target columns: a bridge
+  // that created these tables before workflow triggers existed keeps its rows
+  // and gains the columns here.
+  for (const [table, column, type] of [
+    ['webhooks', 'workflow_id', 'TEXT'],
+    ['webhook_deliveries', 'workflow_id', 'TEXT'],
+    ['webhook_deliveries', 'target', `TEXT NOT NULL DEFAULT 'agent'`],
+  ]) {
+    try {
+      sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    } catch (err) {
+      if (!/duplicate column name/i.test(err?.message || '')) throw err;
+    }
   }
 
   console.log('[DB] Migrations complete.');
