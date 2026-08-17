@@ -79,8 +79,8 @@ import { verifyDirectFileAccessToken } from './lib/file-access-token.mjs';
 import { BridgeWSServer } from './lib/ws-server.mjs';
 import { handleChatMessage } from './lib/chat-handler.mjs';
 import { createTask, getTask, listTasks, updateTask, deleteTask, addComment, addSubtask, toggleSubtask, deleteSubtask, executeTaskWork, checkoutTask, releaseTask, createProject, listProjects, updateProject, createGoal, listGoals } from './lib/task-handler.mjs';
-import { messages as messagesTable, agents as agentsTable, humans as humansTable, contexts as contextsTable, conversations as conversationsTable, activities as activitiesTable, notifications as notificationsTable, skills as skillsTable, rules as rulesTable, playbooks as playbooksTable, policies as policiesTable, config as configTable } from './db/schema.mjs';
-import { eq, desc } from 'drizzle-orm';
+import { messages as messagesTable, agents as agentsTable, humans as humansTable, contexts as contextsTable, conversations as conversationsTable, activities as activitiesTable, notifications as notificationsTable, skills as skillsTable, rules as rulesTable, playbooks as playbooksTable, policies as policiesTable, config as configTable, webhooks as webhooksTable, webhookDeliveries as webhookDeliveriesTable } from './db/schema.mjs';
+import { eq, desc, and } from 'drizzle-orm';
 import { registerApiRoutes } from './lib/api-routes.mjs';
 import { recordTaskStart, updateTaskStatus, getTask as getCfTask, getTaskPayload as getCfTaskPayload, notifyCallback, markInFlight, clearInFlight, isInFlight } from './lib/cf-tracker.mjs';
 import { createSSESender } from './lib/sse-stream.mjs';
@@ -91,6 +91,20 @@ import {
   normalizeEmailWakePayload,
   validateEmailSendBody,
 } from './lib/email-utils.mjs';
+import {
+  WEBHOOK_DELIVERY_KEEP,
+  buildWebhookSessionKey,
+  extractInboundToken,
+  formatWebhookWakeMessage,
+  generateWebhookCredentials,
+  normalizeIdempotencyKey,
+  normalizeWebhookInput,
+  normalizeWebhookPatch,
+  resolveSyncTimeoutSeconds,
+  summarizeDeliveryRow,
+  summarizeWebhookRow,
+  verifyWebhookToken,
+} from './lib/webhooks.mjs';
 import {
   EMPTY_KNOWLEDGE_MD,
   EMPTY_MEMORIES_MD,
@@ -2474,6 +2488,10 @@ app.use((req, res, next) => {
  if (req.path.startsWith('/api/')) return next();
  // Desktop API is localhost-only (bound to 127.0.0.1), safe to skip here
  if (req.path.startsWith('/desktop-api/')) return next();
+ // Inbound webhooks (/webhook/in/<hookId>) authenticate with their own
+ // per-hook secret inside the handler — external callers (form providers,
+ // payment processors) never hold the bridge token.
+ if (req.method === 'POST' && req.path.startsWith('/webhook/in/')) return next();
  // Direct media lane: short-lived signed tokens (minted by the control plane
  // from the shared bridge-token-derived key) allow the browser to fetch file
  // bytes directly instead of proxying them through Railway. Read-only GETs.
@@ -12219,6 +12237,238 @@ app.post('/webhook/email', async (req, res) => {
  } catch (err) {
   console.error('[email] wake hook failed:', err.message);
   return res.status(502).json({ error: err.message });
+ }
+});
+
+// ── Inbound webhooks (Settings → Webhooks) ──────────────────────────────────
+// A webhook is a standing event-driven trigger: cron fires agents on a clock,
+// POST /webhook/in/<hookId> fires them when the outside world sends an event
+// (form submission, payment, CI result). Management lives under
+// /webhook/manage/* and is bridge-auth'd by the global middleware; the
+// inbound route is exempted there and authenticates with the per-hook
+// whsec_ token instead (see lib/webhooks.mjs).
+
+function findRegisteredAgentForWebhook(agentNameOrSlug) {
+ const slug = agentSlug(agentNameOrSlug);
+ const registered = agentRegistry.get(slug)
+  || [...agentRegistry.values()].find((agent) => agentSlug(agent?.name || '') === slug)
+  || null;
+ return { slug, registered };
+}
+
+function updateWebhookDelivery(eventId, patch) {
+ try {
+  db.update(webhookDeliveriesTable).set({ ...patch, finished_at: Date.now() })
+   .where(eq(webhookDeliveriesTable.id, eventId)).run();
+ } catch (err) {
+  console.warn(`[webhook] delivery update failed for ${eventId}: ${err.message}`);
+ }
+}
+
+function pruneWebhookDeliveries(webhookId) {
+ try {
+  sqlite.prepare(
+   `DELETE FROM webhook_deliveries WHERE webhook_id = ? AND id NOT IN (
+      SELECT id FROM webhook_deliveries WHERE webhook_id = ? ORDER BY received_at DESC LIMIT ?)`
+  ).run(webhookId, webhookId, WEBHOOK_DELIVERY_KEEP);
+ } catch {}
+}
+
+app.get('/webhook/manage', (req, res) => {
+ const rows = db.select().from(webhooksTable).orderBy(desc(webhooksTable.created_at)).all();
+ res.json({ webhooks: rows.map((row) => summarizeWebhookRow(row, { includeToken: true })) });
+});
+
+app.post('/webhook/manage', (req, res) => {
+ const normalized = normalizeWebhookInput(req.body || {});
+ if (!normalized.ok) return res.status(400).json({ error: normalized.error });
+ const { slug, registered } = findRegisteredAgentForWebhook(normalized.webhook.agent);
+ if (!registered) return res.status(404).json({ error: `Agent "${normalized.webhook.agent}" is not registered on this bridge` });
+ const creds = generateWebhookCredentials(randomBytes);
+ const now = Date.now();
+ db.insert(webhooksTable).values({
+  id: creds.id,
+  name: normalized.webhook.name,
+  agent_slug: slug,
+  token: creds.token,
+  instructions: normalized.webhook.instructions,
+  session_mode: normalized.webhook.sessionMode,
+  enabled: normalized.webhook.enabled ? 1 : 0,
+  fire_count: 0,
+  created_at: now,
+  updated_at: now,
+ }).run();
+ const row = db.select().from(webhooksTable).where(eq(webhooksTable.id, creds.id)).get();
+ res.status(201).json({ webhook: summarizeWebhookRow(row, { includeToken: true }) });
+});
+
+app.get('/webhook/manage/:id', (req, res) => {
+ const row = db.select().from(webhooksTable).where(eq(webhooksTable.id, req.params.id)).get();
+ if (!row) return res.status(404).json({ error: 'unknown_webhook' });
+ const deliveries = db.select().from(webhookDeliveriesTable)
+  .where(eq(webhookDeliveriesTable.webhook_id, row.id))
+  .orderBy(desc(webhookDeliveriesTable.received_at)).limit(20).all();
+ res.json({
+  webhook: summarizeWebhookRow(row, { includeToken: true }),
+  deliveries: deliveries.map(summarizeDeliveryRow),
+ });
+});
+
+app.patch('/webhook/manage/:id', (req, res) => {
+ const row = db.select().from(webhooksTable).where(eq(webhooksTable.id, req.params.id)).get();
+ if (!row) return res.status(404).json({ error: 'unknown_webhook' });
+ const normalized = normalizeWebhookPatch(req.body || {});
+ if (!normalized.ok) return res.status(400).json({ error: normalized.error });
+ const updates = { updated_at: Date.now() };
+ if (normalized.updates.name !== undefined) updates.name = normalized.updates.name;
+ if (normalized.updates.instructions !== undefined) updates.instructions = normalized.updates.instructions;
+ if (normalized.updates.sessionMode !== undefined) updates.session_mode = normalized.updates.sessionMode;
+ if (normalized.updates.enabled !== undefined) updates.enabled = normalized.updates.enabled ? 1 : 0;
+ if (normalized.updates.agent !== undefined) {
+  const { slug, registered } = findRegisteredAgentForWebhook(normalized.updates.agent);
+  if (!registered) return res.status(404).json({ error: `Agent "${normalized.updates.agent}" is not registered on this bridge` });
+  updates.agent_slug = slug;
+ }
+ db.update(webhooksTable).set(updates).where(eq(webhooksTable.id, row.id)).run();
+ const next = db.select().from(webhooksTable).where(eq(webhooksTable.id, row.id)).get();
+ res.json({ webhook: summarizeWebhookRow(next, { includeToken: true }) });
+});
+
+app.post('/webhook/manage/:id/rotate', (req, res) => {
+ const row = db.select().from(webhooksTable).where(eq(webhooksTable.id, req.params.id)).get();
+ if (!row) return res.status(404).json({ error: 'unknown_webhook' });
+ const creds = generateWebhookCredentials(randomBytes);
+ db.update(webhooksTable).set({ token: creds.token, updated_at: Date.now() }).where(eq(webhooksTable.id, row.id)).run();
+ const next = db.select().from(webhooksTable).where(eq(webhooksTable.id, row.id)).get();
+ res.json({ webhook: summarizeWebhookRow(next, { includeToken: true }) });
+});
+
+app.delete('/webhook/manage/:id', (req, res) => {
+ const row = db.select().from(webhooksTable).where(eq(webhooksTable.id, req.params.id)).get();
+ if (!row) return res.status(404).json({ error: 'unknown_webhook' });
+ db.delete(webhookDeliveriesTable).where(eq(webhookDeliveriesTable.webhook_id, row.id)).run();
+ db.delete(webhooksTable).where(eq(webhooksTable.id, row.id)).run();
+ res.json({ deleted: true, id: row.id });
+});
+
+// Public inbound endpoint. Accepts JSON (global parser) and form-encoded
+// bodies (route-level parser — plain HTML forms and many providers send
+// application/x-www-form-urlencoded).
+app.post('/webhook/in/:hookId', express.urlencoded({ extended: true, limit: '2mb' }), async (req, res) => {
+ const hook = db.select().from(webhooksTable).where(eq(webhooksTable.id, String(req.params.hookId || '').trim())).get();
+ // Same 401 for unknown id and bad token — don't confirm which hook ids exist.
+ const providedToken = extractInboundToken({ headers: req.headers, query: req.query });
+ if (!hook || !verifyWebhookToken(providedToken, hook.token)) {
+  return res.status(401).json({ error: 'invalid_webhook_or_token' });
+ }
+ if (!(hook.enabled === 1 || hook.enabled === true)) {
+  return res.status(409).json({ error: 'webhook_disabled' });
+ }
+
+ const idempotencyKey = normalizeIdempotencyKey({ headers: req.headers, query: req.query });
+ if (idempotencyKey) {
+  const dup = db.select().from(webhookDeliveriesTable).where(and(
+   eq(webhookDeliveriesTable.webhook_id, hook.id),
+   eq(webhookDeliveriesTable.idempotency_key, idempotencyKey),
+  )).get();
+  if (dup) {
+   return res.status(200).json({ status: 'duplicate', eventId: dup.id, sessionKey: dup.session_key, firstReceivedAt: dup.received_at });
+  }
+ }
+
+ const eventId = `evt_${randomBytes(8).toString('hex')}`;
+ const receivedAt = Date.now();
+ const payload = req.body;
+ const payloadExcerpt = previewString(typeof payload === 'string' ? payload : JSON.stringify(payload), 2000);
+
+ const { slug, registered } = findRegisteredAgentForWebhook(hook.agent_slug);
+ if (!registered) {
+  db.insert(webhookDeliveriesTable).values({
+   id: eventId, webhook_id: hook.id, idempotency_key: idempotencyKey || null,
+   status: 'rejected', error: 'agent_not_registered', payload_excerpt: payloadExcerpt,
+   received_at: receivedAt, finished_at: receivedAt,
+  }).run();
+  return res.status(503).json({ error: 'agent_not_registered', eventId });
+ }
+
+ const gatewayAgentId = resolveNativeGatewayAgentId(registered, slug);
+ const sessionKey = buildWebhookSessionKey({ gatewayAgentId, slug, hookId: hook.id, eventId, sessionMode: hook.session_mode });
+ const wakeMessage = formatWebhookWakeMessage({
+  hookName: hook.name,
+  hookId: hook.id,
+  eventId,
+  instructions: hook.instructions || '',
+  contentType: req.headers['content-type'] || '',
+  receivedAt: new Date(receivedAt).toISOString(),
+  payload,
+ });
+
+ db.insert(webhookDeliveriesTable).values({
+  id: eventId, webhook_id: hook.id, idempotency_key: idempotencyKey || null,
+  status: 'accepted', session_key: sessionKey, payload_excerpt: payloadExcerpt,
+  received_at: receivedAt,
+ }).run();
+ db.update(webhooksTable).set({ fire_count: (hook.fire_count || 0) + 1, last_fired_at: receivedAt })
+  .where(eq(webhooksTable.id, hook.id)).run();
+ pruneWebhookDeliveries(hook.id);
+
+ const wantSync = req.query.sync === '1' || req.query.sync === 'true';
+
+ if (gateway.isReady) {
+  const runPromise = gateway.runAgent(wakeMessage, { agentName: registered.name, sessionKey })
+   .then((response) => {
+    updateWebhookDelivery(eventId, { status: 'completed', via: 'websocket', result_excerpt: previewString(response, 500) });
+    return response;
+   })
+   .catch((err) => {
+    updateWebhookDelivery(eventId, { status: 'failed', via: 'websocket', error: err.message });
+    throw err;
+   });
+  if (!wantSync) {
+   runPromise.catch(() => {});
+   return res.status(202).json({ status: 'accepted', eventId, sessionKey, via: 'websocket' });
+  }
+  const timeoutMs = resolveSyncTimeoutSeconds(req.query.timeout) * 1000;
+  const outcome = await Promise.race([
+   runPromise.then((response) => ({ done: true, response })).catch((err) => ({ done: true, error: err.message })),
+   new Promise((resolve) => setTimeout(() => resolve({ done: false }), timeoutMs)),
+  ]);
+  if (!outcome.done) {
+   runPromise.catch(() => {});
+   return res.status(202).json({
+    status: 'accepted', eventId, sessionKey, via: 'websocket',
+    note: 'sync timeout reached — run continues in the background; check /webhook/manage for the result',
+   });
+  }
+  if (outcome.error) return res.status(502).json({ status: 'failed', eventId, sessionKey, error: outcome.error });
+  return res.status(200).json({ status: 'completed', eventId, sessionKey, via: 'websocket', response: outcome.response ?? null });
+ }
+
+ if (!OPENCLAW_HOOK_TOKEN) {
+  updateWebhookDelivery(eventId, { status: 'failed', error: 'gateway_unavailable' });
+  return res.status(503).json({ error: 'Gateway unavailable and hook token not configured', eventId });
+ }
+ try {
+  const hookRes = await fetch(`${OPENCLAW_URL}/hooks/agent`, {
+   method: 'POST',
+   headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENCLAW_HOOK_TOKEN}` },
+   body: JSON.stringify({
+    message: wakeMessage, name: registered.name, sessionKey,
+    wakeMode: 'now', deliver: false, timeoutSeconds: 300,
+   }),
+  });
+  const data = await hookRes.json().catch(() => ({}));
+  if (!hookRes.ok) {
+   updateWebhookDelivery(eventId, { status: 'failed', via: 'hook-fallback', error: `hook status ${hookRes.status}` });
+   return res.status(502).json({ status: 'failed', eventId, sessionKey, ...data });
+  }
+  // Completion is not observable on this path — the receipt keeps status
+  // "accepted" and records the transport.
+  try { db.update(webhookDeliveriesTable).set({ via: 'hook-fallback' }).where(eq(webhookDeliveriesTable.id, eventId)).run(); } catch {}
+  return res.status(202).json({ status: 'accepted', eventId, sessionKey, via: 'hook-fallback', ...data });
+ } catch (err) {
+  updateWebhookDelivery(eventId, { status: 'failed', via: 'hook-fallback', error: err.message });
+  return res.status(502).json({ error: err.message, eventId });
  }
 });
 

@@ -165,6 +165,42 @@ export const config = sqliteTable('config', {
   updated_at: integer('updated_at').notNull().default(sql`(unixepoch('now') * 1000)`),
 });
 
+// ── webhooks ──────────────────────────────────────────────────────────
+// Standing inbound triggers (Settings → Webhooks). Each row is a URL id +
+// bearer secret; POSTs to /webhook/in/<id> wake the configured agent
+// (lib/webhooks.mjs). agent_slug matches agentRegistry keys.
+export const webhooks = sqliteTable('webhooks', {
+  id: text('id').primaryKey(),                  // wh_… — public URL segment
+  name: text('name').notNull(),
+  agent_slug: text('agent_slug').notNull(),
+  token: text('token').notNull(),               // whsec_… bearer secret
+  instructions: text('instructions'),           // standing prompt prefix per event
+  session_mode: text('session_mode').notNull().default('isolated'), // isolated|shared
+  enabled: integer('enabled').notNull().default(1),
+  fire_count: integer('fire_count').notNull().default(0),
+  last_fired_at: integer('last_fired_at'),
+  created_at: integer('created_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+  updated_at: integer('updated_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+});
+
+// ── webhook_deliveries ────────────────────────────────────────────────
+// Per-event receipts for inbound webhooks: what arrived, which session the
+// wake landed in, and how the run ended. Pruned to the newest N per hook
+// (WEBHOOK_DELIVERY_KEEP). The eventId doubles as the primary key.
+export const webhookDeliveries = sqliteTable('webhook_deliveries', {
+  id: text('id').primaryKey(),                  // evt_…
+  webhook_id: text('webhook_id').notNull(),
+  idempotency_key: text('idempotency_key'),
+  status: text('status').notNull().default('accepted'), // accepted|completed|failed|rejected
+  via: text('via'),                             // websocket|hook-fallback
+  session_key: text('session_key'),
+  payload_excerpt: text('payload_excerpt'),
+  result_excerpt: text('result_excerpt'),
+  error: text('error'),
+  received_at: integer('received_at').notNull(),
+  finished_at: integer('finished_at'),
+});
+
 // ── memories ──────────────────────────────────────────────────────────
 export const memories = sqliteTable('memories', {
   id: text('id').primaryKey(),
