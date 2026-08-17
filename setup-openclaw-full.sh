@@ -1451,6 +1451,7 @@ services:
       PUPPETEER_EXECUTABLE_PATH: /opt/chrome-wrapper.sh
       OPENCLAW_BROWSER_EXECUTABLE: /opt/chrome-wrapper.sh
       COMPOSIO_API_KEY: \${COMPOSIO_API_KEY}
+      TROOPER_GATEWAY_SKIP_DOCTOR: "1"
       TMPDIR: /home/node/.cache/openclaw/tmp
       TMP: /home/node/.cache/openclaw/tmp
       TEMP: /home/node/.cache/openclaw/tmp
