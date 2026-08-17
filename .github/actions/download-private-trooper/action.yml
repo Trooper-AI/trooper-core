@@ -11,6 +11,9 @@ inputs:
   fallback-token:
     description: Optional second fine-grained read token used when the primary token is expired
     required: false
+  clone-token:
+    description: Optional git-clone token (TROOPER_REPO_CLONE_TOKEN) used when API-only tokens cannot fetch contents
+    required: false
   destination:
     description: Directory where the source is unpacked
     required: false
@@ -30,6 +33,7 @@ runs:
         PRIVATE_REF: ${{ inputs.ref }}
         PRIVATE_TOKEN: ${{ inputs.token }}
         PRIVATE_FALLBACK_TOKEN: ${{ inputs.fallback-token }}
+        PRIVATE_CLONE_TOKEN: ${{ inputs.clone-token }}
         PRIVATE_DESTINATION: ${{ inputs.destination }}
       run: |
         set -euo pipefail
@@ -37,47 +41,123 @@ runs:
           echo "::error::The requested Trooper ref is not valid."
           exit 1
         fi
-        select_token() {
+
+        mask_token() {
           local candidate="${1:-}"
           [ -n "$candidate" ] || return 1
           echo "::add-mask::$candidate"
+        }
+
+        # Metadata-only PATs pass GET /repos and then 403 on /commits and tarball.
+        # Probe git contents access instead.
+        git_ls() {
+          local token="${1:-}"
+          local spec="${2:-HEAD}"
+          [ -n "$token" ] || return 1
+          GIT_TERMINAL_PROMPT=0 git -c http.extraHeader="Authorization: Bearer ${token}" \
+            ls-remote --exit-code https://github.com/absurdfounder/Trooper.git "$spec" 2>/dev/null \
+            && return 0
+          GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code \
+            "https://x-access-token:${token}@github.com/absurdfounder/Trooper.git" "$spec" 2>/dev/null
+        }
+
+        metadata_ok() {
+          local token="${1:-}"
+          [ -n "$token" ] || return 1
           curl --fail --silent --show-error \
-            -H "Authorization: Bearer $candidate" \
+            -H "Authorization: Bearer $token" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             https://api.github.com/repos/absurdfounder/Trooper \
             -o /dev/null 2>/dev/null
         }
+
+        pick_token() {
+          local candidate
+          for candidate in "$PRIVATE_TOKEN" "$PRIVATE_FALLBACK_TOKEN" "$PRIVATE_CLONE_TOKEN"; do
+            mask_token "$candidate" || continue
+            if git_ls "$candidate" HEAD; then
+              printf '%s' "$candidate"
+              return 0
+            fi
+          done
+          return 1
+        }
+
         selected_token=''
-        if select_token "$PRIVATE_TOKEN"; then
-          selected_token="$PRIVATE_TOKEN"
-        elif select_token "$PRIVATE_FALLBACK_TOKEN"; then
-          selected_token="$PRIVATE_FALLBACK_TOKEN"
-        else
-          echo "::error::No configured Core secret can read absurdfounder/Trooper."
+        for attempt in 1 2 3 4 5; do
+          if selected_token="$(pick_token)"; then
+            break
+          fi
+          echo "Trooper git probe attempt ${attempt} failed; retrying..."
+          sleep $((attempt * 8))
+        done
+        if [ -z "${selected_token:-}" ]; then
+          meta_hits=0
+          for candidate in "$PRIVATE_TOKEN" "$PRIVATE_FALLBACK_TOKEN" "$PRIVATE_CLONE_TOKEN"; do
+            if metadata_ok "$candidate"; then
+              meta_hits=$((meta_hits + 1))
+            fi
+          done
+          if [ "$meta_hits" -gt 0 ]; then
+            echo "::error::Core secrets can see absurdfounder/Trooper metadata but cannot clone it. Grant Contents: Read on CRABSHQ_READ_TOKEN / CRABSHQ_DISPATCH_TOKEN / TROOPER_REPO_CLONE_TOKEN (and re-authorize SSO if prompted)."
+          else
+            echo "::error::No configured Core secret can read absurdfounder/Trooper."
+          fi
           exit 1
         fi
-        sha="$(curl --fail --silent --show-error \
-          -H "Authorization: Bearer $selected_token" \
-          -H "Accept: application/vnd.github+json" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          "https://api.github.com/repos/absurdfounder/Trooper/commits/$PRIVATE_REF" | jq -r .sha)"
+
+        resolve_sha() {
+          local token="$1"
+          local ref="$2"
+          local sha=''
+          if [[ "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            printf '%s' "$(printf '%s' "$ref" | tr '[:upper:]' '[:lower:]')"
+            return 0
+          fi
+          sha="$(GIT_TERMINAL_PROMPT=0 git -c http.extraHeader="Authorization: Bearer ${token}" \
+            ls-remote https://github.com/absurdfounder/Trooper.git "refs/heads/${ref}" "refs/tags/${ref}" "${ref}" \
+            | awk 'NR == 1 { print $1 }')"
+          if [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            printf '%s' "$sha"
+            return 0
+          fi
+          sha="$(GIT_TERMINAL_PROMPT=0 git ls-remote \
+            "https://x-access-token:${token}@github.com/absurdfounder/Trooper.git" \
+            "refs/heads/${ref}" "refs/tags/${ref}" "${ref}" | awk 'NR == 1 { print $1 }')"
+          printf '%s' "$sha"
+        }
+
+        sha="$(resolve_sha "$selected_token" "$PRIVATE_REF")"
         if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
           echo "::error::Could not resolve an immutable commit for the requested Trooper ref."
           exit 1
         fi
-        runner_temp="$RUNNER_TEMP"
+
         workspace="$GITHUB_WORKSPACE"
         if command -v cygpath >/dev/null 2>&1; then
-          runner_temp="$(cygpath -u "$RUNNER_TEMP")"
           workspace="$(cygpath -u "$GITHUB_WORKSPACE")"
         fi
         destination="$workspace/$PRIVATE_DESTINATION"
         rm -rf "$destination"
-        git clone --filter=blob:none --no-checkout \
-          "https://x-access-token:${selected_token}@github.com/absurdfounder/Trooper.git" \
-          "$destination"
-        git -C "$destination" fetch --depth 1 origin "$sha"
+        mkdir -p "$destination"
+        git init --quiet "$destination"
+        git -C "$destination" remote add origin https://github.com/absurdfounder/Trooper.git
+        fetch_ok=0
+        for attempt in 1 2 3 4 5; do
+          if GIT_TERMINAL_PROMPT=0 git -C "$destination" \
+            -c http.extraHeader="Authorization: Bearer ${selected_token}" \
+            fetch --depth 1 origin "$sha"; then
+            fetch_ok=1
+            break
+          fi
+          echo "Trooper git fetch attempt ${attempt} failed; retrying..."
+          sleep $((attempt * 8))
+        done
+        if [ "$fetch_ok" != 1 ]; then
+          echo "::error::git fetch of absurdfounder/Trooper@$sha failed after retries."
+          exit 1
+        fi
         git -C "$destination" checkout --force FETCH_HEAD
         rm -rf "$destination/.git"
         test -f "$destination/package.json"

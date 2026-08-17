@@ -43,6 +43,7 @@ jobs:
           ref: ${{ inputs.trooper_ref }}
           token: ${{ secrets.CRABSHQ_READ_TOKEN }}
           fallback-token: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+          clone-token: ${{ secrets.TROOPER_REPO_CLONE_TOKEN }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
