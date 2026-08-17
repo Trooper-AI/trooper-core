@@ -25,13 +25,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-snapshot:
-    name: Build and validate Hetzner snapshot
+  fetch-trooper:
+    name: Download private Trooper
     runs-on: ubuntu-latest
-    # Auto-promote hard-pass waits for real bridge /health=ok after the full
-    # LXQt/desktop bake; 40m was clipping ~1m before finalization finished.
-    timeout-minutes: 55
-    environment: production-build
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.trooper.outputs.sha }}
     steps:
       - name: Checkout public workflow definitions
         uses: actions/checkout@v5
@@ -44,6 +43,32 @@ jobs:
           token: ${{ secrets.CRABSHQ_READ_TOKEN }}
           fallback-token: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
           clone-token: ${{ secrets.TROOPER_REPO_CLONE_TOKEN }}
+
+      - name: Upload Trooper source
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-trooper
+          path: private-trooper
+          include-hidden-files: true
+          retention-days: 1
+
+  build-snapshot:
+    name: Build and validate Hetzner snapshot
+    needs: fetch-trooper
+    runs-on: ubuntu-latest
+    # Auto-promote hard-pass waits for real bridge /health=ok after the full
+    # LXQt/desktop bake; 40m was clipping ~1m before finalization finished.
+    timeout-minutes: 55
+    environment: production-build
+    steps:
+      - name: Checkout public workflow definitions
+        uses: actions/checkout@v5
+
+      - name: Restore private Trooper source
+        uses: actions/download-artifact@v4
+        with:
+          name: private-trooper
+          path: private-trooper
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
@@ -90,7 +115,7 @@ jobs:
         id: runtime
         working-directory: private-trooper
         env:
-          RELEASE_TAG: encrypted-org-runtime-${{ steps.trooper.outputs.sha }}-${{ steps.bridge.outputs.sha }}
+          RELEASE_TAG: encrypted-org-runtime-${{ needs.fetch-trooper.outputs.sha }}-${{ steps.bridge.outputs.sha }}
           GH_TOKEN: ${{ github.token }}
           RAW_RUNTIME_ENCRYPTION_PASSWORD: ${{ secrets.RUNTIME_BUNDLE_ENCRYPTION_PASSWORD }}
         run: |
@@ -153,7 +178,7 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
           FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
           SSH_PUBKEY: ${{ secrets.SNAPSHOT_SSH_PUBKEY }}
-          TROOPER_GIT_SHA: ${{ steps.trooper.outputs.sha }}
+          TROOPER_GIT_SHA: ${{ needs.fetch-trooper.outputs.sha }}
           OPENCLAWBRIDGE_GIT_SHA: ${{ steps.bridge.outputs.sha }}
           OPENCLAW_DOCKER_IMAGE: ${{ steps.gateway.outputs.image }}
           TROOPER_RUNTIME_TARBALL_URL: ${{ steps.runtime.outputs.url }}
