@@ -22,142 +22,61 @@ inputs:
 outputs:
   sha:
     description: Resolved immutable Trooper commit SHA
-    value: ${{ steps.download.outputs.sha }}
+    value: ${{ steps.record.outputs.sha }}
 
 runs:
   using: composite
   steps:
-    - id: download
+    - name: Checkout Trooper with primary token
+      id: primary
+      continue-on-error: true
+      uses: actions/checkout@v5
+      with:
+        repository: absurdfounder/Trooper
+        ref: ${{ inputs.ref }}
+        token: ${{ inputs.token }}
+        path: ${{ inputs.destination }}
+        persist-credentials: false
+        fetch-depth: 1
+
+    - name: Checkout Trooper with fallback token
+      id: fallback
+      if: ${{ steps.primary.outcome == 'failure' && inputs.fallback-token != '' }}
+      continue-on-error: true
+      uses: actions/checkout@v5
+      with:
+        repository: absurdfounder/Trooper
+        ref: ${{ inputs.ref }}
+        token: ${{ inputs.fallback-token }}
+        path: ${{ inputs.destination }}
+        persist-credentials: false
+        fetch-depth: 1
+
+    - name: Checkout Trooper with clone token
+      id: clone
+      if: ${{ steps.primary.outcome == 'failure' && (steps.fallback.outcome == 'failure' || steps.fallback.outcome == 'skipped') && inputs.clone-token != '' }}
+      continue-on-error: true
+      uses: actions/checkout@v5
+      with:
+        repository: absurdfounder/Trooper
+        ref: ${{ inputs.ref }}
+        token: ${{ inputs.clone-token }}
+        path: ${{ inputs.destination }}
+        persist-credentials: false
+        fetch-depth: 1
+
+    - name: Record Trooper SHA
+      id: record
       shell: bash
       env:
-        PRIVATE_REF: ${{ inputs.ref }}
-        PRIVATE_TOKEN: ${{ inputs.token }}
-        PRIVATE_FALLBACK_TOKEN: ${{ inputs.fallback-token }}
-        PRIVATE_CLONE_TOKEN: ${{ inputs.clone-token }}
-        PRIVATE_DESTINATION: ${{ inputs.destination }}
+        DEST: ${{ inputs.destination }}
       run: |
         set -euo pipefail
-        if [[ ! "$PRIVATE_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]] || [[ "$PRIVATE_REF" == *..* ]]; then
-          echo "::error::The requested Trooper ref is not valid."
+        if [ ! -f "$DEST/package.json" ]; then
+          echo "::error::Could not clone absurdfounder/Trooper. CRABSHQ_READ_TOKEN is returning 401 (expired). Create a new fine-grained PAT with Contents: Read on absurdfounder/Trooper and set it as CRABSHQ_READ_TOKEN on Trooper-AI/trooper-core (Actions secrets and the production-build environment)."
           exit 1
         fi
-
-        # Never print mask directives to stdout — callers capture stdout as the token.
-        mask_token() {
-          local candidate="${1:-}"
-          [ -n "$candidate" ] || return 1
-          echo "::add-mask::$candidate" >&2
-        }
-
-        api_get() {
-          local token="$1"
-          local url="$2"
-          local out="${3:-}"
-          local -a curl_args=(
-            curl --fail --silent --show-error --location --retry 4 --retry-delay 3 \
-              --retry-max-time 40
-            -H "Authorization: Bearer ${token}"
-            -H "Accept: application/vnd.github+json"
-            -H "X-GitHub-Api-Version: 2022-11-28"
-          )
-          if [ -n "$out" ]; then
-            "${curl_args[@]}" -o "$out" "$url"
-          else
-            "${curl_args[@]}" "$url"
-          fi
-        }
-
-        token_has_contents() {
-          local token="${1:-}"
-          [ -n "$token" ] || return 1
-          api_get "$token" "https://api.github.com/repos/absurdfounder/Trooper/commits/main" /dev/null
-        }
-
-        pick_token() {
-          local candidate
-          for candidate in "$PRIVATE_TOKEN" "$PRIVATE_FALLBACK_TOKEN" "$PRIVATE_CLONE_TOKEN"; do
-            mask_token "$candidate" || continue
-            if token_has_contents "$candidate"; then
-              printf '%s' "$candidate"
-              return 0
-            fi
-            echo "Token failed contents check (commits/main)." >&2
-          done
-          return 1
-        }
-
-        selected_token=''
-        pick_status=1
-        for attempt in 1 2 3 4 5; do
-          if selected_token="$(pick_token)"; then
-            pick_status=0
-            break
-          fi
-          selected_token=''
-          echo "Trooper contents probe attempt ${attempt} failed; retrying..." >&2
-          sleep $((attempt * 8))
-        done
-        if [ "$pick_status" != 0 ] || [ -z "${selected_token:-}" ]; then
-          echo "::error::No configured Core secret can read absurdfounder/Trooper contents. Update production-build secrets CRABSHQ_READ_TOKEN, CRABSHQ_DISPATCH_TOKEN, or TROOPER_REPO_CLONE_TOKEN with Contents: Read on absurdfounder/Trooper."
-          exit 1
-        fi
-
-        resolve_sha() {
-          local token="$1"
-          local ref="$2"
-          if [[ "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            printf '%s' "$(printf '%s' "$ref" | tr '[:upper:]' '[:lower:]')"
-            return 0
-          fi
-          api_get "$token" "https://api.github.com/repos/absurdfounder/Trooper/commits/${ref}" \
-            | jq -r '.sha // empty'
-        }
-
-        sha="$(resolve_sha "$selected_token" "$PRIVATE_REF")"
-        if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
-          echo "::error::Could not resolve an immutable commit for the requested Trooper ref."
-          exit 1
-        fi
-
-        workspace="$GITHUB_WORKSPACE"
-        runner_temp="$RUNNER_TEMP"
-        if command -v cygpath >/dev/null 2>&1; then
-          workspace="$(cygpath -u "$GITHUB_WORKSPACE")"
-          runner_temp="$(cygpath -u "$RUNNER_TEMP")"
-        fi
-        destination="$workspace/$PRIVATE_DESTINATION"
-        archive="$runner_temp/trooper-$sha.tar.gz"
-        rm -rf "$destination"
-        mkdir -p "$destination"
-
-        fetch_ok=0
-        for attempt in 1 2 3 4 5; do
-          if api_get "$selected_token" \
-            "https://api.github.com/repos/absurdfounder/Trooper/tarball/${sha}" \
-            "$archive"; then
-            fetch_ok=1
-            break
-          fi
-          echo "Trooper tarball attempt ${attempt} failed; retrying..." >&2
-          sleep $((attempt * 8))
-        done
-        if [ "$fetch_ok" != 1 ]; then
-          echo "Tarball API failed; falling back to git fetch." >&2
-          git init --quiet "$destination"
-          git -C "$destination" remote add origin https://github.com/absurdfounder/Trooper.git
-          if GIT_TERMINAL_PROMPT=0 git -C "$destination" \
-            -c http.extraHeader="Authorization: Bearer ${selected_token}" \
-            fetch --depth 1 origin "$sha"; then
-            git -C "$destination" checkout --force FETCH_HEAD
-            rm -rf "$destination/.git"
-            fetch_ok=1
-          fi
-        else
-          tar -xzf "$archive" -C "$destination" --strip-components=1
-          rm -f "$archive"
-        fi
-        if [ "$fetch_ok" != 1 ] || [ ! -f "$destination/package.json" ]; then
-          echo "::error::Could not download absurdfounder/Trooper@$sha."
-          exit 1
-        fi
+        sha="$(git -C "$DEST" rev-parse HEAD)"
+        rm -rf "$DEST/.git"
         echo "sha=$sha" >> "$GITHUB_OUTPUT"
+        echo "Cloned absurdfounder/Trooper@$sha"
