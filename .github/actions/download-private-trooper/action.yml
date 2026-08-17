@@ -54,7 +54,8 @@ runs:
           local url="$2"
           local out="${3:-}"
           local -a curl_args=(
-            curl --fail --silent --show-error --location --retry 5 --retry-all-errors --retry-delay 4
+            curl --fail --silent --show-error --location --retry 4 --retry-delay 3 \
+              --retry-max-time 40
             -H "Authorization: Bearer ${token}"
             -H "Accept: application/vnd.github+json"
             -H "X-GitHub-Api-Version: 2022-11-28"
@@ -69,7 +70,7 @@ runs:
         token_has_contents() {
           local token="${1:-}"
           [ -n "$token" ] || return 1
-          api_get "$token" "https://api.github.com/repos/absurdfounder/Trooper/commits/HEAD" /dev/null
+          api_get "$token" "https://api.github.com/repos/absurdfounder/Trooper/commits/main" /dev/null
         }
 
         pick_token() {
@@ -80,7 +81,7 @@ runs:
               printf '%s' "$candidate"
               return 0
             fi
-            echo "Token failed contents check (commits/HEAD)." >&2
+            echo "Token failed contents check (commits/main)." >&2
           done
           return 1
         }
