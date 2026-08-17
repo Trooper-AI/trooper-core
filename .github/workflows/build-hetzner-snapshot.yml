@@ -25,12 +25,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  fetch-trooper:
-    name: Download private Trooper
+  build-snapshot:
+    name: Build and validate Hetzner snapshot
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    outputs:
-      sha: ${{ steps.trooper.outputs.sha }}
+    # Auto-promote hard-pass waits for real bridge /health=ok after the full
+    # LXQt/desktop bake; 40m was clipping ~1m before finalization finished.
+    timeout-minutes: 55
+    environment: production-build
     steps:
       - name: Checkout public workflow definitions
         uses: actions/checkout@v5
@@ -42,52 +43,6 @@ jobs:
           ref: ${{ inputs.trooper_ref }}
           token: ${{ secrets.CRABSHQ_READ_TOKEN }}
           fallback-token: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
-          clone-token: ${{ secrets.TROOPER_REPO_CLONE_TOKEN }}
-
-      - name: Upload Trooper source
-        uses: actions/upload-artifact@v4
-        with:
-          name: private-trooper
-          path: private-trooper
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 1
-
-  build-snapshot:
-    name: Build and validate Hetzner snapshot
-    needs: fetch-trooper
-    runs-on: ubuntu-latest
-    # Auto-promote hard-pass waits for real bridge /health=ok after the full
-    # LXQt/desktop bake; 40m was clipping ~1m before finalization finished.
-    timeout-minutes: 55
-    environment: production-build
-    steps:
-      - name: Checkout public workflow definitions
-        uses: actions/checkout@v5
-
-      - name: Restore private Trooper source
-        uses: actions/download-artifact@v4
-        with:
-          name: private-trooper
-          path: ${{ runner.temp }}/private-trooper-artifact
-
-      - name: Place Trooper source at private-trooper
-        run: |
-          set -euo pipefail
-          rm -rf private-trooper
-          src="${{ runner.temp }}/private-trooper-artifact"
-          if [ -f "$src/package.json" ]; then
-            mv "$src" private-trooper
-          elif [ -f "$src/private-trooper/package.json" ]; then
-            mv "$src/private-trooper" private-trooper
-          else
-            echo "::error::Trooper artifact did not contain package.json"
-            find "$src" -maxdepth 3 -type f | head -50
-            exit 1
-          fi
-          test -f private-trooper/package.json
-          test -f private-trooper/scripts/verify-org-runtime-bundle-reproducible.sh
-          chmod +x private-trooper/scripts/*.sh
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
@@ -134,7 +89,7 @@ jobs:
         id: runtime
         working-directory: private-trooper
         env:
-          RELEASE_TAG: encrypted-org-runtime-${{ needs.fetch-trooper.outputs.sha }}-${{ steps.bridge.outputs.sha }}
+          RELEASE_TAG: encrypted-org-runtime-${{ steps.trooper.outputs.sha }}-${{ steps.bridge.outputs.sha }}
           GH_TOKEN: ${{ github.token }}
           RAW_RUNTIME_ENCRYPTION_PASSWORD: ${{ secrets.RUNTIME_BUNDLE_ENCRYPTION_PASSWORD }}
         run: |
@@ -154,25 +109,10 @@ jobs:
             -in "$plaintext" -out "$encrypted" -pass env:runtime_password
           plaintext_sha="$(sha256sum "$plaintext" | awk '{print $1}')"
           encrypted_sha="$(sha256sum "$encrypted" | awk '{print $1}')"
-          for attempt in 1 2 3 4 5; do
-            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-              break
-            fi
-            if gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --prerelease \
-              --title "$RELEASE_TAG" --notes "Encrypted runtime asset for a Hetzner snapshot build."; then
-              break
-            fi
-            echo "GitHub release create attempt ${attempt} failed; retrying..."
-            sleep $((attempt * 8))
-          done
-          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
-          for attempt in 1 2 3 4 5; do
-            if gh release upload "$RELEASE_TAG" "$encrypted" --repo "$GITHUB_REPOSITORY" --clobber; then
-              break
-            fi
-            echo "GitHub release upload attempt ${attempt} failed; retrying..."
-            sleep $((attempt * 8))
-          done
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --prerelease \
+              --title "$RELEASE_TAG" --notes "Encrypted runtime asset for a Hetzner snapshot build."
+          gh release upload "$RELEASE_TAG" "$encrypted" --repo "$GITHUB_REPOSITORY" --clobber
           url="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.assets[] | select(.name == "trooper-org-runtime.tar.gz.enc") | .url')"
           [[ -n "$url" ]]
           echo "url=$url" >> "$GITHUB_OUTPUT"
@@ -197,7 +137,7 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
           FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
           SSH_PUBKEY: ${{ secrets.SNAPSHOT_SSH_PUBKEY }}
-          TROOPER_GIT_SHA: ${{ needs.fetch-trooper.outputs.sha }}
+          TROOPER_GIT_SHA: ${{ steps.trooper.outputs.sha }}
           OPENCLAWBRIDGE_GIT_SHA: ${{ steps.bridge.outputs.sha }}
           OPENCLAW_DOCKER_IMAGE: ${{ steps.gateway.outputs.image }}
           TROOPER_RUNTIME_TARBALL_URL: ${{ steps.runtime.outputs.url }}
