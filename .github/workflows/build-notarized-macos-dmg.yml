@@ -5,7 +5,7 @@ on:
     inputs:
       trooper_ref:
         description: Private Trooper branch, tag, or commit SHA to build
-        required: true
+        required: false
         default: main
 
 jobs:
@@ -490,9 +490,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
             --title "Trooper for macOS" \
-            --notes "Latest signed and notarized Trooper macOS installer.
-
-Built from absurdfounder/Trooper@${{ steps.trooper.outputs.sha }}." \
+            --notes "Latest signed and notarized Trooper macOS installer. Built from absurdfounder/Trooper@${{ steps.trooper.outputs.sha }}." \
             --latest
 
       - name: Mirror DMG to install URLs (private Trooper + landing)
@@ -502,55 +500,4 @@ Built from absurdfounder/Trooper@${{ steps.trooper.outputs.sha }}." \
         env:
           GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
           TROOPER_SHA: ${{ steps.trooper.outputs.sha }}
-        run: |
-          set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::warning::PUBLIC_RELEASE_TOKEN missing; website/auto-update URLs stay on the last mirrored DMG."
-            exit 0
-          fi
-          DMG="${{ steps.package.outputs.path }}"
-          CHECKSUM="${DMG}.sha256"
-          NOTES="Latest signed and notarized Trooper macOS installer.
-
-Built from absurdfounder/Trooper@${TROOPER_SHA}."
-          for repo in absurdfounder/Trooper absurdfounder/trooper_landing; do
-            gh release delete macos-latest --repo "$repo" --cleanup-tag --yes >/dev/null 2>&1 || true
-            gh release create macos-latest "$DMG" "$CHECKSUM" \
-              --repo "$repo" \
-              --title "Trooper for macOS" \
-              --notes "$NOTES" \
-              --latest
-          done
-
-          UPDATE_ARCHIVE="$(find src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -name "*.app.tar.gz" | head -1 || true)"
-          if [ -n "${UPDATE_ARCHIVE:-}" ] && [ -f "${UPDATE_ARCHIVE}.sig" ]; then
-            VERSION="$(node -p "require('./package.json').version")"
-            mkdir -p release-update
-            cp "$UPDATE_ARCHIVE" release-update/Trooper-macOS-universal.app.tar.gz
-            cp "${UPDATE_ARCHIVE}.sig" release-update/Trooper-macOS-universal.app.tar.gz.sig
-            SIGNATURE="$(cat release-update/Trooper-macOS-universal.app.tar.gz.sig)"
-            URL="https://github.com/absurdfounder/trooper_landing/releases/download/darwin-latest/Trooper-macOS-universal.app.tar.gz"
-            PUB_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-            python3 - <<PY
-          import json
-          payload = {
-            "version": "${VERSION}",
-            "notes": "Latest signed Trooper desktop update (${TROOPER_SHA[:12]}).",
-            "pub_date": "${PUB_DATE}",
-            "platforms": {
-              "darwin-aarch64": {"signature": """${SIGNATURE}""", "url": "${URL}"},
-              "darwin-x86_64": {"signature": """${SIGNATURE}""", "url": "${URL}"},
-            },
-          }
-          with open("release-update/latest.json", "w", encoding="utf-8") as fh:
-              json.dump(payload, fh, indent=2)
-              fh.write("\n")
-          PY
-            gh release delete darwin-latest --repo absurdfounder/trooper_landing --cleanup-tag --yes >/dev/null 2>&1 || true
-            gh release create darwin-latest release-update/* \
-              --repo absurdfounder/trooper_landing \
-              --title "Trooper macOS auto-update feed" \
-              --notes "Signed updater package for Trooper macOS built from absurdfounder/Trooper@${TROOPER_SHA}."
-          else
-            echo "::warning::No Tauri updater archive; installed apps will not auto-update until the next build publishes darwin-latest."
-          fi
+        run: bash "$GITHUB_WORKSPACE/scripts/mirror-macos-dmg-release.sh" "${{ steps.package.outputs.path }}"
