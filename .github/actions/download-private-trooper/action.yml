@@ -27,56 +27,101 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Checkout Trooper with primary token
-      id: primary
-      continue-on-error: true
-      uses: actions/checkout@v5
-      with:
-        repository: absurdfounder/Trooper
-        ref: ${{ inputs.ref }}
-        token: ${{ inputs.token }}
-        path: ${{ inputs.destination }}
-        persist-credentials: false
-        fetch-depth: 1
+    - name: Fetch Trooper tarball (API, not git HTTPS)
+      id: fetch
+      shell: bash
+      env:
+        TROOPER_REF: ${{ inputs.ref }}
+        DEST: ${{ inputs.destination }}
+        PRIMARY_TOKEN: ${{ inputs.token }}
+        FALLBACK_TOKEN: ${{ inputs.fallback-token }}
+        CLONE_TOKEN: ${{ inputs.clone-token }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$DEST"
+        TMP_TGZ="${RUNNER_TEMP:-/tmp}/trooper-source.tgz"
+        resolve_sha() {
+          local token="$1"
+          curl -fsSL \
+            -H "Authorization: Bearer ${token}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/absurdfounder/Trooper/commits/${TROOPER_REF}" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])'
+        }
+        download_tarball() {
+          local token="$1"
+          local sha="$2"
+          rm -f "$TMP_TGZ"
+          curl -fL --retry 3 \
+            -H "Authorization: Bearer ${token}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/absurdfounder/Trooper/tarball/${sha}" \
+            -o "$TMP_TGZ"
+          rm -rf "$DEST"
+          mkdir -p "$DEST"
+          tar -xzf "$TMP_TGZ" -C "$DEST" --strip-components=1
+          test -f "$DEST/package.json"
+        }
 
-    - name: Checkout Trooper with fallback token
-      id: fallback
-      if: ${{ steps.primary.outcome == 'failure' && inputs.fallback-token != '' }}
-      continue-on-error: true
-      uses: actions/checkout@v5
-      with:
-        repository: absurdfounder/Trooper
-        ref: ${{ inputs.ref }}
-        token: ${{ inputs.fallback-token }}
-        path: ${{ inputs.destination }}
-        persist-credentials: false
-        fetch-depth: 1
+        tokens=()
+        labels=()
+        if [ -n "${PRIMARY_TOKEN:-}" ]; then tokens+=("$PRIMARY_TOKEN"); labels+=("CRABSHQ_READ_TOKEN"); fi
+        if [ -n "${FALLBACK_TOKEN:-}" ]; then tokens+=("$FALLBACK_TOKEN"); labels+=("CRABSHQ_DISPATCH_TOKEN"); fi
+        if [ -n "${CLONE_TOKEN:-}" ]; then tokens+=("$CLONE_TOKEN"); labels+=("TROOPER_REPO_CLONE_TOKEN"); fi
+        if [ "${#tokens[@]}" -eq 0 ]; then
+          echo "::error::No token provided. Set CRABSHQ_READ_TOKEN (Contents: Read on absurdfounder/Trooper) on Trooper-AI/trooper-core, including the production-build environment."
+          exit 1
+        fi
 
-    - name: Checkout Trooper with clone token
-      id: clone
-      if: ${{ steps.primary.outcome == 'failure' && (steps.fallback.outcome == 'failure' || steps.fallback.outcome == 'skipped') && inputs.clone-token != '' }}
-      continue-on-error: true
-      uses: actions/checkout@v5
-      with:
-        repository: absurdfounder/Trooper
-        ref: ${{ inputs.ref }}
-        token: ${{ inputs.clone-token }}
-        path: ${{ inputs.destination }}
-        persist-credentials: false
-        fetch-depth: 1
+        last_err=""
+        for i in "${!tokens[@]}"; do
+          token="${tokens[$i]}"
+          label="${labels[$i]}"
+          echo "Trying ${label} via GitHub contents API (tarball)…"
+          if sha="$(resolve_sha "$token" 2>/tmp/trooper-sha.err)"; then
+            if download_tarball "$token" "$sha"; then
+              echo "sha=$sha" >> "$GITHUB_OUTPUT"
+              echo "source=${label}" >> "$GITHUB_OUTPUT"
+              echo "Fetched absurdfounder/Trooper@${sha} with ${label}"
+              exit 0
+            fi
+            last_err="tarball download failed with ${label}"
+          else
+            last_err="$(tr '\n' ' ' < /tmp/trooper-sha.err | head -c 400)"
+            echo "::warning::${label} cannot read absurdfounder/Trooper (${last_err})."
+          fi
+        done
+
+        echo "::error::Could not clone absurdfounder/Trooper. Primary git HTTPS checkout is disabled because expired/empty PATs prompt for a username. Refresh CRABSHQ_READ_TOKEN (fine-grained PAT, Contents: Read on absurdfounder/Trooper) on repo secrets AND the production-build environment. Last error: ${last_err}"
+        exit 1
 
     - name: Record Trooper SHA
       id: record
       shell: bash
       env:
         DEST: ${{ inputs.destination }}
+        FETCHED_SHA: ${{ steps.fetch.outputs.sha }}
       run: |
         set -euo pipefail
         if [ ! -f "$DEST/package.json" ]; then
-          echo "::error::Could not clone absurdfounder/Trooper. CRABSHQ_READ_TOKEN is returning 401 (expired). Create a new fine-grained PAT with Contents: Read on absurdfounder/Trooper and set it as CRABSHQ_READ_TOKEN on Trooper-AI/trooper-core (Actions secrets and the production-build environment)."
+          echo "::error::private-trooper/package.json missing after fetch."
           exit 1
         fi
-        sha="$(git -C "$DEST" rev-parse HEAD)"
+        sha="${FETCHED_SHA}"
+        if [ -z "$sha" ] && [ -d "$DEST/.git" ]; then
+          sha="$(git -C "$DEST" rev-parse HEAD)"
+        fi
+        if [ -z "$sha" ]; then
+          echo "::error::Could not resolve Trooper SHA."
+          exit 1
+        fi
         rm -rf "$DEST/.git"
         echo "sha=$sha" >> "$GITHUB_OUTPUT"
         echo "Cloned absurdfounder/Trooper@$sha"
+        {
+          echo "### Private Trooper source"
+          echo ""
+          echo "Built from \`absurdfounder/Trooper@${sha}\`."
+        } >> "$GITHUB_STEP_SUMMARY"
