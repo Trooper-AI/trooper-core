@@ -261,6 +261,8 @@ jobs:
             exit 1
           fi
           node scripts/relocate-macos-helper.mjs "$APP"
+          # Do not ship private helper sources inside a public DMG.
+          find "$APP/Contents/Resources/helper" \( -name '*.swift' -o -name '*.mjs' -o -name '*.ts' \) -delete 2>/dev/null || true
 
       - name: Sign app bundle with hardened runtime
         if: env.SKIP_MACOS_RELEASE != 'true'

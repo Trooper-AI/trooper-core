@@ -82,15 +82,17 @@ runs:
           echo "Trying ${label} via GitHub contents API (tarball)…"
           if sha="$(resolve_sha "$token" 2>/tmp/trooper-sha.err)"; then
             if download_tarball "$token" "$sha"; then
+              rm -f "$TMP_TGZ"
               echo "sha=$sha" >> "$GITHUB_OUTPUT"
               echo "source=${label}" >> "$GITHUB_OUTPUT"
               echo "Fetched absurdfounder/Trooper@${sha} with ${label}"
               exit 0
             fi
+            rm -f "$TMP_TGZ"
             last_err="tarball download failed with ${label}"
           else
-            last_err="$(tr '\n' ' ' < /tmp/trooper-sha.err | head -c 400)"
-            echo "::warning::${label} cannot read absurdfounder/Trooper (${last_err})."
+            last_err="${label} cannot read absurdfounder/Trooper (HTTP/API error; body omitted)"
+            echo "::warning::${last_err}."
           fi
         done
 
