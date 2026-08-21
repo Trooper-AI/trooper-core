@@ -247,6 +247,8 @@ jobs:
         if: env.SKIP_MACOS_RELEASE != 'true'
         env:
           APPLE_SIGNING_IDENTITY: ${{ env.DEVELOPER_ID_APPLICATION }}
+          VITE_BUILD_ID: ${{ steps.trooper.outputs.sha }}
+          COMMIT_REF: ${{ steps.trooper.outputs.sha }}
         run: npm run tauri build -- --target universal-apple-darwin --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Place native runtime inside the Trooper framework bundle
