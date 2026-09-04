@@ -30,7 +30,7 @@ jobs:
         working-directory: private-trooper
     timeout-minutes: 90
     permissions:
-      contents: read
+      contents: write
 
     env:
       APPLE_TEAM_ID: "${{ vars.APPLE_TEAM_ID || 'L27PMU448G' }}"
@@ -203,9 +203,17 @@ jobs:
           echo "APPLE_PROVISIONING_PROFILE_SPECIFIER=$PROFILE_NAME" >> "$GITHUB_ENV"
           echo "Installed provisioning profile $PROFILE_NAME ($PROFILE_UUID)"
 
+      - name: Resolve marketing version
+        env:
+          REQUESTED: ${{ inputs.marketing_version }}
+        run: |
+          set -euo pipefail
+          VERSION="${REQUESTED:-$(node -p "require('./package.json').version")}"
+          echo "MARKETING_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Using iOS marketing version $VERSION"
+
       - name: Apply optional iOS version overrides
         env:
-          MARKETING_VERSION: ${{ inputs.marketing_version }}
           BUILD_NUMBER: ${{ inputs.build_number || github.run_number }}
         run: |
           set -euo pipefail
@@ -351,6 +359,20 @@ jobs:
             echo "App Store Connect rejected the upload." >&2
             exit 1
           fi
+
+      - name: Publish iOS version feed
+        env:
+          PUBLIC_RELEASE_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="${MARKETING_VERSION:-$(node -p "require('./package.json').version")}"
+          export GH_TOKEN="${PUBLIC_RELEASE_TOKEN:-$GITHUB_TOKEN}"
+          if [ -z "${PUBLIC_RELEASE_TOKEN:-}" ]; then
+            export REPOS="${{ github.repository }}"
+            echo "::warning::PUBLIC_RELEASE_TOKEN missing; ios-latest published only to ${{ github.repository }}."
+          fi
+          bash "$GITHUB_WORKSPACE/scripts/publish-app-version-feed.sh" ios-latest "$VERSION"
 
       - name: Upload IPA artifact
         if: always()

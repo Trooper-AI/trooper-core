@@ -249,7 +249,16 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ env.DEVELOPER_ID_APPLICATION }}
           VITE_BUILD_ID: ${{ steps.trooper.outputs.sha }}
           COMMIT_REF: ${{ steps.trooper.outputs.sha }}
-        run: npm run tauri build -- --target universal-apple-darwin --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          EXTRA_CONFIG='{}'
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY missing. DMG will still publish, but Check for updates will not move."
+            EXTRA_CONFIG='{"bundle":{"createUpdaterArtifacts":false}}'
+          fi
+          npm run tauri build -- --target universal-apple-darwin --bundles app --config "$EXTRA_CONFIG"
 
       - name: Place native runtime inside the Trooper framework bundle
         if: env.SKIP_MACOS_RELEASE != 'true'
@@ -486,16 +495,16 @@ jobs:
             --cleanup-tag \
             --yes >/dev/null 2>&1 || true
 
+          VERSION="$(node -p "require('./package.json').version")"
           gh release create macos-latest "$DMG" "$CHECKSUM" \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
-            --title "Trooper for macOS" \
-            --notes "Latest signed and notarized Trooper macOS installer. Built from absurdfounder/Trooper@${{ steps.trooper.outputs.sha }}." \
+            --title "Trooper for macOS ${VERSION}" \
+            --notes "Trooper ${VERSION}. Latest signed and notarized Trooper macOS installer. Built from absurdfounder/Trooper@${{ steps.trooper.outputs.sha }}." \
             --latest
 
       - name: Mirror DMG to install URLs (private Trooper + landing)
         if: env.SKIP_MACOS_RELEASE != 'true'
-        continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}

@@ -1,0 +1,62 @@
+name: Publish app version feed
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Feed tag to publish after a successful store/build upload
+        required: true
+        type: choice
+        options:
+          - ios-latest
+          - android-latest
+      version:
+        description: Semver to publish (defaults to private Trooper package.json)
+        required: false
+        type: string
+      trooper_ref:
+        description: Private Trooper ref used only to read package.json when version is empty
+        required: false
+        default: main
+        type: string
+
+jobs:
+  publish-feed:
+    runs-on: ubuntu-latest
+    environment: production-build
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout public workflow definitions
+        uses: actions/checkout@v5
+
+      - name: Download private Trooper source
+        if: ${{ inputs.version == '' }}
+        uses: ./.github/actions/download-private-trooper
+        with:
+          ref: ${{ inputs.trooper_ref || 'main' }}
+          token: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          fallback-token: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+
+      - name: Publish version feed
+        env:
+          PUBLIC_RELEASE_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          VERSION="${REQUESTED:-}"
+          if [ -z "$VERSION" ] && [ -f private-trooper/package.json ]; then
+            VERSION="$(node -p "require('./private-trooper/package.json').version")"
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "Version is required when package.json is not available." >&2
+            exit 1
+          fi
+          export GH_TOKEN="${PUBLIC_RELEASE_TOKEN:-$GITHUB_TOKEN}"
+          if [ -z "${PUBLIC_RELEASE_TOKEN:-}" ]; then
+            export REPOS="${{ github.repository }}"
+            echo "::warning::PUBLIC_RELEASE_TOKEN missing; ${CHANNEL} published only to ${{ github.repository }}."
+          fi
+          bash scripts/publish-app-version-feed.sh "$CHANNEL" "$VERSION"
