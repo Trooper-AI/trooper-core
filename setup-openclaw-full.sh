@@ -3765,10 +3765,16 @@ if [ "$_snapshot_build_mode" = "1" ]; then
     echo "[setup] Gateway healthz not ready after 360s; swapping anyway so baker can see real bridge status"
   fi
   kill "$LOG_SERVER_PID" 2>/dev/null || true
+  _free_progress_port "${BRIDGE_PORT}"
   sleep 1
+  echo "[setup] Port ${BRIDGE_PORT} before real bridge: $(ss -ltnp "sport = :${BRIDGE_PORT}" 2>/dev/null | tail -n +2 || true)"
   run_cmd systemctl restart openclaw-bridge
   run_cmd systemctl restart trooper-shared-node-manager
   run_cmd systemctl start openclaw-poller 2>/dev/null || true
+  sleep 2
+  echo "[setup] openclaw-bridge after restart: $(systemctl is-active openclaw-bridge 2>/dev/null || true)"
+  journalctl -u openclaw-bridge --no-pager -n 40 || true
+  echo "[setup] Port ${BRIDGE_PORT} after real bridge: $(ss -ltnp "sport = :${BRIDGE_PORT}" 2>/dev/null | tail -n +2 || true)"
 
   _snapshot_bridge_ok=0
   for i in $(seq 1 180); do
