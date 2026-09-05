@@ -2216,9 +2216,13 @@ fi
 # only when the plugin path is otherwise safe.
 # (Use node directly because the openclaw CLI is not in PATH.)
 docker compose exec -T -w /app openclaw-gateway node dist/index.js setup --workspace /home/node/.openclaw/workspace 2>/dev/null || true
-docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --repair 2>/dev/null \
-  || docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --fix 2>/dev/null \
-  || true
+if [ "${TROOPER_SNAPSHOT_BUILD:-0}" = "1" ]; then
+  echo "[setup] TROOPER_SNAPSHOT_BUILD=1 - skipping OpenClaw doctor on the placeholder org"
+else
+  docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --repair 2>/dev/null \
+    || docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --fix 2>/dev/null \
+    || true
+fi
 restore_codex_oauth_sidecars
 
 # ── [6/9] Bridge + Sandbox + Poller (PARALLEL where possible) ─────────

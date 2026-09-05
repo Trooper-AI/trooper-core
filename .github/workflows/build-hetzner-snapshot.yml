@@ -148,6 +148,7 @@ jobs:
           TROOPER_RUNTIME_BUNDLE_ENCRYPTION: ${{ steps.runtime.outputs.encryption }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SNAPSHOT_AUTO_PROMOTE: ${{ inputs.auto_promote && '1' || '0' }}
-          # Hard-pass auto-promote needs headroom past LXQt install + bridge swap.
-          HEALTH_TIMEOUT_MS: ${{ inputs.auto_promote && '1800000' || '1200000' }}
+          # From-ubuntu bakes still install LXQt after gateway pull; 20m was
+          # clipping during openclaw doctor before desktop even started.
+          HEALTH_TIMEOUT_MS: '1800000'
         run: TROOPER_RUNTIME_ENCRYPTION_PASSWORD="$RUNTIME_ENCRYPTION_PASSWORD" node server/scripts/build-snapshot.mjs
