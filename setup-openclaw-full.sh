@@ -3900,12 +3900,6 @@ SNAPGUARDSVC
   : > /etc/machine-id 2>/dev/null || true
   rm -f /var/lib/dbus/machine-id 2>/dev/null || true
   sync 2>/dev/null || true
-  if [ -n "${SSH_PUBKEY:-}" ]; then
-    install -d -m 700 /root/.ssh
-    printf '%s\n' "$SSH_PUBKEY" > /root/.ssh/authorized_keys
-    chmod 600 /root/.ssh/authorized_keys
-    echo "[setup] Snapshot build: restored managed SSH public key only"
-  fi
   echo "[setup] Snapshot image prepared for cloud-init rerun on cloned servers"
 fi
 
@@ -3944,7 +3938,14 @@ if [ "$_snapshot_build_mode" = "1" ]; then
     echo "FATAL: snapshot bridge health did not become ok after bake finalization"
     journalctl -u openclaw-bridge --no-pager -n 80 || true
     docker compose -f /opt/openclaw/docker-compose.yml logs --tail 80 openclaw-gateway 2>/dev/null || true
+    tail -n 80 /root/trooper-diagnostics/logs/openclaw-bridge.service.log 2>/dev/null || true
     exit 1
+  fi
+  if [ -n "${SSH_PUBKEY:-}" ]; then
+    install -d -m 700 /root/.ssh
+    printf '%s\n' "$SSH_PUBKEY" > /root/.ssh/authorized_keys
+    chmod 600 /root/.ssh/authorized_keys
+    echo "[setup] Snapshot build: restored managed SSH public key only"
   fi
 fi
 

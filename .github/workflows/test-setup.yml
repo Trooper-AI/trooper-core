@@ -35,6 +35,7 @@ jobs:
           grep -q 'skipping UFW reset/enable' setup-openclaw-full.sh
           grep -q 'not enabling openclaw-bridge yet' setup-openclaw-full.sh
           grep -q 'not starting LXQt desktop/VNC/playwright during bake' setup-openclaw-full.sh
+          grep -F "app.get('/files/{*filePath}'" index.mjs
           ! grep -q 'SKIP_LOCAL_DESKTOP' setup-openclaw-full.sh
 
   dry-run:

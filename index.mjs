@@ -8915,8 +8915,8 @@ app.get('/files', (req, res) => {
 });
 
 // Serve files from inside the OpenClaw container (screenshots, workspace files, etc.)
-app.get('/files/*', (req, res) => {
- const requestedPath = '/' + req.params[0]; // reconstruct absolute path
+app.get('/files/{*filePath}', (req, res) => {
+ const requestedPath = '/' + String(req.params.filePath || req.params[0] || '');
  const resolved = resolveWorkspacePathForFiles(requestedPath, { file: true });
  if (resolved.kind === 'virtual-root' || resolved.kind === 'virtual-system' || resolved.kind === 'virtual-team' || resolved.kind === 'missing-file') {
  return res.status(404).json({ error: 'File not found' });
@@ -12924,7 +12924,7 @@ app.post('/api/vault/sync', (req, res) => {
 });
 
 // Proxy: forward API calls from OpenClaw agent sandbox to Trooper backend
-app.post('/api/proxy/:path(*)', async (req, res) => {
+app.post('/api/proxy/{*path}', async (req, res) => {
  if (!MISSION_CONTROL_URL) return res.status(503).json({ error: 'No Trooper backend configured' });
  try {
  const targetUrl = `${MISSION_CONTROL_URL}/api/${req.params.path}`;
@@ -12942,7 +12942,7 @@ app.post('/api/proxy/:path(*)', async (req, res) => {
  }
 });
 
-app.patch('/api/proxy/:path(*)', async (req, res) => {
+app.patch('/api/proxy/{*path}', async (req, res) => {
  if (!MISSION_CONTROL_URL) return res.status(503).json({ error: 'No Trooper backend configured' });
  try {
  const targetUrl = `${MISSION_CONTROL_URL}/api/${req.params.path}`;
@@ -12960,7 +12960,7 @@ app.patch('/api/proxy/:path(*)', async (req, res) => {
  }
 });
 
-app.get('/api/proxy/:path(*)', async (req, res) => {
+app.get('/api/proxy/{*path}', async (req, res) => {
  if (!MISSION_CONTROL_URL) return res.status(503).json({ error: 'No Trooper backend configured' });
  try {
  const targetUrl = `${MISSION_CONTROL_URL}/api/${req.params.path}`;
@@ -13957,7 +13957,7 @@ app.get('/skills/installed', (req, res) => {
 // This proxy allows the Trooper server to reach it via the bridge (port 3002)
 // even when gatewayUrl (Caddy) is not set.
 
-app.all('/desktop-api/*', async (req, res) => {
+app.all('/desktop-api/{*subpath}', async (req, res) => {
  const path = req.path.replace('/desktop-api', '');
  try {
  const fetchOpts = {

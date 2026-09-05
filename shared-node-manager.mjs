@@ -258,7 +258,7 @@ app.post('/runtime/workspaces/:slotId/pause', requireManagerAuth, async (req, re
   }
 });
 
-app.all('/runtime/workspaces/:slotId/proxy/*', async (req, res) => {
+app.all('/runtime/workspaces/:slotId/proxy/{*suffix}', async (req, res) => {
   const registry = readSlotRegistry(REGISTRY_PATH);
   const slotId = normalizeWorkspaceSlotId(req.params.slotId);
   const slot = registry.slots?.[slotId];
