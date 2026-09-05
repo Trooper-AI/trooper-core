@@ -3747,7 +3747,23 @@ touch /tmp/openclaw-setup-complete
 touch /opt/openclaw-bridge/.setup-complete
 
 if [ "$_snapshot_build_mode" = "1" ]; then
-  echo "[setup] Snapshot build: swapping installer log server for real bridge smoke endpoint..."
+  echo "[setup] Snapshot build: waiting for gateway :${GATEWAY_PORT} before swapping installer log server..."
+  _gateway_ready=0
+  for i in $(seq 1 180); do
+    if curl -sf --max-time 3 "http://127.0.0.1:${GATEWAY_PORT}/healthz" >/dev/null 2>&1 \
+      || curl -sf --max-time 3 "http://127.0.0.1:${GATEWAY_PORT}/health" >/dev/null 2>&1; then
+      echo "[setup] Gateway ready after $((i * 2))s; swapping installer log server for real bridge"
+      _gateway_ready=1
+      break
+    fi
+    if [ $((i % 15)) -eq 0 ]; then
+      echo "[setup] Waiting for gateway healthz (try $i)"
+    fi
+    sleep 2
+  done
+  if [ "$_gateway_ready" -eq 0 ]; then
+    echo "[setup] Gateway healthz not ready after 360s; swapping anyway so baker can see real bridge status"
+  fi
   kill "$LOG_SERVER_PID" 2>/dev/null || true
   sleep 1
   run_cmd systemctl restart openclaw-bridge
@@ -3755,10 +3771,13 @@ if [ "$_snapshot_build_mode" = "1" ]; then
   run_cmd systemctl start openclaw-poller 2>/dev/null || true
 
   _snapshot_bridge_ok=0
-  for i in $(seq 1 90); do
+  for i in $(seq 1 180); do
     _snapshot_health="$(curl -sf --max-time 3 http://127.0.0.1:${BRIDGE_PORT}/health 2>/dev/null || true)"
-    if printf '%s' "$_snapshot_health" | grep -q '"status"[[:space:]]*:[[:space:]]*"ok"'; then
-      echo "[setup] Snapshot bridge health OK after $((i * 2))s"
+    # Last green bake observed recovering then ok on the real bridge. Do not
+    # replace a bound bridge with the installer stub just because websocket
+    # has not flipped to ok yet — that left CI polling fake installing for 30min.
+    if printf '%s' "$_snapshot_health" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"(ok|recovering|degraded)"'; then
+      echo "[setup] Snapshot bridge health OK after $((i * 2))s: ${_snapshot_health}"
       _snapshot_bridge_ok=1
       break
     fi
