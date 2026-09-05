@@ -3588,7 +3588,12 @@ if [ ! -f /opt/trooper-org-runtime/server/org-runtime/index.js ]; then
 fi
 
 run_cmd systemctl daemon-reload
-run_cmd systemctl enable openclaw-docker openclaw-bridge trooper-shared-node-manager trooper-org-runtime trooper-server openclaw-poller openclaw-vnc trooper-desktop trooper-desktop-api trooper-playwright
+if [ "${TROOPER_SNAPSHOT_BUILD:-0}" = "1" ]; then
+ run_cmd systemctl enable openclaw-docker trooper-shared-node-manager trooper-org-runtime trooper-server openclaw-poller openclaw-vnc trooper-desktop trooper-desktop-api trooper-playwright
+ echo "[setup] Snapshot build: not enabling openclaw-bridge yet (installer still owns :${BRIDGE_PORT})"
+else
+ run_cmd systemctl enable openclaw-docker openclaw-bridge trooper-shared-node-manager trooper-org-runtime trooper-server openclaw-poller openclaw-vnc trooper-desktop trooper-desktop-api trooper-playwright
+fi
 if [ -f /etc/systemd/system/openclaw-updater.timer ]; then
  run_cmd systemctl enable openclaw-updater.timer
 fi
@@ -3646,14 +3651,16 @@ run_cmd systemctl start trooper-org-runtime
 run_cmd systemctl start trooper-server
 if [ "$_snapshot_build_mode" = "1" ]; then
  echo "[setup] Snapshot build: deferring poller until final bridge smoke handoff"
+ echo "[setup] Snapshot build: not starting LXQt desktop/VNC/playwright during bake (units stay enabled for customer boot)"
 else
  run_cmd systemctl start openclaw-poller
+ run_cmd systemctl start openclaw-vnc
+ run_cmd systemctl start trooper-desktop
+ run_cmd systemctl start trooper-desktop-api
+ run_cmd systemctl start trooper-playwright
 fi
-run_cmd systemctl start openclaw-vnc
-run_cmd systemctl start trooper-desktop
-run_cmd systemctl start trooper-desktop-api
-run_cmd systemctl start trooper-playwright
 run_cmd systemctl restart caddy 2>/dev/null || true
+_ensure_installer_log_server || true
 
 # ── Security hardening ──
 dlog "Configuring firewall and permissions..."
@@ -3661,7 +3668,14 @@ dlog "Configuring firewall and permissions..."
 # Firewall: only allow SSH (22), HTTP (80), HTTPS (443) from the internet.
 # All other ports (3002 bridge, 5999 VNC, 6080 noVNC, 18789 gateway, 4567 desktop API)
 # are blocked from external access — only accessible via localhost or Caddy reverse proxy.
-if command -v ufw &> /dev/null; then
+# Snapshot bakes skip `ufw --force reset`: bake #68 went dark on public :3002 ~30s
+# after gateway-alive, which is this block, while localhost setup kept going.
+# Hetzner cloud firewall already allows 22/80/443/3002; customer first-boot
+# (`boot.sh`) enables UFW without a reset.
+if [ "$_snapshot_build_mode" = "1" ]; then
+  echo "[setup] Snapshot build: skipping UFW reset/enable so baker probes of :${BRIDGE_PORT} stay reachable (Hetzner cloud firewall + first-boot boot.sh apply host firewall later)"
+  _ensure_installer_log_server || true
+elif command -v ufw &> /dev/null; then
   ufw --force reset >/dev/null 2>&1
   ufw default deny incoming >/dev/null 2>&1
   ufw default allow outgoing >/dev/null 2>&1
@@ -3671,6 +3685,7 @@ if command -v ufw &> /dev/null; then
   ufw allow ${BRIDGE_PORT}/tcp >/dev/null 2>&1  # Bridge API (has its own auth via BRIDGE_AUTH_TOKEN)
   ufw --force enable >/dev/null 2>&1
   echo "Firewall: enabled (22, 80, 443, ${BRIDGE_PORT} open; VNC/gateway/desktop blocked)"
+  ufw status verbose 2>/dev/null | head -40 || true
 else
   apt-get install -y -qq ufw >/dev/null 2>&1
   ufw --force reset >/dev/null 2>&1
@@ -3885,6 +3900,12 @@ SNAPGUARDSVC
   : > /etc/machine-id 2>/dev/null || true
   rm -f /var/lib/dbus/machine-id 2>/dev/null || true
   sync 2>/dev/null || true
+  if [ -n "${SSH_PUBKEY:-}" ]; then
+    install -d -m 700 /root/.ssh
+    printf '%s\n' "$SSH_PUBKEY" > /root/.ssh/authorized_keys
+    chmod 600 /root/.ssh/authorized_keys
+    echo "[setup] Snapshot build: restored managed SSH public key only"
+  fi
   echo "[setup] Snapshot image prepared for cloud-init rerun on cloned servers"
 fi
 
@@ -3900,6 +3921,7 @@ if [ "$_snapshot_build_mode" = "1" ]; then
   rm -f /etc/systemd/system/trooper-installer-health.service
   systemctl daemon-reload >/dev/null 2>&1 || true
   sleep 1
+  run_cmd systemctl enable openclaw-bridge
   run_cmd systemctl restart openclaw-bridge
   run_cmd systemctl restart trooper-shared-node-manager
   run_cmd systemctl start openclaw-poller 2>/dev/null || true
