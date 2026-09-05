@@ -236,12 +236,17 @@ fi
 # race the temporary progress server or final service startup.
 _free_progress_port() {
   local port="$1"
+  local old_errexit
+  old_errexit=$(set +o | grep errexit || true)
+  set +e
   if ! command -v ss >/dev/null 2>&1; then
+    eval "$old_errexit"
     return 0
   fi
   local pids
   pids=$(ss -ltnp "sport = :${port}" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u)
   if [ -z "$pids" ]; then
+    eval "$old_errexit"
     return 0
   fi
   for pid in $pids; do
@@ -256,6 +261,31 @@ _free_progress_port() {
     echo "[setup] Force-stopping stale process on port ${port} (pid ${pid})"
     kill -9 "$pid" 2>/dev/null || true
   done
+  eval "$old_errexit"
+}
+
+_start_installer_log_server() {
+  nohup python3 /tmp/trooper-installer-log-server.py >/tmp/trooper-installer-log-server.out 2>&1 </dev/null &
+  LOG_SERVER_PID=$!
+  echo "$LOG_SERVER_PID" > /tmp/trooper-installer-log-server.pid
+  disown "$LOG_SERVER_PID" 2>/dev/null || true
+  echo "Log server started on :${BRIDGE_PORT} (pid $LOG_SERVER_PID)"
+}
+
+_ensure_installer_log_server() {
+  local old_errexit
+  old_errexit=$(set +o | grep errexit || true)
+  set +e
+  if curl -sf --max-time 2 "http://127.0.0.1:${BRIDGE_PORT}/health" >/dev/null 2>&1; then
+    eval "$old_errexit"
+    return 0
+  fi
+  echo "[setup] installer /health on :${BRIDGE_PORT} died; restarting log server"
+  _free_progress_port "${BRIDGE_PORT}"
+  _start_installer_log_server
+  sleep 1
+  curl -sf --max-time 2 "http://127.0.0.1:${BRIDGE_PORT}/health" >/dev/null 2>&1
+  eval "$old_errexit"
 }
 
 if [ "$FROM_SNAPSHOT" = "1" ]; then
@@ -318,25 +348,68 @@ except OSError as e:
   sys.exit(0)
 s.serve_forever()
 PY
-python3 /tmp/trooper-installer-log-server.py &
-LOG_SERVER_PID=$!
-echo "$LOG_SERVER_PID" > /tmp/trooper-installer-log-server.pid
-echo "Log server started on :${BRIDGE_PORT} (pid $LOG_SERVER_PID)"
-# Green bake kept installer /health up through LXQt. This run died when snapd
-# restarted and nothing put :3002 back until the real-bridge swap.
+_start_installer_log_server
+# Green bake kept installer /health up through LXQt. Apt later reinstalls
+# python3 (the process on :3002) and set -e used to kill this watchdog on ss.
 if [ "${TROOPER_SNAPSHOT_BUILD:-0}" = "1" ]; then
   (
+    set +e
     while [ ! -f /tmp/openclaw-setup-complete ]; do
-      sleep 10
+      sleep 5
       [ -f /tmp/openclaw-setup-complete ] && break
-      curl -sf --max-time 2 "http://127.0.0.1:${BRIDGE_PORT}/health" >/dev/null 2>&1 && continue
-      echo "[setup] installer /health on :${BRIDGE_PORT} died; restarting log server"
-      _free_progress_port "${BRIDGE_PORT}"
-      python3 /tmp/trooper-installer-log-server.py &
-      echo $! > /tmp/trooper-installer-log-server.pid
+      _ensure_installer_log_server
     done
   ) &
   echo $! > /tmp/trooper-installer-log-watchdog.pid
+  disown 2>/dev/null || true
+fi
+
+if [ "${TROOPER_INSTALLER_HEALTH_SELFTEST:-0}" = "1" ]; then
+  echo "[selftest] installer /health before python3 reinstall: $(curl -sf --max-time 2 http://127.0.0.1:${BRIDGE_PORT}/health || echo down)"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq --reinstall python3 python3-venv python3-pip || true
+  echo "[selftest] reinstalled python3; waiting for installer /health"
+  _ok=0
+  for i in $(seq 1 30); do
+    if curl -sf --max-time 2 "http://127.0.0.1:${BRIDGE_PORT}/health" 2>/dev/null | grep -q installing; then
+      echo "[selftest] PASS: installer /health recovered after ${i}s"
+      _ok=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$_ok" -ne 1 ]; then
+    echo "[selftest] FAIL: installer /health did not recover after python3 reinstall"
+    ss -ltnp "sport = :${BRIDGE_PORT}" 2>/dev/null || true
+    cat /tmp/trooper-installer-log-server.out 2>/dev/null || true
+    exit 1
+  fi
+  touch /tmp/openclaw-setup-complete
+  if [ -f /tmp/trooper-installer-log-watchdog.pid ]; then
+    kill "$(cat /tmp/trooper-installer-log-watchdog.pid)" 2>/dev/null || true
+  fi
+  if [ -f /tmp/trooper-installer-log-server.pid ]; then
+    kill "$(cat /tmp/trooper-installer-log-server.pid)" 2>/dev/null || true
+  fi
+  _free_progress_port "${BRIDGE_PORT}"
+  python3 -c "import http.server
+class H(http.server.BaseHTTPRequestHandler):
+  def do_GET(self):
+    if self.path=='/health':
+      self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
+      self.wfile.write(b'{\"status\":\"recovering\"}')
+    else:
+      self.send_response(404); self.end_headers()
+  def log_message(self,*a): pass
+http.server.HTTPServer(('0.0.0.0',${BRIDGE_PORT}),H).serve_forever()" &
+  sleep 1
+  if curl -sf --max-time 2 "http://127.0.0.1:${BRIDGE_PORT}/health" | grep -q recovering; then
+    echo "[selftest] PASS: swap reached recovering"
+    exit 0
+  fi
+  echo "[selftest] FAIL: swap did not serve recovering"
+  exit 1
 fi
 
 dlog "Starting server setup..." "workspace"
@@ -2326,6 +2399,9 @@ if [ "$FROM_SNAPSHOT" != "1" ]; then
 dlog "Installing noVNC + websockify for live browser streaming..."
 run_cmd apt-get install -y -qq --no-install-recommends novnc websockify ffmpeg 2>/dev/null || true
 echo "[setup] noVNC + websockify installed for VNC live view"
+if [ "${TROOPER_SNAPSHOT_BUILD:-0}" = "1" ]; then
+  _ensure_installer_log_server || true
+fi
 
 # Custom embedded VNC page — no toolbar, no CtrlAltDel, clean iframe embed
 cat > /usr/share/novnc/vnc_embed.html << 'VNCEMBED'
@@ -2446,16 +2522,16 @@ run_cmd apt-get install -y -qq --no-install-recommends \
  lxqt-core lxqt-panel lxqt-runner \
  pcmanfm-qt feh papirus-icon-theme \
  fonts-dejavu fonts-liberation \
- xdg-utils wget \
- python3 python3-venv python3-pip 2>/dev/null || true
-# Snap Firefox restarts snapd. Green /health=ok still had browser=fetch failed;
-# the last fail went dark on :3002 at that snapd restart and never swapped.
+ xdg-utils wget 2>/dev/null || true
+# python3 is already on Ubuntu and serves installer /health on :3002. Reinstalling
+# it here kills that process; the watchdog restarts it, but skip the package.
+echo "[setup] LXQt desktop packages installed"
 if [ "${TROOPER_SNAPSHOT_BUILD:-0}" = "1" ]; then
   echo "[setup] TROOPER_SNAPSHOT_BUILD=1 - skipping snap firefox (avoids snapd restart during bake)"
+  _ensure_installer_log_server || true
 else
   run_cmd snap install firefox 2>/dev/null || true
 fi
-echo "[setup] LXQt desktop packages installed"
 fi # end FROM_SNAPSHOT != 1 (noVNC + desktop packages)
 
 # ── Pre-seed ALL desktop configs BEFORE anything starts ──

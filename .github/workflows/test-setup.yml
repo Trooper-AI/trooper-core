@@ -28,8 +28,10 @@ jobs:
       - name: Bash syntax check
         run: |
           bash -n setup-openclaw-full.sh
-          grep -q 'SKIP_LOCAL_DESKTOP' setup-openclaw-full.sh
-          grep -q 'skipping LXQt/noVNC/desktop packages' setup-openclaw-full.sh
+          grep -q '_ensure_installer_log_server' setup-openclaw-full.sh
+          grep -q 'TROOPER_SNAPSHOT_BUILD=1 - skipping snap firefox' setup-openclaw-full.sh
+          grep -q 'lxqt-core lxqt-panel lxqt-runner' setup-openclaw-full.sh
+          ! grep -q 'SKIP_LOCAL_DESKTOP' setup-openclaw-full.sh
 
   dry-run:
     runs-on: ubuntu-latest
