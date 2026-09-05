@@ -3777,7 +3777,9 @@ if [ "$_snapshot_build_mode" = "1" ]; then
   echo "[setup] Port ${BRIDGE_PORT} after real bridge: $(ss -ltnp "sport = :${BRIDGE_PORT}" 2>/dev/null | tail -n +2 || true)"
 
   _snapshot_bridge_ok=0
-  for i in $(seq 1 180); do
+  # Baker fail-fasts after 4 minutes of a dark :3002. If the real bridge does
+  # not bind, restore the installer stub well before that so CI can read FATAL.
+  for i in $(seq 1 60); do
     _snapshot_health="$(curl -sf --max-time 3 http://127.0.0.1:${BRIDGE_PORT}/health 2>/dev/null || true)"
     # Last green bake observed recovering then ok on the real bridge. Do not
     # replace a bound bridge with the installer stub just because websocket
@@ -3794,9 +3796,9 @@ if [ "$_snapshot_build_mode" = "1" ]; then
     sleep 2
   done
   if [ "$_snapshot_bridge_ok" -eq 0 ]; then
+    journalctl -u openclaw-bridge --no-pager -n 40 || true
+    docker compose -f /opt/openclaw/docker-compose.yml logs --tail 20 openclaw-gateway 2>/dev/null || true
     echo "FATAL: snapshot bridge health did not become ok after bake finalization"
-    journalctl -u openclaw-bridge --no-pager -n 80 || true
-    docker compose -f /opt/openclaw/docker-compose.yml logs --tail 80 openclaw-gateway 2>/dev/null || true
     echo "[setup] Restoring installer log server on :${BRIDGE_PORT} so CI can read FATAL diagnostics"
     python3 -c "
 import http.server
