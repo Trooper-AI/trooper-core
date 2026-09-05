@@ -28,8 +28,8 @@ jobs:
   build-snapshot:
     name: Build and validate Hetzner snapshot
     runs-on: ubuntu-latest
-    # Auto-promote hard-pass waits for real bridge /health=ok after the full
-    # LXQt/desktop bake; 40m was clipping ~1m before finalization finished.
+    # Snapshot bake is headless (no LXQt/noVNC). Auto-promote still waits for
+    # /health=ok after fast-boot artifacts; 40m was clipping ~1m before done.
     timeout-minutes: 55
     environment: production-build
     steps:

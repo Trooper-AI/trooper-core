@@ -160,6 +160,12 @@ PLATFORM_API_URL="${API_URL:-https://trooper-production.up.railway.app}"
 
 # Detect if booting from a pre-built snapshot (skip heavy installs)
 FROM_SNAPSHOT="${TROOPER_FROM_SNAPSHOT:-0}"
+# Golden-image bakes are still FROM_SNAPSHOT=0 (ubuntu from scratch) but must
+# not install LXQt/noVNC. Customer boot already treats default orgs as headless.
+SKIP_LOCAL_DESKTOP=0
+if [ "$FROM_SNAPSHOT" = "1" ] || [ "${TROOPER_SNAPSHOT_BUILD:-0}" = "1" ]; then
+  SKIP_LOCAL_DESKTOP=1
+fi
 
 # Dry-run mode: print commands instead of executing them
 DRY_RUN="${DRY_RUN:-0}"
@@ -2307,7 +2313,7 @@ timeout 120 npm install -g librarium 2>&1 || {
  dlog "librarium install failed (non-fatal, deep research will be unavailable)"
 }
 
-if [ "$FROM_SNAPSHOT" != "1" ]; then
+if [ "$SKIP_LOCAL_DESKTOP" != "1" ]; then
 # noVNC + websockify — enables live browser streaming for all orgs
 dlog "Installing noVNC + websockify for live browser streaming..."
 run_cmd apt-get install -y -qq --no-install-recommends novnc websockify ffmpeg 2>/dev/null || true
@@ -2437,7 +2443,9 @@ run_cmd apt-get install -y -qq --no-install-recommends \
 # Install snap Firefox (Ubuntu 24.04 doesn't have firefox-esr deb)
 run_cmd snap install firefox 2>/dev/null || true
 echo "[setup] LXQt desktop packages installed"
-fi # end FROM_SNAPSHOT != 1 (noVNC + desktop packages)
+else
+  echo "[setup] skipping LXQt/noVNC/desktop packages (headless snapshot or FROM_SNAPSHOT=1)"
+fi # end SKIP_LOCAL_DESKTOP (noVNC + desktop packages)
 
 # ── Pre-seed ALL desktop configs BEFORE anything starts ──
 # These must exist before trooper-desktop-start runs, otherwise
@@ -2836,12 +2844,14 @@ AGENTDAEMON
 fi
 
 # Install Playwright for VPS browser server
-if [ "$FROM_SNAPSHOT" != "1" ]; then
+if [ "$SKIP_LOCAL_DESKTOP" != "1" ]; then
 cd /opt/trooper-desktop-api
 npm init -y 2>/dev/null
 npm install playwright 2>/dev/null || true
 echo "[setup] Playwright installed"
-fi # end FROM_SNAPSHOT != 1 (Playwright)
+else
+  echo "[setup] skipping Playwright (headless snapshot or FROM_SNAPSHOT=1)"
+fi # end SKIP_LOCAL_DESKTOP (Playwright)
 
 # Playwright browser server — launches Chromium on :1, exposes WS for Render backend
 cat > /opt/trooper-desktop-api/playwright-server.mjs << 'PWEOF'
@@ -2880,6 +2890,7 @@ startServer();
 PWEOF
 echo "[setup] Playwright server script written"
 
+if [ "$SKIP_LOCAL_DESKTOP" != "1" ]; then
 # Download wallpaper
 mkdir -p /usr/local/share
 wget -q 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=1280&h=800&fit=crop' \
@@ -2894,6 +2905,7 @@ sed -i '/<head>/a <style>#noVNC_control_bar_anchor { display: none !important; }
  /usr/share/novnc/vnc.html 2>/dev/null || true
 
 echo "[setup] Desktop UI configured (wallpaper, icons, menu, noVNC sidebar hidden)"
+fi
 
 # Wait for parallel tasks to complete
 dlog "Waiting for bridge npm install..."
@@ -3421,7 +3433,10 @@ if [ ! -f /opt/trooper-org-runtime/server/org-runtime/index.js ]; then
 fi
 
 run_cmd systemctl daemon-reload
-run_cmd systemctl enable openclaw-docker openclaw-bridge trooper-shared-node-manager trooper-org-runtime trooper-server openclaw-poller openclaw-vnc trooper-desktop trooper-desktop-api trooper-playwright
+run_cmd systemctl enable openclaw-docker openclaw-bridge trooper-shared-node-manager trooper-org-runtime trooper-server openclaw-poller
+if [ "$SKIP_LOCAL_DESKTOP" != "1" ]; then
+  run_cmd systemctl enable openclaw-vnc trooper-desktop trooper-desktop-api trooper-playwright
+fi
 if [ -f /etc/systemd/system/openclaw-updater.timer ]; then
  run_cmd systemctl enable openclaw-updater.timer
 fi
@@ -3482,10 +3497,14 @@ if [ "$_snapshot_build_mode" = "1" ]; then
 else
  run_cmd systemctl start openclaw-poller
 fi
+if [ "$SKIP_LOCAL_DESKTOP" != "1" ]; then
 run_cmd systemctl start openclaw-vnc
 run_cmd systemctl start trooper-desktop
 run_cmd systemctl start trooper-desktop-api
 run_cmd systemctl start trooper-playwright
+else
+  echo "[setup] skipping local LXQt/noVNC/desktop-api/playwright start"
+fi
 run_cmd systemctl restart caddy 2>/dev/null || true
 
 # ── Security hardening ──
