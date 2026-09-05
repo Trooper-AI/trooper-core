@@ -18981,10 +18981,6 @@ server.listen(PORT, '0.0.0.0', () => {
  * the org control plane (*.crabhq.com) on a permanent 502 Host Error.
  */
 function startGatewayProcessWatchdog({ intervalMs = 45_000, initialDelayMs = 25_000 } = {}) {
- if (process.env.TROOPER_SNAPSHOT_BUILD === '1' || process.env.ORG_ID === 'snapshot-builder') {
-  console.log('[gateway-watchdog] skipped during snapshot bake');
-  return;
- }
  if (globalThis.__trooperGatewayWatchdogStarted) return;
  globalThis.__trooperGatewayWatchdogStarted = true;
  let consecutiveFailures = 0;

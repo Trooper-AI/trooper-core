@@ -160,12 +160,6 @@ PLATFORM_API_URL="${API_URL:-https://trooper-production.up.railway.app}"
 
 # Detect if booting from a pre-built snapshot (skip heavy installs)
 FROM_SNAPSHOT="${TROOPER_FROM_SNAPSHOT:-0}"
-# Golden-image bakes are still FROM_SNAPSHOT=0 (ubuntu from scratch) but must
-# not install LXQt/noVNC. Customer boot already treats default orgs as headless.
-SKIP_LOCAL_DESKTOP=0
-if [ "$FROM_SNAPSHOT" = "1" ] || [ "${TROOPER_SNAPSHOT_BUILD:-0}" = "1" ]; then
-  SKIP_LOCAL_DESKTOP=1
-fi
 
 # Dry-run mode: print commands instead of executing them
 DRY_RUN="${DRY_RUN:-0}"
@@ -2222,13 +2216,9 @@ fi
 # only when the plugin path is otherwise safe.
 # (Use node directly because the openclaw CLI is not in PATH.)
 docker compose exec -T -w /app openclaw-gateway node dist/index.js setup --workspace /home/node/.openclaw/workspace 2>/dev/null || true
-if [ "${TROOPER_SNAPSHOT_BUILD:-0}" = "1" ]; then
-  echo "[setup] TROOPER_SNAPSHOT_BUILD=1 - skipping OpenClaw doctor on the placeholder org"
-else
-  docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --repair 2>/dev/null \
-    || docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --fix 2>/dev/null \
-    || true
-fi
+docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --repair 2>/dev/null \
+  || docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --fix 2>/dev/null \
+  || true
 restore_codex_oauth_sidecars
 
 # ── [6/9] Bridge + Sandbox + Poller (PARALLEL where possible) ─────────
@@ -2313,7 +2303,7 @@ timeout 120 npm install -g librarium 2>&1 || {
  dlog "librarium install failed (non-fatal, deep research will be unavailable)"
 }
 
-if [ "$SKIP_LOCAL_DESKTOP" != "1" ]; then
+if [ "$FROM_SNAPSHOT" != "1" ]; then
 # noVNC + websockify — enables live browser streaming for all orgs
 dlog "Installing noVNC + websockify for live browser streaming..."
 run_cmd apt-get install -y -qq --no-install-recommends novnc websockify ffmpeg 2>/dev/null || true
@@ -2443,9 +2433,7 @@ run_cmd apt-get install -y -qq --no-install-recommends \
 # Install snap Firefox (Ubuntu 24.04 doesn't have firefox-esr deb)
 run_cmd snap install firefox 2>/dev/null || true
 echo "[setup] LXQt desktop packages installed"
-else
-  echo "[setup] skipping LXQt/noVNC/desktop packages (headless snapshot or FROM_SNAPSHOT=1)"
-fi # end SKIP_LOCAL_DESKTOP (noVNC + desktop packages)
+fi # end FROM_SNAPSHOT != 1 (noVNC + desktop packages)
 
 # ── Pre-seed ALL desktop configs BEFORE anything starts ──
 # These must exist before trooper-desktop-start runs, otherwise
@@ -2844,14 +2832,12 @@ AGENTDAEMON
 fi
 
 # Install Playwright for VPS browser server
-if [ "$SKIP_LOCAL_DESKTOP" != "1" ]; then
+if [ "$FROM_SNAPSHOT" != "1" ]; then
 cd /opt/trooper-desktop-api
 npm init -y 2>/dev/null
 npm install playwright 2>/dev/null || true
 echo "[setup] Playwright installed"
-else
-  echo "[setup] skipping Playwright (headless snapshot or FROM_SNAPSHOT=1)"
-fi # end SKIP_LOCAL_DESKTOP (Playwright)
+fi # end FROM_SNAPSHOT != 1 (Playwright)
 
 # Playwright browser server — launches Chromium on :1, exposes WS for Render backend
 cat > /opt/trooper-desktop-api/playwright-server.mjs << 'PWEOF'
@@ -2890,7 +2876,6 @@ startServer();
 PWEOF
 echo "[setup] Playwright server script written"
 
-if [ "$SKIP_LOCAL_DESKTOP" != "1" ]; then
 # Download wallpaper
 mkdir -p /usr/local/share
 wget -q 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=1280&h=800&fit=crop' \
@@ -2905,7 +2890,6 @@ sed -i '/<head>/a <style>#noVNC_control_bar_anchor { display: none !important; }
  /usr/share/novnc/vnc.html 2>/dev/null || true
 
 echo "[setup] Desktop UI configured (wallpaper, icons, menu, noVNC sidebar hidden)"
-fi
 
 # Wait for parallel tasks to complete
 dlog "Waiting for bridge npm install..."
@@ -3433,10 +3417,7 @@ if [ ! -f /opt/trooper-org-runtime/server/org-runtime/index.js ]; then
 fi
 
 run_cmd systemctl daemon-reload
-run_cmd systemctl enable openclaw-docker openclaw-bridge trooper-shared-node-manager trooper-org-runtime trooper-server openclaw-poller
-if [ "$SKIP_LOCAL_DESKTOP" != "1" ]; then
-  run_cmd systemctl enable openclaw-vnc trooper-desktop trooper-desktop-api trooper-playwright
-fi
+run_cmd systemctl enable openclaw-docker openclaw-bridge trooper-shared-node-manager trooper-org-runtime trooper-server openclaw-poller openclaw-vnc trooper-desktop trooper-desktop-api trooper-playwright
 if [ -f /etc/systemd/system/openclaw-updater.timer ]; then
  run_cmd systemctl enable openclaw-updater.timer
 fi
@@ -3497,14 +3478,10 @@ if [ "$_snapshot_build_mode" = "1" ]; then
 else
  run_cmd systemctl start openclaw-poller
 fi
-if [ "$SKIP_LOCAL_DESKTOP" != "1" ]; then
 run_cmd systemctl start openclaw-vnc
 run_cmd systemctl start trooper-desktop
 run_cmd systemctl start trooper-desktop-api
 run_cmd systemctl start trooper-playwright
-else
-  echo "[setup] skipping local LXQt/noVNC/desktop-api/playwright start"
-fi
 run_cmd systemctl restart caddy 2>/dev/null || true
 
 # ── Security hardening ──
@@ -3747,45 +3724,18 @@ touch /tmp/openclaw-setup-complete
 touch /opt/openclaw-bridge/.setup-complete
 
 if [ "$_snapshot_build_mode" = "1" ]; then
-  echo "[setup] Snapshot build: waiting for gateway :${GATEWAY_PORT} before swapping installer log server..."
-  _gateway_ready=0
-  for i in $(seq 1 180); do
-    if curl -sf --max-time 3 "http://127.0.0.1:${GATEWAY_PORT}/healthz" >/dev/null 2>&1 \
-      || curl -sf --max-time 3 "http://127.0.0.1:${GATEWAY_PORT}/health" >/dev/null 2>&1; then
-      echo "[setup] Gateway ready after $((i * 2))s; swapping installer log server for real bridge"
-      _gateway_ready=1
-      break
-    fi
-    if [ $((i % 15)) -eq 0 ]; then
-      echo "[setup] Waiting for gateway healthz (try $i)"
-    fi
-    sleep 2
-  done
-  if [ "$_gateway_ready" -eq 0 ]; then
-    echo "[setup] Gateway healthz not ready after 360s; swapping anyway so baker can see real bridge status"
-  fi
+  echo "[setup] Snapshot build: swapping installer log server for real bridge smoke endpoint..."
   kill "$LOG_SERVER_PID" 2>/dev/null || true
-  _free_progress_port "${BRIDGE_PORT}"
   sleep 1
-  echo "[setup] Port ${BRIDGE_PORT} before real bridge: $(ss -ltnp "sport = :${BRIDGE_PORT}" 2>/dev/null | tail -n +2 || true)"
   run_cmd systemctl restart openclaw-bridge
   run_cmd systemctl restart trooper-shared-node-manager
   run_cmd systemctl start openclaw-poller 2>/dev/null || true
-  sleep 2
-  echo "[setup] openclaw-bridge after restart: $(systemctl is-active openclaw-bridge 2>/dev/null || true)"
-  journalctl -u openclaw-bridge --no-pager -n 40 || true
-  echo "[setup] Port ${BRIDGE_PORT} after real bridge: $(ss -ltnp "sport = :${BRIDGE_PORT}" 2>/dev/null | tail -n +2 || true)"
 
   _snapshot_bridge_ok=0
-  # Baker fail-fasts after 4 minutes of a dark :3002. If the real bridge does
-  # not bind, restore the installer stub well before that so CI can read FATAL.
-  for i in $(seq 1 60); do
+  for i in $(seq 1 90); do
     _snapshot_health="$(curl -sf --max-time 3 http://127.0.0.1:${BRIDGE_PORT}/health 2>/dev/null || true)"
-    # Last green bake observed recovering then ok on the real bridge. Do not
-    # replace a bound bridge with the installer stub just because websocket
-    # has not flipped to ok yet — that left CI polling fake installing for 30min.
-    if printf '%s' "$_snapshot_health" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"(ok|recovering|degraded)"'; then
-      echo "[setup] Snapshot bridge health OK after $((i * 2))s: ${_snapshot_health}"
+    if printf '%s' "$_snapshot_health" | grep -q '"status"[[:space:]]*:[[:space:]]*"ok"'; then
+      echo "[setup] Snapshot bridge health OK after $((i * 2))s"
       _snapshot_bridge_ok=1
       break
     fi
@@ -3796,29 +3746,9 @@ if [ "$_snapshot_build_mode" = "1" ]; then
     sleep 2
   done
   if [ "$_snapshot_bridge_ok" -eq 0 ]; then
-    journalctl -u openclaw-bridge --no-pager -n 40 || true
-    docker compose -f /opt/openclaw/docker-compose.yml logs --tail 20 openclaw-gateway 2>/dev/null || true
     echo "FATAL: snapshot bridge health did not become ok after bake finalization"
-    echo "[setup] Restoring installer log server on :${BRIDGE_PORT} so CI can read FATAL diagnostics"
-    python3 -c "
-import http.server
-class H(http.server.BaseHTTPRequestHandler):
-  def do_GET(self):
-    if self.path=='/health':
-      self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
-      self.wfile.write(b'{\"status\":\"installing\",\"reason\":\"bridge_swap_failed\"}')
-    elif self.path in ('/deploy-logs-raw','/bootstrap-log','/deploy-logs'):
-      self.send_response(200); self.send_header('Content-Type','text/plain; charset=utf-8'); self.end_headers()
-      try:
-        with open('${DEPLOY_RAW_LOG}') as f: self.wfile.write(f.read().encode())
-      except Exception:
-        self.wfile.write(b'')
-    else:
-      self.send_response(404); self.end_headers()
-  def log_message(self,*a): pass
-http.server.HTTPServer(('0.0.0.0',${BRIDGE_PORT}),H).serve_forever()
-" &
-    sleep 2
+    journalctl -u openclaw-bridge --no-pager -n 80 || true
+    docker compose -f /opt/openclaw/docker-compose.yml logs --tail 80 openclaw-gateway 2>/dev/null || true
     exit 1
   fi
 fi

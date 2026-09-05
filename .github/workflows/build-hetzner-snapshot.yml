@@ -28,8 +28,8 @@ jobs:
   build-snapshot:
     name: Build and validate Hetzner snapshot
     runs-on: ubuntu-latest
-    # Snapshot bake is headless (no LXQt/noVNC). Auto-promote still waits for
-    # /health=ok after fast-boot artifacts; 40m was clipping ~1m before done.
+    # Auto-promote hard-pass waits for real bridge /health=ok after the full
+    # LXQt/desktop bake; 40m was clipping ~1m before finalization finished.
     timeout-minutes: 55
     environment: production-build
     steps:
@@ -148,7 +148,6 @@ jobs:
           TROOPER_RUNTIME_BUNDLE_ENCRYPTION: ${{ steps.runtime.outputs.encryption }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SNAPSHOT_AUTO_PROMOTE: ${{ inputs.auto_promote && '1' || '0' }}
-          # From-ubuntu bakes still install LXQt after gateway pull; 20m was
-          # clipping during openclaw doctor before desktop even started.
-          HEALTH_TIMEOUT_MS: '1800000'
+          # Hard-pass auto-promote needs headroom past LXQt install + bridge swap.
+          HEALTH_TIMEOUT_MS: ${{ inputs.auto_promote && '1800000' || '1200000' }}
         run: TROOPER_RUNTIME_ENCRYPTION_PASSWORD="$RUNTIME_ENCRYPTION_PASSWORD" node server/scripts/build-snapshot.mjs
