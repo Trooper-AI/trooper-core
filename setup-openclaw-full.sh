@@ -264,12 +264,70 @@ _free_progress_port() {
   eval "$old_errexit"
 }
 
+_start_installer_health_wrapper() {
+  mkdir -p /usr/local/lib /usr/local/sbin /var/log
+  cat > /usr/local/sbin/trooper-installer-health.sh << 'HSH'
+#!/bin/bash
+# Independent of setup-openclaw-full.sh. Apt replacing python3 kills the
+# HTTP child; this loop starts it again. systemd Restart=always covers HUP.
+while true; do
+  python3 /usr/local/lib/trooper-installer-log-server.py || true
+  sleep 1
+done
+HSH
+  chmod +x /usr/local/sbin/trooper-installer-health.sh
+  cat > /etc/systemd/system/trooper-installer-health.service << 'UNIT'
+[Unit]
+Description=Trooper installer /health on bridge port
+After=network.target
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/trooper-installer-health.sh
+Restart=always
+RestartSec=1
+TimeoutStopSec=5
+KillMode=mixed
+[Install]
+WantedBy=multi-user.target
+UNIT
+}
+
 _start_installer_log_server() {
-  nohup python3 /tmp/trooper-installer-log-server.py >/tmp/trooper-installer-log-server.out 2>&1 </dev/null &
-  LOG_SERVER_PID=$!
-  echo "$LOG_SERVER_PID" > /tmp/trooper-installer-log-server.pid
-  disown "$LOG_SERVER_PID" 2>/dev/null || true
-  echo "Log server started on :${BRIDGE_PORT} (pid $LOG_SERVER_PID)"
+  _start_installer_health_wrapper
+  _free_progress_port "${BRIDGE_PORT}"
+  if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed trooper-installer-health >/dev/null 2>&1 || true
+    systemctl start trooper-installer-health >/dev/null 2>&1 || true
+    if systemctl is-active --quiet trooper-installer-health 2>/dev/null; then
+      echo "Log server started via systemd on :${BRIDGE_PORT}"
+      return 0
+    fi
+  fi
+  nohup /usr/local/sbin/trooper-installer-health.sh </dev/null >/var/log/trooper-installer-health.log 2>&1 &
+  echo $! > /tmp/trooper-installer-health.pid
+  disown 2>/dev/null || true
+  echo "Log server started via nohup wrapper on :${BRIDGE_PORT} (pid $(cat /tmp/trooper-installer-health.pid))"
+}
+
+_stop_installer_log_server() {
+  systemctl stop trooper-installer-health >/dev/null 2>&1 || true
+  systemctl reset-failed trooper-installer-health >/dev/null 2>&1 || true
+  if [ -f /tmp/trooper-installer-health.pid ]; then
+    kill "$(cat /tmp/trooper-installer-health.pid)" 2>/dev/null || true
+    rm -f /tmp/trooper-installer-health.pid
+  fi
+  if [ -f /tmp/trooper-installer-log-watchdog.pid ]; then
+    kill "$(cat /tmp/trooper-installer-log-watchdog.pid)" 2>/dev/null || true
+  fi
+  if [ -f /tmp/trooper-installer-log-server.pid ]; then
+    kill "$(cat /tmp/trooper-installer-log-server.pid)" 2>/dev/null || true
+  fi
+  kill "${LOG_SERVER_PID:-}" 2>/dev/null || true
+  pkill -f '/usr/local/lib/trooper-installer-log-server.py' 2>/dev/null || true
+  pkill -f '/tmp/trooper-installer-log-server.py' 2>/dev/null || true
+  pkill -f '/usr/local/sbin/trooper-installer-health.sh' 2>/dev/null || true
+  _free_progress_port "${BRIDGE_PORT}"
 }
 
 _ensure_installer_log_server() {
@@ -281,7 +339,15 @@ _ensure_installer_log_server() {
     return 0
   fi
   echo "[setup] installer /health on :${BRIDGE_PORT} died; restarting log server"
-  _free_progress_port "${BRIDGE_PORT}"
+  if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl reset-failed trooper-installer-health >/dev/null 2>&1 || true
+    systemctl restart trooper-installer-health >/dev/null 2>&1 || true
+    sleep 1
+    if curl -sf --max-time 2 "http://127.0.0.1:${BRIDGE_PORT}/health" >/dev/null 2>&1; then
+      eval "$old_errexit"
+      return 0
+    fi
+  fi
   _start_installer_log_server
   sleep 1
   curl -sf --max-time 2 "http://127.0.0.1:${BRIDGE_PORT}/health" >/dev/null 2>&1
@@ -300,11 +366,17 @@ if [ -n "${BOOTSTRAP_LOG_SERVER_PID:-}" ]; then
   unset BOOTSTRAP_LOG_SERVER_PID
 fi
 
-# Start a tiny HTTP server to serve deploy logs on BRIDGE_PORT.
-# The real bridge will replace this later. If a baked service still owns the
-# port, skip the temporary server rather than failing the whole setup.
-cat > /tmp/trooper-installer-log-server.py << PY
-import http.server, json, os, re, sys
+# Installer /health must outlive apt replacing python3 and the setup shell
+# exiting. Bake #67 died on :3002 after LXQt because a bash-function watchdog
+# was a child of this script; a systemd/nohup restart loop is not.
+mkdir -p /usr/local/lib /tmp
+cat > /usr/local/lib/trooper-installer-log-server.py << PYSRC
+import http.server, os, re, signal, sys, time
+try:
+  signal.signal(signal.SIGHUP, signal.SIG_IGN)
+except Exception:
+  pass
+PORT = int("${BRIDGE_PORT}")
 class H(http.server.BaseHTTPRequestHandler):
   def authorized(self):
     expected = 'Bearer $BRIDGE_AUTH_TOKEN'
@@ -316,8 +388,8 @@ class H(http.server.BaseHTTPRequestHandler):
   def send_cors(self):
     origin = self.headers.get('Origin', '')
     allowed = (
-      re.match(r'^https://([a-z0-9-]+\.)*(trooper\.so|crabhq\.com|trooper\.com)$', origin, re.I)
-      or re.match(r'^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$', origin, re.I)
+      re.match(r'^https://([a-z0-9-]+\.)*(trooper\\.so|crabhq\\.com|trooper\\.com)$', origin, re.I)
+      or re.match(r'^https?://(localhost|127\\.0\\.0\\.1)(:[0-9]+)?$', origin, re.I)
     )
     if allowed:
       self.send_header('Access-Control-Allow-Origin', origin)
@@ -325,7 +397,7 @@ class H(http.server.BaseHTTPRequestHandler):
   def do_GET(self):
     if self.path=='/health':
       self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
-      self.wfile.write(b'{\"status\":\"installing\"}')
+      self.wfile.write(b'{"status":"installing"}')
     elif self.path=='/deploy-logs':
       if not self.authorized(): return
       self.send_response(200); self.send_header('Content-Type','application/json')
@@ -341,31 +413,38 @@ class H(http.server.BaseHTTPRequestHandler):
     else:
       self.send_response(404); self.end_headers()
   def log_message(self,*a): pass
-try:
-  s=http.server.HTTPServer(('0.0.0.0',${BRIDGE_PORT}),H)
-except OSError as e:
-  print(f'Temporary log server skipped on :${BRIDGE_PORT}: {e}', flush=True)
-  sys.exit(0)
+while True:
+  try:
+    s=http.server.ThreadingHTTPServer(('0.0.0.0', PORT), H)
+    break
+  except OSError as e:
+    print(f'installer /health bind retry on :{PORT}: {e}', flush=True)
+    time.sleep(0.5)
 s.serve_forever()
-PY
+PYSRC
+ln -sfn /usr/local/lib/trooper-installer-log-server.py /tmp/trooper-installer-log-server.py
 _start_installer_log_server
-# Green bake kept installer /health up through LXQt. Apt later reinstalls
-# python3 (the process on :3002) and set -e used to kill this watchdog on ss.
-if [ "${TROOPER_SNAPSHOT_BUILD:-0}" = "1" ]; then
-  (
-    set +e
-    while [ ! -f /tmp/openclaw-setup-complete ]; do
-      sleep 5
-      [ -f /tmp/openclaw-setup-complete ] && break
-      _ensure_installer_log_server
-    done
-  ) &
-  echo $! > /tmp/trooper-installer-log-watchdog.pid
-  disown 2>/dev/null || true
-fi
+sleep 1
 
 if [ "${TROOPER_INSTALLER_HEALTH_SELFTEST:-0}" = "1" ]; then
-  echo "[selftest] installer /health before python3 reinstall: $(curl -sf --max-time 2 http://127.0.0.1:${BRIDGE_PORT}/health || echo down)"
+  echo "[selftest] installer /health after start: $(curl -sf --max-time 2 http://127.0.0.1:${BRIDGE_PORT}/health || echo down)"
+  pkill -9 -f '/usr/local/lib/trooper-installer-log-server.py' 2>/dev/null || true
+  echo "[selftest] killed python /health child; waiting for wrapper restart"
+  _ok=0
+  for i in $(seq 1 20); do
+    if curl -sf --max-time 2 "http://127.0.0.1:${BRIDGE_PORT}/health" 2>/dev/null | grep -q installing; then
+      echo "[selftest] PASS: installer /health recovered after kill -9 (${i}s)"
+      _ok=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$_ok" -ne 1 ]; then
+    echo "[selftest] FAIL: installer /health did not recover after kill -9"
+    ss -ltnp "sport = :${BRIDGE_PORT}" 2>/dev/null || true
+    cat /var/log/trooper-installer-health.log 2>/dev/null || true
+    exit 1
+  fi
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
   apt-get install -y -qq --reinstall python3 python3-venv python3-pip || true
@@ -373,7 +452,7 @@ if [ "${TROOPER_INSTALLER_HEALTH_SELFTEST:-0}" = "1" ]; then
   _ok=0
   for i in $(seq 1 30); do
     if curl -sf --max-time 2 "http://127.0.0.1:${BRIDGE_PORT}/health" 2>/dev/null | grep -q installing; then
-      echo "[selftest] PASS: installer /health recovered after ${i}s"
+      echo "[selftest] PASS: installer /health recovered after python3 reinstall (${i}s)"
       _ok=1
       break
     fi
@@ -382,17 +461,10 @@ if [ "${TROOPER_INSTALLER_HEALTH_SELFTEST:-0}" = "1" ]; then
   if [ "$_ok" -ne 1 ]; then
     echo "[selftest] FAIL: installer /health did not recover after python3 reinstall"
     ss -ltnp "sport = :${BRIDGE_PORT}" 2>/dev/null || true
-    cat /tmp/trooper-installer-log-server.out 2>/dev/null || true
+    cat /var/log/trooper-installer-health.log 2>/dev/null || true
     exit 1
   fi
-  touch /tmp/openclaw-setup-complete
-  if [ -f /tmp/trooper-installer-log-watchdog.pid ]; then
-    kill "$(cat /tmp/trooper-installer-log-watchdog.pid)" 2>/dev/null || true
-  fi
-  if [ -f /tmp/trooper-installer-log-server.pid ]; then
-    kill "$(cat /tmp/trooper-installer-log-server.pid)" 2>/dev/null || true
-  fi
-  _free_progress_port "${BRIDGE_PORT}"
+  _stop_installer_log_server
   python3 -c "import http.server
 class H(http.server.BaseHTTPRequestHandler):
   def do_GET(self):
@@ -3532,7 +3604,7 @@ if [ "$_snapshot_build_mode" = "1" ]; then
  echo "[setup] Snapshot build: keeping installer health/log server on :${BRIDGE_PORT} until bake finalization"
 else
  # Kill the temporary log server so the real bridge can use the port.
- kill "$LOG_SERVER_PID" 2>/dev/null || true
+ _stop_installer_log_server
  sleep 1
 
  # Start bridge immediately — binds in ~5s, minimizes log gap (provision.js polls port 3002)
@@ -3824,14 +3896,9 @@ touch /opt/openclaw-bridge/.setup-complete
 
 if [ "$_snapshot_build_mode" = "1" ]; then
   echo "[setup] Snapshot build: swapping installer log server for real bridge smoke endpoint..."
-  if [ -f /tmp/trooper-installer-log-watchdog.pid ]; then
-    kill "$(cat /tmp/trooper-installer-log-watchdog.pid)" 2>/dev/null || true
-  fi
-  if [ -f /tmp/trooper-installer-log-server.pid ]; then
-    kill "$(cat /tmp/trooper-installer-log-server.pid)" 2>/dev/null || true
-  fi
-  kill "$LOG_SERVER_PID" 2>/dev/null || true
-  _free_progress_port "${BRIDGE_PORT}"
+  _stop_installer_log_server
+  rm -f /etc/systemd/system/trooper-installer-health.service
+  systemctl daemon-reload >/dev/null 2>&1 || true
   sleep 1
   run_cmd systemctl restart openclaw-bridge
   run_cmd systemctl restart trooper-shared-node-manager

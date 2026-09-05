@@ -17,9 +17,10 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 bash -n "$SETUP"
-grep -q '_ensure_installer_log_server' "$SETUP"
+grep -q 'trooper-installer-health.service' "$SETUP"
 grep -q '_start_installer_log_server' "$SETUP"
 grep -q 'TROOPER_INSTALLER_HEALTH_SELFTEST' "$SETUP"
+grep -q 'kill -9' "$SETUP"
 if grep -n 'python3 python3-venv python3-pip' "$SETUP" | grep -v -- '--reinstall' >/dev/null; then
   echo "desktop apt still installs python3 (kills installer /health)" >&2
   grep -n 'python3 python3-venv python3-pip' "$SETUP" || true
