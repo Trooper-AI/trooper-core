@@ -273,7 +273,7 @@ fi
 # Start a tiny HTTP server to serve deploy logs on BRIDGE_PORT.
 # The real bridge will replace this later. If a baked service still owns the
 # port, skip the temporary server rather than failing the whole setup.
-python3 -c "
+cat > /tmp/trooper-installer-log-server.py << PY
 import http.server, json, os, re, sys
 class H(http.server.BaseHTTPRequestHandler):
   def authorized(self):
@@ -317,9 +317,27 @@ except OSError as e:
   print(f'Temporary log server skipped on :${BRIDGE_PORT}: {e}', flush=True)
   sys.exit(0)
 s.serve_forever()
-" &
+PY
+python3 /tmp/trooper-installer-log-server.py &
 LOG_SERVER_PID=$!
+echo "$LOG_SERVER_PID" > /tmp/trooper-installer-log-server.pid
 echo "Log server started on :${BRIDGE_PORT} (pid $LOG_SERVER_PID)"
+# Green bake kept installer /health up through LXQt. This run died when snapd
+# restarted and nothing put :3002 back until the real-bridge swap.
+if [ "${TROOPER_SNAPSHOT_BUILD:-0}" = "1" ]; then
+  (
+    while [ ! -f /tmp/openclaw-setup-complete ]; do
+      sleep 10
+      [ -f /tmp/openclaw-setup-complete ] && break
+      curl -sf --max-time 2 "http://127.0.0.1:${BRIDGE_PORT}/health" >/dev/null 2>&1 && continue
+      echo "[setup] installer /health on :${BRIDGE_PORT} died; restarting log server"
+      _free_progress_port "${BRIDGE_PORT}"
+      python3 /tmp/trooper-installer-log-server.py &
+      echo $! > /tmp/trooper-installer-log-server.pid
+    done
+  ) &
+  echo $! > /tmp/trooper-installer-log-watchdog.pid
+fi
 
 dlog "Starting server setup..." "workspace"
 
@@ -2430,8 +2448,13 @@ run_cmd apt-get install -y -qq --no-install-recommends \
  fonts-dejavu fonts-liberation \
  xdg-utils wget \
  python3 python3-venv python3-pip 2>/dev/null || true
-# Install snap Firefox (Ubuntu 24.04 doesn't have firefox-esr deb)
-run_cmd snap install firefox 2>/dev/null || true
+# Snap Firefox restarts snapd. Green /health=ok still had browser=fetch failed;
+# the last fail went dark on :3002 at that snapd restart and never swapped.
+if [ "${TROOPER_SNAPSHOT_BUILD:-0}" = "1" ]; then
+  echo "[setup] TROOPER_SNAPSHOT_BUILD=1 - skipping snap firefox (avoids snapd restart during bake)"
+else
+  run_cmd snap install firefox 2>/dev/null || true
+fi
 echo "[setup] LXQt desktop packages installed"
 fi # end FROM_SNAPSHOT != 1 (noVNC + desktop packages)
 
@@ -3725,7 +3748,14 @@ touch /opt/openclaw-bridge/.setup-complete
 
 if [ "$_snapshot_build_mode" = "1" ]; then
   echo "[setup] Snapshot build: swapping installer log server for real bridge smoke endpoint..."
+  if [ -f /tmp/trooper-installer-log-watchdog.pid ]; then
+    kill "$(cat /tmp/trooper-installer-log-watchdog.pid)" 2>/dev/null || true
+  fi
+  if [ -f /tmp/trooper-installer-log-server.pid ]; then
+    kill "$(cat /tmp/trooper-installer-log-server.pid)" 2>/dev/null || true
+  fi
   kill "$LOG_SERVER_PID" 2>/dev/null || true
+  _free_progress_port "${BRIDGE_PORT}"
   sleep 1
   run_cmd systemctl restart openclaw-bridge
   run_cmd systemctl restart trooper-shared-node-manager
