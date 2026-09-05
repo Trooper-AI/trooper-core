@@ -3772,6 +3772,26 @@ if [ "$_snapshot_build_mode" = "1" ]; then
     echo "FATAL: snapshot bridge health did not become ok after bake finalization"
     journalctl -u openclaw-bridge --no-pager -n 80 || true
     docker compose -f /opt/openclaw/docker-compose.yml logs --tail 80 openclaw-gateway 2>/dev/null || true
+    echo "[setup] Restoring installer log server on :${BRIDGE_PORT} so CI can read FATAL diagnostics"
+    python3 -c "
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+  def do_GET(self):
+    if self.path=='/health':
+      self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
+      self.wfile.write(b'{\"status\":\"installing\",\"reason\":\"bridge_swap_failed\"}')
+    elif self.path in ('/deploy-logs-raw','/bootstrap-log','/deploy-logs'):
+      self.send_response(200); self.send_header('Content-Type','text/plain; charset=utf-8'); self.end_headers()
+      try:
+        with open('${DEPLOY_RAW_LOG}') as f: self.wfile.write(f.read().encode())
+      except Exception:
+        self.wfile.write(b'')
+    else:
+      self.send_response(404); self.end_headers()
+  def log_message(self,*a): pass
+http.server.HTTPServer(('0.0.0.0',${BRIDGE_PORT}),H).serve_forever()
+" &
+    sleep 2
     exit 1
   fi
 fi
