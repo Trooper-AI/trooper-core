@@ -76,6 +76,7 @@ import { isOrgMember, writeOrgMembers, readOrgMembers } from './lib/org-members.
 import { applyRuntimeEnvOverrides, loadRuntimeEnvOverridesAtBoot } from './lib/runtime-env-overrides.mjs';
 import { sortLogLinesChronologically, isJournalBootMarker } from './lib/log-lines.mjs';
 import { verifyDirectFileAccessToken } from './lib/file-access-token.mjs';
+import { joinExpressSplat, requestSplatPath } from './lib/express-splat.mjs';
 import { BridgeWSServer } from './lib/ws-server.mjs';
 import { handleChatMessage } from './lib/chat-handler.mjs';
 import { createTask, getTask, listTasks, updateTask, deleteTask, addComment, addSubtask, toggleSubtask, deleteSubtask, executeTaskWork, checkoutTask, releaseTask, createProject, listProjects, updateProject, createGoal, listGoals } from './lib/task-handler.mjs';
@@ -8916,7 +8917,7 @@ app.get('/files', (req, res) => {
 
 // Serve files from inside the OpenClaw container (screenshots, workspace files, etc.)
 app.get('/files/{*filePath}', (req, res) => {
- const requestedPath = '/' + String(req.params.filePath || req.params[0] || '');
+ const requestedPath = requestSplatPath(req.params, 'filePath');
  const resolved = resolveWorkspacePathForFiles(requestedPath, { file: true });
  if (resolved.kind === 'virtual-root' || resolved.kind === 'virtual-system' || resolved.kind === 'virtual-team' || resolved.kind === 'missing-file') {
  return res.status(404).json({ error: 'File not found' });
@@ -12927,7 +12928,7 @@ app.post('/api/vault/sync', (req, res) => {
 app.post('/api/proxy/{*path}', async (req, res) => {
  if (!MISSION_CONTROL_URL) return res.status(503).json({ error: 'No Trooper backend configured' });
  try {
- const targetUrl = `${MISSION_CONTROL_URL}/api/${req.params.path}`;
+ const targetUrl = `${MISSION_CONTROL_URL}/api/${joinExpressSplat(req.params.path)}`;
  console.log(`[Proxy] POST ${targetUrl}`);
  const upstream = await fetch(targetUrl, {
  method: 'POST',
@@ -12945,7 +12946,7 @@ app.post('/api/proxy/{*path}', async (req, res) => {
 app.patch('/api/proxy/{*path}', async (req, res) => {
  if (!MISSION_CONTROL_URL) return res.status(503).json({ error: 'No Trooper backend configured' });
  try {
- const targetUrl = `${MISSION_CONTROL_URL}/api/${req.params.path}`;
+ const targetUrl = `${MISSION_CONTROL_URL}/api/${joinExpressSplat(req.params.path)}`;
  console.log(`[Proxy] PATCH ${targetUrl}`);
  const upstream = await fetch(targetUrl, {
  method: 'PATCH',
@@ -12963,7 +12964,7 @@ app.patch('/api/proxy/{*path}', async (req, res) => {
 app.get('/api/proxy/{*path}', async (req, res) => {
  if (!MISSION_CONTROL_URL) return res.status(503).json({ error: 'No Trooper backend configured' });
  try {
- const targetUrl = `${MISSION_CONTROL_URL}/api/${req.params.path}`;
+ const targetUrl = `${MISSION_CONTROL_URL}/api/${joinExpressSplat(req.params.path)}`;
  const upstream = await fetch(targetUrl, { headers: { 'Content-Type': 'application/json' } });
  const data = await upstream.json();
  res.status(upstream.status).json(data);
