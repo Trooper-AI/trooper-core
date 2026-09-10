@@ -52,8 +52,8 @@ restart_managed_services() {
   # operator-requested, bounded upgrade verification is an explicit retry and
   # should get one clean start window.
   systemctl reset-failed trooper-org-runtime trooper-server openclaw-bridge trooper-shared-node-manager >/dev/null 2>&1 || true
-  # --no-block: do not wait for TimeoutStopSec (~90s SIGKILL) before health
-  # polling. The poll loop is the wait.
+  # --no-block: do not wait for TimeoutStopSec (15s on the bridge unit) before
+  # health polling. The poll loop is the wait.
   systemctl restart --no-block trooper-org-runtime trooper-server openclaw-bridge trooper-shared-node-manager
 }
 

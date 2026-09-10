@@ -33,6 +33,8 @@ RUN apt-get update && \
     curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && \
     (dpkg -i /tmp/chrome.deb || apt-get install -y -f) && \
     rm -f /tmp/chrome.deb && \
+    ln -sfn /usr/bin/google-chrome-stable /usr/bin/chromium && \
+    ln -sfn /usr/bin/google-chrome-stable /usr/bin/chromium-browser && \
     apt-get install -y --no-install-recommends \
       bubblewrap \
       tigervnc-standalone-server \

@@ -264,6 +264,31 @@ _free_progress_port() {
   eval "$old_errexit"
 }
 
+# Playwright and some health probes look for Chromium names; the host ships
+# google-chrome-stable. Leave a real chromium binary alone; replace missing or
+# broken aliases.
+_ensure_chrome_chromium_aliases() {
+  local chrome="" dest name candidate
+  for candidate in /usr/bin/google-chrome-stable /usr/bin/google-chrome; do
+    if [ -x "$candidate" ]; then
+      chrome="$candidate"
+      break
+    fi
+  done
+  if [ -z "$chrome" ]; then
+    echo "[setup] no google-chrome binary on host; skipping chromium aliases"
+    return 0
+  fi
+  for name in chromium chromium-browser; do
+    dest="/usr/bin/$name"
+    if [ -e "$dest" ] && [ ! -L "$dest" ]; then
+      continue
+    fi
+    ln -sfn "$chrome" "$dest"
+    echo "[setup] linked $dest -> $chrome"
+  done
+}
+
 _start_installer_health_wrapper() {
   mkdir -p /usr/local/lib /usr/local/sbin /var/log
   cat > /usr/local/sbin/trooper-installer-health.sh << 'HSH'
@@ -3046,6 +3071,7 @@ async function startServer() {
 startServer();
 PWEOF
 echo "[setup] Playwright server script written"
+_ensure_chrome_chromium_aliases
 
 # Download wallpaper
 mkdir -p /usr/local/share
@@ -3257,6 +3283,8 @@ WorkingDirectory=/opt/openclaw-bridge
 ExecStart=/usr/bin/node /opt/openclaw-bridge/index.mjs
 Restart=on-failure
 RestartSec=10
+TimeoutStopSec=15
+KillMode=mixed
 Environment=BRIDGE_PORT=${BRIDGE_PORT}
 Environment=BRIDGE_AUTH_TOKEN=${BRIDGE_AUTH_TOKEN}
 Environment=FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
@@ -3587,6 +3615,7 @@ if [ ! -f /opt/trooper-org-runtime/server/org-runtime/index.js ]; then
   exit 1
 fi
 
+_ensure_chrome_chromium_aliases
 run_cmd systemctl daemon-reload
 if [ "${TROOPER_SNAPSHOT_BUILD:-0}" = "1" ]; then
  run_cmd systemctl enable openclaw-docker trooper-shared-node-manager trooper-org-runtime trooper-server openclaw-poller openclaw-vnc trooper-desktop trooper-desktop-api trooper-playwright
