@@ -1,0 +1,200 @@
+name: Publish Chrome extension
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Package the extension without submitting it to the Chrome Web Store
+        type: boolean
+        required: false
+        default: true
+
+concurrency:
+  group: chrome-web-store-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout public workflow definitions
+        uses: actions/checkout@v5
+
+      - name: Fetch private Trooper source
+        id: trooper
+        uses: ./.github/actions/download-private-trooper
+        with:
+          ref: main
+          token: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          fallback-token: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+          clone-token: ${{ secrets.TROOPER_REPO_CLONE_TOKEN }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22.12.0"
+
+      - name: Read extension version
+        id: extension
+        working-directory: private-trooper
+        run: |
+          VERSION="$(node -e "console.log(JSON.parse(require('node:fs').readFileSync('browser-extension/trooper-browser-control/manifest.json', 'utf8')).version)")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Chrome extension version: $VERSION"
+
+      - name: Package Chrome extension
+        working-directory: private-trooper
+        run: npm run extension:chrome:package
+
+      - name: Save package for review
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: trooper-chrome-extension-v${{ steps.extension.outputs.version }}
+          path: |
+            private-trooper/dist/chrome-web-store/*.zip
+            private-trooper/dist/chrome-web-store/*.sha256
+          if-no-files-found: error
+
+      - name: Report dry run
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
+        run: |
+          {
+            echo "### Chrome extension dry run"
+            echo ""
+            echo "Packaged version: ${{ steps.extension.outputs.version }}"
+            echo "No Chrome Web Store API request was made."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Submit new version through Chrome Web Store API v2
+        id: publish
+        if: ${{ github.event_name == 'schedule' || inputs.dry_run != true }}
+        env:
+          CHROME_WEBSTORE_PUBLISHER_ID: ${{ vars.CHROME_WEBSTORE_PUBLISHER_ID }}
+          CHROME_WEBSTORE_EXTENSION_ID: ${{ vars.CHROME_WEBSTORE_EXTENSION_ID || 'ioaibohjnndgbmfpkipamhplihobflgb' }}
+          CHROME_WEBSTORE_CLIENT_ID: ${{ secrets.CHROME_WEBSTORE_CLIENT_ID }}
+          CHROME_WEBSTORE_CLIENT_SECRET: ${{ secrets.CHROME_WEBSTORE_CLIENT_SECRET }}
+          CHROME_WEBSTORE_REFRESH_TOKEN: ${{ secrets.CHROME_WEBSTORE_REFRESH_TOKEN }}
+          CHROME_WEBSTORE_SOURCE_DIR: private-trooper
+          CHROME_WEBSTORE_ALLOW_MISSING_SECRETS: ${{ github.event_name == 'schedule' && '1' || '' }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+          import path from 'node:path';
+
+          const sourceDir = path.resolve(process.env.CHROME_WEBSTORE_SOURCE_DIR || 'private-trooper');
+          const manifestPath = path.join(sourceDir, 'browser-extension', 'trooper-browser-control', 'manifest.json');
+          const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+          const version = String(manifest.version || '');
+          const zipPath = path.join(sourceDir, 'dist', 'chrome-web-store', 'trooper-browser-control-v' + version + '.zip');
+          const required = [
+            'CHROME_WEBSTORE_PUBLISHER_ID',
+            'CHROME_WEBSTORE_CLIENT_ID',
+            'CHROME_WEBSTORE_CLIENT_SECRET',
+            'CHROME_WEBSTORE_REFRESH_TOKEN',
+          ];
+          const missing = required.filter((key) => !String(process.env[key] || '').trim());
+          const appendSummary = (text) => appendFileSync(process.env.GITHUB_STEP_SUMMARY, text + '\n');
+          const markProcessed = () => appendFileSync(process.env.GITHUB_OUTPUT, 'processed=true\n');
+
+          if (!existsSync(zipPath)) throw new Error('Packaged extension ZIP is missing: ' + zipPath);
+          if (!/^\d+(\.\d+){0,3}$/.test(version)) throw new Error('Invalid Chrome extension manifest version: ' + version);
+          if (!String(process.env.CHROME_WEBSTORE_EXTENSION_ID || '').trim()) throw new Error('Set the Chrome Web Store extension ID variable.');
+
+          if (missing.length) {
+            const message = 'Chrome Web Store secrets/variables not configured: ' + missing.join(', ');
+            if (process.env.CHROME_WEBSTORE_ALLOW_MISSING_SECRETS === '1') {
+              console.log(message + '; scheduled run skipped publishing.');
+              appendSummary('### Chrome Web Store publish skipped\n\n' + message + '.');
+              process.exit(0);
+            }
+            throw new Error(message);
+          }
+
+          function versionParts(value) {
+            const parts = value.split('.').map(Number);
+            while (parts.length < 4) parts.push(0);
+            return parts;
+          }
+          function compareVersions(a, b) {
+            const left = versionParts(a);
+            const right = versionParts(b);
+            for (let i = 0; i < 4; i += 1) {
+              if (left[i] !== right[i]) return left[i] - right[i];
+            }
+            return 0;
+          }
+          async function jsonRequest(url, options = {}) {
+            const response = await fetch(url, options);
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+              const detail = data?.error?.message || data?.error_description || data?.error || ('HTTP ' + response.status);
+              throw new Error('Chrome Web Store API request failed: ' + detail);
+            }
+            return data;
+          }
+          const tokenData = await jsonRequest('https://oauth2.googleapis.com/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+              client_id: process.env.CHROME_WEBSTORE_CLIENT_ID,
+              client_secret: process.env.CHROME_WEBSTORE_CLIENT_SECRET,
+              refresh_token: process.env.CHROME_WEBSTORE_REFRESH_TOKEN,
+              grant_type: 'refresh_token',
+            }),
+          });
+          if (!tokenData.access_token) throw new Error('Google OAuth did not return an access token.');
+
+          const base = 'https://chromewebstore.googleapis.com';
+          const itemName = 'publishers/' + encodeURIComponent(process.env.CHROME_WEBSTORE_PUBLISHER_ID.trim())
+            + '/items/' + encodeURIComponent(process.env.CHROME_WEBSTORE_EXTENSION_ID.trim());
+          const statusUrl = base + '/v2/' + itemName + ':fetchStatus';
+          const authHeaders = { Authorization: 'Bearer ' + tokenData.access_token };
+          const status = await jsonRequest(statusUrl, { headers: authHeaders });
+          const channels = [
+            ...(status.publishedItemRevisionStatus?.distributionChannels || []),
+            ...(status.submittedItemRevisionStatus?.distributionChannels || []),
+          ];
+          const existingVersions = channels.map((channel) => String(channel.crxVersion || '')).filter(Boolean);
+          const latestVersion = existingVersions.sort(compareVersions).at(-1) || '';
+
+          if (latestVersion && compareVersions(version, latestVersion) === 0) {
+            console.log('Version ' + version + ' is already published or submitted; nothing to upload.');
+            appendSummary('### Chrome Web Store publish skipped\n\nVersion ' + version + ' is already published or submitted. Bump manifest.version to publish another update.');
+            markProcessed();
+            process.exit(0);
+          }
+          if (latestVersion && compareVersions(version, latestVersion) < 0) {
+            throw new Error('Packaged version ' + version + ' is older than the current store version ' + latestVersion + '.');
+          }
+
+          const upload = await jsonRequest(base + '/upload/v2/' + itemName + ':upload', {
+            method: 'POST',
+            headers: { ...authHeaders, 'Content-Type': 'application/zip' },
+            body: readFileSync(zipPath),
+          });
+          let uploadState = String(upload.uploadState || '');
+          if (uploadState === 'IN_PROGRESS') {
+            for (let attempt = 0; attempt < 36 && uploadState === 'IN_PROGRESS'; attempt += 1) {
+              await new Promise((resolve) => setTimeout(resolve, 5000));
+              const current = await jsonRequest(statusUrl, { headers: authHeaders });
+              uploadState = String(current.lastAsyncUploadState || 'IN_PROGRESS');
+            }
+          }
+          if (uploadState !== 'SUCCEEDED') throw new Error('Chrome Web Store upload ended with state: ' + (uploadState || 'unknown'));
+
+          const submission = await jsonRequest(base + '/v2/' + itemName + ':publish', {
+            method: 'POST',
+            headers: { ...authHeaders, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ publishType: 'DEFAULT_PUBLISH' }),
+          });
+          const state = String(submission.state || 'submitted for review');
+          console.log('Submitted extension version ' + version + '; current submission state: ' + state + '.');
+          appendSummary('### Chrome Web Store submission\n\nSubmitted version ' + version + '. Chrome Web Store review still applies before users receive the update.');
+          markProcessed();
+          NODE
