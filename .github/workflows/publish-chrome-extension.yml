@@ -51,15 +51,6 @@ jobs:
         working-directory: private-trooper
         run: npm run extension:chrome:package
 
-      - name: Save package for review
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: trooper-chrome-extension-v${{ steps.extension.outputs.version }}
-          path: |
-            private-trooper/dist/chrome-web-store/*.zip
-            private-trooper/dist/chrome-web-store/*.sha256
-          if-no-files-found: error
 
       - name: Report dry run
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
