@@ -125,7 +125,10 @@ jobs:
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
               const detail = data?.error?.message || data?.error_description || data?.error || ('HTTP ' + response.status);
-              throw new Error('Chrome Web Store API request failed: ' + detail);
+              const diagnostic = data?.error && typeof data.error === 'object'
+                ? ' (API error details: ' + JSON.stringify(data.error).slice(0, 4000) + ')'
+                : '';
+              throw new Error('Chrome Web Store API request failed: ' + detail + diagnostic);
             }
             return data;
           }
