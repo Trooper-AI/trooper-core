@@ -94,9 +94,15 @@ if [[ -d /opt/trooper-org-runtime.previous ]]; then
   mv /opt/trooper-org-runtime.previous /opt/trooper-org-runtime || rollback_error="${rollback_error:+$rollback_error; }runtime rollback failed"
 fi
 
+boot_error="$(grep -hE 'Cannot find module|ERR_MODULE_NOT_FOUND|staged runtime cannot load' /var/log/trooper-org-runtime.log /var/log/trooper-server.log 2>/dev/null | tail -n 1 | tr '\n' ' ' | cut -c1-280 || true)"
+rollback_detail="upgrade failed health verification (${failed_endpoints}) and was rolled back"
+if [ -n "$boot_error" ]; then
+  rollback_detail="${rollback_detail}: ${boot_error}"
+fi
+
 if restart_managed_services; then
   if wait_until_healthy; then
-    mark rolled_back rollback_verified "upgrade failed health verification (${failed_endpoints}) and was rolled back"
+    mark rolled_back rollback_verified "$rollback_detail"
     logger -t trooper-upgrade "Upgrade $OPERATION_ID failed verification (${failed_endpoints}) and was rolled back"
     exit 1
   fi

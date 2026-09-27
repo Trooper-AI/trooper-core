@@ -170,6 +170,23 @@ else
   (cd "$NEXT_DIR/server" && npm ci --omit=dev)
 fi
 
+echo "[update-org-runtime] Checking the staged runtime can load before replacing the running one..."
+if ! node --input-type=module --eval '
+import { pathToFileURL } from "node:url";
+import path from "node:path";
+const root = process.argv[1];
+try {
+  await import(pathToFileURL(path.join(root, "server/models.js")).href);
+} catch (error) {
+  const message = error && error.message ? error.message : String(error);
+  console.error("ERROR: staged runtime cannot load server/models.js: " + message);
+  process.exit(1);
+}
+' "$NEXT_DIR"; then
+  echo "ERROR: refusing to replace the running runtime because the new bundle cannot start" >&2
+  exit 1
+fi
+
 echo "[update-org-runtime] Activating staged runtime..."
 rm -rf "$PREVIOUS_DIR"
 if [ -d "$INSTALL_DIR" ]; then
