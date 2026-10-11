@@ -43,10 +43,12 @@ jobs:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
           APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           missing=()
-          for name in MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD APPLE_API_KEY_ID APPLE_API_ISSUER_ID APPLE_API_KEY_BASE64; do
+          for name in MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD APPLE_API_KEY_ID APPLE_API_ISSUER_ID APPLE_API_KEY_BASE64 TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
             if [ -z "${!name:-}" ]; then
               missing+=("$name")
             fi
@@ -62,6 +64,7 @@ jobs:
             done
             } >> "$GITHUB_STEP_SUMMARY"
             echo "Missing production macOS signing secrets."
+            echo "TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD already exist on absurdfounder/Trooper. Copy those same values into the production-build environment on Trooper-AI/trooper-core. Without them the DMG cannot offer Check for updates."
             exit 1
           fi
           echo "SKIP_MACOS_RELEASE=false" >> "$GITHUB_ENV"
@@ -243,6 +246,10 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ env.DEVELOPER_ID_APPLICATION }}
         run: bash src-tauri/helper/build.sh
 
+      - name: Stamp updater version above the published feed
+        if: env.SKIP_MACOS_RELEASE != 'true'
+        run: node scripts/stamp-macos-updater-version.mjs
+
       - name: Build Tauri app bundle
         if: env.SKIP_MACOS_RELEASE != 'true'
         env:
@@ -253,12 +260,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          EXTRA_CONFIG='{}'
           if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
-            echo "::warning::TAURI_SIGNING_PRIVATE_KEY missing. DMG will still publish, but Check for updates will not move."
-            EXTRA_CONFIG='{"bundle":{"createUpdaterArtifacts":false}}'
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY missing. Refusing to publish a Mac build that cannot update."
+            exit 1
           fi
-          npm run tauri build -- --target universal-apple-darwin --bundles app --config "$EXTRA_CONFIG"
+          npm run tauri build -- --target universal-apple-darwin --bundles app
 
       - name: Place native runtime inside the Trooper framework bundle
         if: env.SKIP_MACOS_RELEASE != 'true'
@@ -507,6 +513,7 @@ jobs:
         if: env.SKIP_MACOS_RELEASE != 'true'
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          PUBLIC_RELEASE_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
           TROOPER_SHA: ${{ steps.trooper.outputs.sha }}
         run: bash "$GITHUB_WORKSPACE/scripts/mirror-macos-dmg-release.sh" "${{ steps.package.outputs.path }}"
