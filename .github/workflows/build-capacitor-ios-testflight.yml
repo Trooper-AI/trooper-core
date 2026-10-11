@@ -237,17 +237,17 @@ jobs:
           EXPORT_PATH="$RUNNER_TEMP/TrooperCapacitorExport"
           EXPORT_OPTIONS="$RUNNER_TEMP/ExportOptionsCapacitorAppStore.plist"
 
+          # Keep the profile on the App target. A command-line
+          # PROVISIONING_PROFILE_SPECIFIER is applied to Swift packages too,
+          # and IONCameraLib cannot take an app provisioning profile.
+          python3 "$GITHUB_WORKSPACE/.github/scripts/limit-capacitor-app-signing.py"
+
           xcodebuild archive \
             -project apps/capacitor/ios/App/App.xcodeproj \
             -scheme App \
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath "$ARCHIVE_PATH" \
-            DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
-            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_IDENTIFIER" \
-            CODE_SIGN_STYLE=Manual \
-            PROVISIONING_PROFILE_SPECIFIER="$APPLE_PROVISIONING_PROFILE_SPECIFIER" \
-            CODE_SIGN_IDENTITY="Apple Distribution" \
             MARKETING_VERSION="$MARKETING_VERSION" \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
             -allowProvisioningUpdates \
