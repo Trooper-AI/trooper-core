@@ -331,6 +331,54 @@ jobs:
             exit 1
           fi
 
+      # Staple the .app before it goes into the DMG. A ticket on the DMG alone
+      # is not enough: Chrome's quarantine makes Gatekeeper launch the app
+      # through translocation, the notarization daemon is often down (error 3),
+      # and macOS then says the app is damaged. The app ticket has to travel
+      # inside the bundle.
+      - name: Notarize and staple the app
+        if: env.SKIP_MACOS_RELEASE != 'true'
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          APP="$APP_BUNDLE"
+          ZIP="$RUNNER_TEMP/Trooper-app.zip"
+          NOTARY_SUBMIT_JSON="$RUNNER_TEMP/notary-app-submit.json"
+          rm -f "$ZIP"
+          ditto -c -k --keepParent "$APP" "$ZIP"
+
+          set +e
+          xcrun notarytool submit "$ZIP" \
+            --key "$API_PRIVATE_KEYS_DIR/AuthKey_${APPLE_API_KEY_ID}.p8" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --wait \
+            --output-format json | tee "$NOTARY_SUBMIT_JSON"
+          NOTARY_STATUS=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$NOTARY_STATUS" -ne 0 ]; then
+            NOTARY_ERROR_TEXT="$(cat "$NOTARY_SUBMIT_JSON" || true)"
+            if echo "$NOTARY_ERROR_TEXT" | grep -Eiq "required agreement|agreement .*missing|agreement .*expired"; then
+              echo "::error title=Apple notarization agreement required::Apple rejected notarization because a required developer agreement is missing or expired. Sign in to the Apple Developer/App Store Connect account for this team and accept the pending agreement, then rerun this workflow."
+            else
+              echo "::error title=Apple app notarization failed::notarytool submit exited with status $NOTARY_STATUS."
+            fi
+            echo "$NOTARY_ERROR_TEXT"
+            exit "$NOTARY_STATUS"
+          fi
+
+          SUBMISSION_STATUS=$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1], encoding="utf-8")).get("status") or ""))' "$NOTARY_SUBMIT_JSON")
+          if [ "$SUBMISSION_STATUS" != "Accepted" ]; then
+            echo "App notarization failed with status: ${SUBMISSION_STATUS:-unknown}"
+            exit 1
+          fi
+
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+
       - name: Install DMG layout tool
         if: env.SKIP_MACOS_RELEASE != 'true'
         run: brew install create-dmg
@@ -475,6 +523,10 @@ jobs:
           test -f "$MOUNT_DIR/.background/trooper-dmg-background.png"
           spctl --assess --type execute --verbose=4 "$MOUNT_DIR/${APP_NAME}.app"
           codesign --verify --deep --strict --verbose=2 "$MOUNT_DIR/${APP_NAME}.app"
+          # spctl accepts a notarized app with no stapled ticket. First launch
+          # from a Chrome download does not. Fail the release if the ticket
+          # did not survive packaging.
+          xcrun stapler validate "$MOUNT_DIR/${APP_NAME}.app"
 
       - name: Upload DMG artifact
         if: env.SKIP_MACOS_RELEASE != 'true'
