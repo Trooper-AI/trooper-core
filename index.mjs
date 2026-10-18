@@ -10144,6 +10144,30 @@ function normalizeNodeInventoryPayload(rawNodeList = {}, rawDevicePairs = {}) {
  };
 }
 
+async function reloadGatewayConfigPatch(patch) {
+  const current = await gateway.request('config.get', {}, { timeoutMs: 10000 });
+  const baseHash = current?.hash;
+  if (!baseHash) throw new Error('gateway config hash unavailable');
+  return gateway.request('config.patch', {
+    baseHash,
+    raw: JSON.stringify(patch),
+  }, { timeoutMs: 20000 });
+}
+
+async function reloadTelegramOnGateway(telegram = {}) {
+  const patch = {
+    channels: {
+      telegram: {
+        enabled: telegram.enabled !== false,
+        ...(telegram.dmPolicy ? { dmPolicy: telegram.dmPolicy } : {}),
+        ...(Array.isArray(telegram.allowFrom) ? { allowFrom: telegram.allowFrom } : {}),
+        ...(telegram.botToken ? { botToken: telegram.botToken } : { botToken: null }),
+      },
+    },
+  };
+  await reloadGatewayConfigPatch(patch);
+}
+
 async function gatewayRequestResult(method, params = {}, options = {}) {
  try {
   const value = await gateway.request(method, params, options);
@@ -15434,9 +15458,15 @@ app.post('/config/api-keys', async (req, res) => {
 	 if (changed) writeOpenClawConfig(config);
 	 writeConfigKey('channel:telegram', {
 	  configured,
-	  mode: config?.channels?.telegram?.mode || 'polling',
+	  enabled: config?.channels?.telegram?.enabled !== false,
 	  updatedAt: Date.now(),
 	 });
+	 try {
+	  await reloadTelegramOnGateway(config?.channels?.telegram || {});
+	  console.log(`[bridge] Telegram channel ${configured ? 'configured' : 'cleared'} and reloaded`);
+	 } catch (reloadErr) {
+	  console.warn(`[bridge] Telegram channel saved but the gateway did not reload: ${reloadErr.message}`);
+	 }
 	 console.log(`[bridge] Telegram channel ${configured ? 'configured' : 'cleared'} for OpenClaw`);
 	 } catch (e) {
 	  console.error('Failed to update Telegram channel config:', e.message);
@@ -16199,9 +16229,14 @@ app.delete('/config/api-keys/:provider', async (req, res) => {
 	    if (changed) writeOpenClawConfig(config);
 	    writeConfigKey('channel:telegram', {
 	     configured: false,
-	     mode: config?.channels?.telegram?.mode || 'polling',
+	     enabled: false,
 	     updatedAt: Date.now(),
 	    });
+	    try {
+	     await reloadTelegramOnGateway(config?.channels?.telegram || { enabled: false });
+	    } catch (reloadErr) {
+	     console.warn(`[bridge] Telegram channel cleared but the gateway did not reload: ${reloadErr.message}`);
+	    }
 	   } catch (e) {
 	    console.error('Failed to clear Telegram channel config:', e.message);
 	   }
