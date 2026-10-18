@@ -15493,12 +15493,18 @@ const KNOWN_MODEL_ALIASES = {
 
 const TROOPER_OPENROUTER_TIER_MODELS = [
  {
-  id: 'openrouter/deepseek/deepseek-v4-flash-0731',
-  openrouterId: 'deepseek/deepseek-v4-flash-0731',
+  id: 'openrouter/z-ai/glm-5.3-flash',
+  openrouterId: 'z-ai/glm-5.3-flash',
   name: 'Trooper Auto',
-  contextWindow: 128000,
+  contextWindow: 1048576,
   // Prior Trooper Auto routing ids — stored configs referencing these upgrade in place.
-  legacyIds: ['openrouter/deepseek/deepseek-v4-pro', 'deepseek/deepseek-v4-pro', 'deepseek-v4-pro'],
+  legacyIds: [
+   'openrouter/deepseek/deepseek-v4-flash-0731',
+   'deepseek/deepseek-v4-flash-0731',
+   'openrouter/deepseek/deepseek-v4-pro',
+   'deepseek/deepseek-v4-pro',
+   'deepseek-v4-pro',
+  ],
  },
  { id: 'openrouter/qwen/qwen3.7-max', openrouterId: 'qwen/qwen3.7-max', name: 'Trooper Premium', contextWindow: 128000 },
  { id: 'openrouter/moonshotai/kimi-k2.6', openrouterId: 'moonshotai/kimi-k2.6', name: 'Moonshot Kimi K2.6 (OR)', contextWindow: 128000 },
@@ -15843,6 +15849,30 @@ const _syncWarnings = [];
 
  // Ensure openclaw.json has models.providers entries for providers with keys
  {
+ // Keep models already on the provider. Replacing the object used to drop
+ // Trooper Auto (z-ai/glm-5.3-flash) the moment a key was saved.
+ function mergeOpenRouterProviderCatalog(existing, template) {
+  const current = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
+  const next = template && typeof template === 'object' && !Array.isArray(template) ? template : {};
+  const models = [];
+  const seen = new Set();
+  const push = (model) => {
+   if (!model || typeof model !== 'object') return;
+   const id = String(model.id || '').trim().toLowerCase();
+   if (!id || seen.has(id)) return;
+   seen.add(id);
+   models.push(model);
+  };
+  for (const model of Array.isArray(current.models) ? current.models : []) push(model);
+  for (const model of Array.isArray(next.models) ? next.models : []) push(model);
+  return {
+   ...next,
+   ...current,
+   baseUrl: current.baseUrl || next.baseUrl,
+   api: current.api || next.api,
+   models,
+  };
+ }
  const providerConfigs = {
  anthropic: { key: anthropicKey, config: {
  baseUrl: 'https://api.anthropic.com', api: 'anthropic-messages',
@@ -15867,7 +15897,8 @@ const _syncWarnings = [];
  openrouter: { key: openrouterKey, config: {
  baseUrl: 'https://openrouter.ai/api/v1', api: 'openai-completions',
  models: [
- { id: 'deepseek/deepseek-v4-flash-0731', name: 'Trooper Auto', contextWindow: 128000 },
+ { id: 'z-ai/glm-5.3-flash', name: 'Trooper Auto', contextWindow: 1048576 },
+ { id: 'deepseek/deepseek-v4-flash-0731', name: 'DeepSeek V4 Flash', contextWindow: 128000 },
  { id: 'qwen/qwen3.7-max', name: 'Trooper Premium', contextWindow: 128000 },
  { id: 'moonshotai/kimi-k2.6', name: 'Moonshot Kimi K2.6 (OR)', contextWindow: 128000 },
  { id: 'anthropic/claude-sonnet-4-5', name: 'Claude Sonnet 4.5 (OR)', contextWindow: 200000 },
@@ -15894,7 +15925,9 @@ const _syncWarnings = [];
  for (const [providerName, entry] of newProviders) {
  const nextProviderConfig = providerName === 'openai-codex'
   ? buildOpenAiCodexProviderConfig(config.models.providers[providerName] || {})
-  : entry.config;
+  : providerName === 'openrouter'
+   ? mergeOpenRouterProviderCatalog(config.models.providers[providerName], entry.config)
+   : entry.config;
  if (JSON.stringify(config.models.providers[providerName] || null) !== JSON.stringify(nextProviderConfig)) {
  config.models.providers[providerName] = nextProviderConfig;
  changed = true;
