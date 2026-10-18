@@ -1779,8 +1779,9 @@ const OPENCLAW_GENERATION_TOOL_BY_SLOT = {
 
 function ensureOpenClawToolAllowed(config, toolName) {
  if (!toolName) return false;
- if (!config.tools || typeof config.tools !== 'object' || Array.isArray(config.tools)) config.tools = {};
- if (!Array.isArray(config.tools.allow)) config.tools.allow = [];
+ // Do not create tools.allow. A new array is exclusive and hides every
+ // tool that was not pushed onto it, including nodes and devices.
+ if (!Array.isArray(config?.tools?.allow)) return false;
  if (config.tools.allow.includes(toolName)) return false;
  config.tools.allow.push(toolName);
  return true;
@@ -2080,7 +2081,7 @@ function prepareOpenClawConfigForGatewayStart(config) {
  const repairs = [];
  const pluginAllow = ensureOpenClawPluginAllowList(next);
  if (pluginAllow.added.length) {
-  repairs.push(`plugins.allow: restored ${pluginAllow.added.join(', ')}`);
+  repairs.push('plugins.allow: removed the exclusive list so every installed plugin can load');
  }
  normalizeOpenClawAgentsList(next);
  sanitizeBravePluginConfigForGatewayStart(next, repairs);
@@ -2127,6 +2128,11 @@ function prepareOpenClawConfigForGatewayStart(config) {
     repairs.push('tools.web.search.provider: removed unavailable brave provider');
    }
   }
+ }
+
+ const releasedAgain = ensureOpenClawPluginAllowList(next);
+ if (releasedAgain.added.length && !pluginAllow.added.length) {
+  repairs.push('plugins.allow: removed the exclusive list so every installed plugin can load');
  }
 
  return { config: next, repairs };
