@@ -1,4 +1,4 @@
-name: Publish Trooper CLI
+name: App — CLI
 
 on:
   workflow_dispatch:

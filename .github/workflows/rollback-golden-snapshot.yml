@@ -1,4 +1,4 @@
-name: Restore Previous Stable Snapshot
+name: Server — private snapshot, roll back
 
 on:
   workflow_dispatch:

@@ -1,4 +1,4 @@
-name: Build Hetzner Snapshot
+name: Server — private snapshot, bake
 
 on:
   workflow_dispatch:

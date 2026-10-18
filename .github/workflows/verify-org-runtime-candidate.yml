@@ -1,4 +1,4 @@
-name: Verify Org Runtime Candidate
+name: Test — org runtime bundle
 
 on:
   workflow_dispatch:

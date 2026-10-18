@@ -1,4 +1,4 @@
-name: Publish app version feed
+name: App — version feed
 
 on:
   workflow_dispatch:

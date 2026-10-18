@@ -1,4 +1,4 @@
-name: Build Private Trooper Fallback
+name: Test — Trooper app fallback
 
 # This is deliberately a public-repository workflow, so standard GitHub-hosted
 # Ubuntu runner time is free. It checks out the private Trooper repository with

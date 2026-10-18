@@ -1,4 +1,4 @@
-name: Private Trooper CI
+name: Test — Trooper app
 
 on:
   workflow_dispatch:

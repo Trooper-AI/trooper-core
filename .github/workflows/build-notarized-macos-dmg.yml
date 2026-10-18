@@ -1,4 +1,4 @@
-name: Build notarized macOS DMG
+name: App — Mac DMG
 
 on:
   workflow_dispatch:

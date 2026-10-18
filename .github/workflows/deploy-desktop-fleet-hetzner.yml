@@ -10,7 +10,7 @@
 # After success, the job summary prints TROOPER_DESKTOP_FLEET_HOSTS lines to paste
 # into the control plane (Render/Railway env) or org fleet config.
 
-name: Deploy Desktop Fleet Host (Hetzner)
+name: Server — cloud desktops
 
 on:
   workflow_dispatch:

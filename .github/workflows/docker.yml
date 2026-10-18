@@ -1,4 +1,4 @@
-name: Build Gateway Image
+name: Server — gateway image
 on:
   workflow_dispatch:
   push:

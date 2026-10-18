@@ -1,4 +1,4 @@
-name: Build Trooper Runtime Image
+name: Server — Dokploy runtime image
 
 # Public-repo workflow so GitHub-hosted Ubuntu minutes are free. It downloads
 # private Trooper with a read-only credential, builds

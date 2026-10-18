@@ -1,4 +1,4 @@
-name: Cleanup Snapshot Builder Orphans
+name: Server — private snapshot, clean leftovers
 
 on:
   workflow_dispatch:

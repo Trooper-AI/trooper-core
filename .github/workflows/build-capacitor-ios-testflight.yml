@@ -1,4 +1,4 @@
-name: Build Capacitor iOS TestFlight
+name: App — iOS TestFlight
 
 on:
   workflow_dispatch:

@@ -1,4 +1,4 @@
-name: Test Setup Script
+name: Test — bridge
 on:
   push:
     branches: [main]
