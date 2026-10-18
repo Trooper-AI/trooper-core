@@ -186,7 +186,7 @@ import {
   migrateAllAgentAuthJsonToSqlite,
   syncAgentAuthProfileSqlite as syncAgentAuthProfileSqliteFile,
 } from './lib/agent-auth-sqlite.mjs';
-import { applyTelegramTokenToOpenClawConfig, buildTelegramEnvUpdates } from './lib/channel-config.mjs';
+import { applyTelegramTokenToOpenClawConfig, buildTelegramEnvUpdates, ensureTelegramChannelReady } from './lib/channel-config.mjs';
 import { hardenActiveMemoryConfigForBridge } from './lib/active-memory-config.mjs';
 import {
   attachConfigFileMetadata,
@@ -2066,6 +2066,14 @@ function ensureBridgeTelemetryPluginsForGatewayStart(config, repairs) {
  }
 }
 
+function readTelegramBotTokenFromEnvFile() {
+ try {
+  return readProviderEnvValue(readFileSync('/opt/openclaw/.env', 'utf8'), 'telegram');
+ } catch {
+  return '';
+ }
+}
+
 function prepareOpenClawConfigForGatewayStart(config) {
  const next = cloneJson(config);
  const repairs = [];
@@ -2074,6 +2082,14 @@ function prepareOpenClawConfigForGatewayStart(config) {
  augmentImageGenerationFallbacksForGatewayStart(next, repairs);
  ensureImageGenerationDefaultsPluginForGatewayStart(next, repairs);
  ensureBridgeTelemetryPluginsForGatewayStart(next, repairs);
+ const telegramReady = ensureTelegramChannelReady(next, {
+  envToken: process.env.TELEGRAM_BOT_TOKEN || readTelegramBotTokenFromEnvFile(),
+ });
+ if (telegramReady.changed) {
+  for (const key of Object.keys(next)) delete next[key];
+  Object.assign(next, telegramReady.config);
+  repairs.push('channels.telegram: allowlisted the bundled telegram plugin');
+ }
 
  const providers = next?.models?.providers;
  if (providers && typeof providers === 'object' && !Array.isArray(providers)) {
@@ -10154,7 +10170,7 @@ async function reloadGatewayConfigPatch(patch) {
   }, { timeoutMs: 20000 });
 }
 
-async function reloadTelegramOnGateway(telegram = {}) {
+async function reloadTelegramOnGateway(telegram = {}, plugins = null) {
   const patch = {
     channels: {
       telegram: {
@@ -10165,6 +10181,15 @@ async function reloadTelegramOnGateway(telegram = {}) {
       },
     },
   };
+  // Send the full allow list. A partial list would replace the exclusive
+  // plugins.allow array and unload every other plugin.
+  if (plugins && typeof plugins === 'object' && !Array.isArray(plugins)) {
+    patch.plugins = {};
+    if (Array.isArray(plugins.allow)) patch.plugins.allow = plugins.allow;
+    if (plugins.entries?.telegram) {
+      patch.plugins.entries = { telegram: plugins.entries.telegram };
+    }
+  }
   await reloadGatewayConfigPatch(patch);
 }
 
@@ -15454,7 +15479,9 @@ app.post('/config/api-keys', async (req, res) => {
 	 if (channelEnvUpdates.TELEGRAM_BOT_TOKEN !== undefined) {
 	 try {
 	 const token = channelEnvUpdates.TELEGRAM_BOT_TOKEN;
-	 const { config, changed, configured } = applyTelegramTokenToOpenClawConfig(readOpenClawConfig(), token);
+	 const existingConfig = readOpenClawConfig();
+	 const allowBefore = Array.isArray(existingConfig?.plugins?.allow) ? existingConfig.plugins.allow : [];
+	 const { config, changed, configured } = applyTelegramTokenToOpenClawConfig(existingConfig, token);
 	 if (changed) writeOpenClawConfig(config);
 	 writeConfigKey('channel:telegram', {
 	  configured,
@@ -15462,10 +15489,19 @@ app.post('/config/api-keys', async (req, res) => {
 	  updatedAt: Date.now(),
 	 });
 	 try {
-	  await reloadTelegramOnGateway(config?.channels?.telegram || {});
+	  await reloadTelegramOnGateway(config?.channels?.telegram || {}, config?.plugins);
 	  console.log(`[bridge] Telegram channel ${configured ? 'configured' : 'cleared'} and reloaded`);
 	 } catch (reloadErr) {
 	  console.warn(`[bridge] Telegram channel saved but the gateway did not reload: ${reloadErr.message}`);
+	 }
+	 const allowAfter = Array.isArray(config?.plugins?.allow) ? config.plugins.allow : [];
+	 if (configured && allowAfter.includes('telegram') && !allowBefore.includes('telegram')) {
+	  try {
+	   execSync(`docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 30000 });
+	   console.log('[bridge] Gateway restarted so the bundled telegram plugin can load');
+	  } catch (restartErr) {
+	   console.warn(`[bridge] Telegram was allowlisted but the gateway did not restart: ${restartErr.message}`);
+	  }
 	 }
 	 console.log(`[bridge] Telegram channel ${configured ? 'configured' : 'cleared'} for OpenClaw`);
 	 } catch (e) {
@@ -19065,6 +19101,14 @@ server.listen(PORT, '0.0.0.0', () => {
   const repaired = repairOpenClawConfigForGatewayStart('startup');
   if (repaired.updated || (repaired.repairs && repaired.repairs.length)) {
    console.log(`[bridge] Gateway-start config heal applied (${(repaired.repairs || []).length} repairs)`);
+  }
+  if ((repaired.repairs || []).some((line) => String(line).includes('telegram'))) {
+   try {
+    execSync(`docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 30000 });
+    console.log('[bridge] Gateway restarted so the bundled telegram plugin can load');
+   } catch (restartErr) {
+    console.warn(`[bridge] Telegram was allowlisted but the gateway did not restart: ${restartErr.message}`);
+   }
   }
   startGatewayProcessWatchdog();
  } catch (error) {
