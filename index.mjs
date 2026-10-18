@@ -293,6 +293,7 @@ import {
   buildImageGenerationDefaultsPluginFiles,
 } from './lib/image-generation-defaults-plugin.mjs';
 import { resolveHostMediaAlias } from './lib/media-path-resolution.mjs';
+import { ensureOpenClawPluginAllowList } from './lib/plugin-allow.mjs';
 
 const OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write', 'operator.approvals', 'operator.talk.secrets'];
 
@@ -2077,6 +2078,10 @@ function readTelegramBotTokenFromEnvFile() {
 function prepareOpenClawConfigForGatewayStart(config) {
  const next = cloneJson(config);
  const repairs = [];
+ const pluginAllow = ensureOpenClawPluginAllowList(next);
+ if (pluginAllow.added.length) {
+  repairs.push(`plugins.allow: restored ${pluginAllow.added.join(', ')}`);
+ }
  normalizeOpenClawAgentsList(next);
  sanitizeBravePluginConfigForGatewayStart(next, repairs);
  augmentImageGenerationFallbacksForGatewayStart(next, repairs);
@@ -15458,8 +15463,9 @@ app.post('/config/api-keys', async (req, res) => {
    enabled: true,
    config: {},
   };
-  if (!config.plugins.allow || !Array.isArray(config.plugins.allow)) config.plugins.allow = [];
-  if (!config.plugins.allow.includes('brave')) config.plugins.allow.push('brave');
+  if (Array.isArray(config.plugins.allow) && !config.plugins.allow.includes('brave')) {
+   config.plugins.allow.push('brave');
+  }
  } else if (config.plugins.entries.brave) {
   config.plugins.entries.brave = { ...existingBrave, enabled: false };
  }
