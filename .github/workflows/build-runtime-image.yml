@@ -64,6 +64,7 @@ jobs:
             ghcr.io/trooper-ai/trooper-runtime:latest
           build-args: |
             GATEWAY_IMAGE=ghcr.io/trooper-ai/trooper-gateway:latest
+            RUNTIME_IMAGE=ghcr.io/trooper-ai/trooper-runtime:sha-${{ steps.trooper.outputs.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/Trooper-AI/trooper-core
             org.opencontainers.image.description=Trooper App-pool runtime (gateway + org-runtime)
