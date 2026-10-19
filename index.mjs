@@ -187,6 +187,7 @@ import {
   syncAgentAuthProfileSqlite as syncAgentAuthProfileSqliteFile,
 } from './lib/agent-auth-sqlite.mjs';
 import { applyTelegramTokenToOpenClawConfig, buildTelegramEnvUpdates, ensureTelegramChannelReady } from './lib/channel-config.mjs';
+import { openClawEnvFileCandidates, writeOpenClawEnvFile } from './lib/openclaw-env-file.mjs';
 import { hardenActiveMemoryConfigForBridge } from './lib/active-memory-config.mjs';
 import {
   attachConfigFileMetadata,
@@ -15253,6 +15254,25 @@ function readProviderEnvValue(envContent, provider) {
  return '';
 }
 
+function readProviderPresenceValue(provider, envContent) {
+ const fromEnv = readProviderEnvValue(envContent, provider);
+ if (fromEnv) return fromEnv;
+ if (provider !== 'telegram') return '';
+ try {
+  return String(readOpenClawConfig()?.channels?.telegram?.botToken || '').trim();
+ } catch {
+  return '';
+ }
+}
+
+function persistOpenClawEnvFile(content) {
+ return writeOpenClawEnvFile(content, {
+  write: writeTextFileIfChanged,
+  candidates: openClawEnvFileCandidates({ configPath: OPENCLAW_CONFIG_PATH }),
+  warn: (message) => console.warn(message),
+ });
+}
+
 app.get('/config/api-keys', (req, res) => {
  try {
  let envContent = '';
@@ -15263,7 +15283,7 @@ app.get('/config/api-keys', (req, res) => {
  };
 	 const keys = {};
 	 for (const provider of Object.keys(PROVIDER_ENV_NAME_MAP)) {
-	  const value = readProviderEnvValue(envContent, provider);
+	  const value = readProviderPresenceValue(provider, envContent);
 	  keys[provider] = { present: !!value, masked: mask(value), source: getProviderBillingSource(provider) };
 	 }
 	 res.json({ keys });
@@ -15410,7 +15430,7 @@ app.post('/config/api-keys', async (req, res) => {
 	  setEnvVar(envName, envValue);
 	 }
 
-	 writeTextFileIfChanged('/opt/openclaw/.env', envContent);
+	 persistOpenClawEnvFile(envContent);
 
  // Track backup keys — store each new non-empty key in the backup list
 	 const BACKUP_KEY_PROVIDERS = {
@@ -15500,11 +15520,15 @@ app.post('/config/api-keys', async (req, res) => {
 	  enabled: config?.channels?.telegram?.enabled !== false,
 	  updatedAt: Date.now(),
 	 });
+	 if (changed) {
 	 try {
 	  await reloadTelegramOnGateway(config?.channels?.telegram || {}, config?.plugins);
 	  console.log(`[bridge] Telegram channel ${configured ? 'configured' : 'cleared'} and reloaded`);
 	 } catch (reloadErr) {
 	  console.warn(`[bridge] Telegram channel saved but the gateway did not reload: ${reloadErr.message}`);
+	 }
+	 } else {
+	  console.log('[bridge] Telegram channel already matched the gateway config');
 	 }
 	 const allowAfter = Array.isArray(config?.plugins?.allow) ? config.plugins.allow : [];
 	 if (configured && allowAfter.includes('telegram') && !allowBefore.includes('telegram')) {
@@ -16164,7 +16188,7 @@ app.get('/config/provider-settings', (req, res) => {
 
 	  const providers = {};
 	  for (const provider of Object.keys(PROVIDER_ENV_NAME_MAP)) {
-	   const value = readProviderEnvValue(envContent, provider);
+	   const value = readProviderPresenceValue(provider, envContent);
 	   providers[provider] = { present: !!value, masked: mask(value), source: getProviderBillingSource(provider) };
 	  }
 
