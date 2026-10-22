@@ -247,6 +247,7 @@ import {
   filterSessionsByKeys,
   parseSessionStatusKeys,
 } from './lib/session-status-bulk.mjs';
+import { telegramGroupSessions } from './lib/telegram-groups.mjs';
 import {
  CodexDeviceAuthJobManager,
   DEFAULT_CODEX_ACP_CONTAINER_HOME,
@@ -16570,32 +16571,12 @@ Use the location above for weather, local recommendations, nearby services, time
 When using browser tools that request geolocation, use the coordinates above.
 `;
 
- const toolsMd = `# TOOLS.md - Local Notes
-
-## Location & Geolocation
-
-- **User location:** ${location || '(not set)'}
-- **Coordinates:** ${coordinates || '(not set)'}
-- **Timezone:** ${timezone || 'UTC'}
-- When fetching weather, local news, nearby places — use the location above
-
-## Browser
-
-- Running Chrome on headless VPS with virtual display (Xvnc :99)
-- Browser tool available for web searches, screenshots, automation
-- Use web_fetch for quick lookups, browser tool for interactive sites
-
-## Web Search
-
-- Brave Search API configured (when available)
-- Fallback: use browser tool with DuckDuckGo or Google
-`;
-
- const fs = await import('fs');
+ // Location belongs in USER.md. TOOLS.md is the tool catalog (Chrome, skills,
+ // plugins). Replacing it with Local Notes makes Telegram treat the VPS as the
+ // user's browser and ask for an API key.
 	 writeTextFileIfChanged(`${WORKSPACE}/USER.md`, userMd);
-	 writeTextFileIfChanged(`${WORKSPACE}/TOOLS.md`, toolsMd);
-	 console.log(`[config] Updated USER.md + TOOLS.md: name=${name}, location=${location}`);
- res.json({ ok: true, updated: ['USER.md', 'TOOLS.md'] });
+	 console.log(`[config] Updated USER.md: name=${name}, location=${location}`);
+ res.json({ ok: true, updated: ['USER.md'] });
  } catch (err) {
  console.error('[config] user-context error:', err.message);
  res.status(500).json({ error: err.message });
@@ -17544,6 +17525,26 @@ app.get('/api/sessions/status', async (req, res) => {
     }, { timeoutMs: 20000 });
     const sessions = filterSessionsByKeys(listResult, parsed.keys);
     res.json({ ok: true, sessions, fetchedAt: Date.now(), source: 'sessions.list' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Numeric Telegram groups become Trooper channels. DMs stay on the agent DM.
+app.get('/api/telegram/groups', async (req, res) => {
+  try {
+    if (!gateway.connected) {
+      return res.json({ ok: false, error: 'gateway_unreachable', groups: [], fetchedAt: Date.now() });
+    }
+    const listResult = await gateway.request('sessions.list', {
+      limit: 500,
+      includeDerivedTitles: true,
+    }, { timeoutMs: 20000 });
+    res.json({
+      ok: true,
+      groups: telegramGroupSessions(listResult),
+      fetchedAt: Date.now(),
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
