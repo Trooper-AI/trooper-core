@@ -2123,7 +2123,10 @@ function prepareOpenClawConfigForGatewayStart(config) {
   if (search && typeof search === 'object' && !Array.isArray(search)) {
    const provider = typeof search.provider === 'string' ? search.provider.trim().toLowerCase() : '';
    const braveEntry = next.plugins?.entries?.brave;
-   const braveConfigured = braveEntry && braveEntry.enabled !== false && next.meta?.trooperBravePluginInstalled === true;
+   // The plugin-installed flag cannot live in openclaw.json: the gateway
+   // rejects that meta key. An enabled brave entry plus provider=brave is the
+   // config the running gateway accepts once @openclaw/brave-plugin is present.
+   const braveConfigured = braveEntry && braveEntry.enabled !== false;
    if (provider === 'brave' && !braveConfigured) {
     delete search.provider;
     delete search.apiKey;
@@ -15501,10 +15504,16 @@ app.post('/config/api-keys', async (req, res) => {
  if (!config.tools.web.search || typeof config.tools.web.search !== 'object') {
  config.tools.web.search = {};
  }
- if (String(config.tools.web.search.provider || '').toLowerCase() === 'brave' && config.meta?.trooperBravePluginInstalled !== true) {
-  delete config.tools.web.search.provider;
+ if (braveKey) {
+  config.tools.web.search.enabled = true;
+  config.tools.web.search.provider = 'brave';
+  config.tools.web.search.apiKey = braveKey;
+ } else {
+  if (String(config.tools.web.search.provider || '').toLowerCase() === 'brave') {
+   delete config.tools.web.search.provider;
+  }
+  delete config.tools.web.search.apiKey;
  }
- delete config.tools.web.search.apiKey;
 	 writeOpenClawConfig(config);
 	 } catch (e) { console.error('Failed to update openclaw.json:', e.message); }
 	 }
