@@ -248,6 +248,8 @@ jobs:
 
       - name: Stamp updater version above the published feed
         if: env.SKIP_MACOS_RELEASE != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: node scripts/stamp-macos-updater-version.mjs
 
       - name: Build Tauri app bundle
@@ -548,12 +550,38 @@ jobs:
           CHECKSUM="${DMG}.sha256"
           shasum -a 256 "$DMG" | sed "s#  .*#  Trooper.dmg#" > "$CHECKSUM"
 
+          VERSION="$(node -p "require('./package.json').version")"
+          LIVE="$(curl -fsSL -H "Accept: application/json" "https://github.com/Trooper-AI/trooper-core/releases/download/darwin-latest/latest.json" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("version") or "").strip())')"
+          if [ -z "$LIVE" ]; then
+            echo "::error::Refusing to publish Trooper ${VERSION}. The update feed could not be read."
+            exit 1
+          fi
+          if ! node --input-type=module -e '
+            function parts(value) {
+              const parsed = String(value || "").split(/[.+-]/).slice(0, 3).map((part) => {
+                const n = Number.parseInt(part, 10);
+                return Number.isFinite(n) ? n : 0;
+              });
+              while (parsed.length < 3) parsed.push(0);
+              return parsed;
+            }
+            const ours = parts(process.argv[1]);
+            const live = parts(process.argv[2]);
+            for (let i = 0; i < 3; i += 1) {
+              if (ours[i] !== live[i]) process.exit(ours[i] > live[i] ? 0 : 2);
+            }
+            process.exit(2);
+          ' "$VERSION" "$LIVE"; then
+            echo "Refusing to publish Trooper ${VERSION}. The update feed is already ${LIVE}."
+            echo "SKIP_MACOS_PUBLISH=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
           gh release delete macos-latest \
             --repo "${{ github.repository }}" \
             --cleanup-tag \
             --yes >/dev/null 2>&1 || true
 
-          VERSION="$(node -p "require('./package.json').version")"
           gh release create macos-latest "$DMG" "$CHECKSUM" \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
@@ -562,7 +590,7 @@ jobs:
             --latest
 
       - name: Mirror DMG to install URLs (private Trooper + landing)
-        if: env.SKIP_MACOS_RELEASE != 'true'
+        if: env.SKIP_MACOS_RELEASE != 'true' && env.SKIP_MACOS_PUBLISH != 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
