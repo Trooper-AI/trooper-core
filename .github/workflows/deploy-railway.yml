@@ -1,0 +1,185 @@
+name: Deploy Railway
+
+# The Railway account has no GitHub user, so the Trooper service must stay
+# disconnected from GitHub. A GitHub autodeploy cannot read the private repo
+# and fails with a permission error before the build. This workflow uploads
+# a clean tree with a project token instead.
+
+on:
+  workflow_dispatch:
+    inputs:
+      trooper_ref:
+        description: Private Trooper branch, tag, or commit
+        required: false
+        default: main
+      force:
+        description: Deploy again even if this commit is already live
+        type: boolean
+        required: false
+        default: false
+  schedule:
+    - cron: "*/20 * * * *"
+
+concurrency:
+  group: railway-trooper-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Checkout trooper-core
+        uses: actions/checkout@v5
+
+      - name: Install Railway CLI
+        run: |
+          set -euo pipefail
+          npm install --prefix "$RUNNER_TEMP/railway" @railway/cli@5.71.0
+          echo "$RUNNER_TEMP/railway/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Resolve Trooper commit
+        id: sha
+        env:
+          PRIMARY_TOKEN: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          FALLBACK_TOKEN: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+          REQUESTED_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.trooper_ref || 'main' }}
+        run: |
+          set -euo pipefail
+          ref="${REQUESTED_REF:-main}"
+          resolve() {
+            curl -fsSL \
+              -H "Authorization: Bearer $1" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/absurdfounder/Trooper/commits/${ref}" \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])'
+          }
+          sha=""
+          if [ -n "${PRIMARY_TOKEN:-}" ]; then
+            sha="$(resolve "$PRIMARY_TOKEN" || true)"
+          fi
+          if [ -z "$sha" ] && [ -n "${FALLBACK_TOKEN:-}" ]; then
+            sha="$(resolve "$FALLBACK_TOKEN" || true)"
+          fi
+          if [ -z "$sha" ]; then
+            echo "::error::Could not resolve absurdfounder/Trooper@${ref}"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Resolved absurdfounder/Trooper@${sha}"
+
+      - name: Skip when this commit is already deploying
+        id: gate
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          PRIMARY_TOKEN: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          FALLBACK_TOKEN: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+          TROOPER_SHA: ${{ steps.sha.outputs.sha }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force && 'yes' || 'no' }}
+        run: |
+          set -euo pipefail
+          if [ "$FORCE" = "yes" ]; then
+            echo "deploy=yes" >> "$GITHUB_OUTPUT"
+            echo "forced deploy"
+            exit 0
+          fi
+          railway deployment list --limit 40 --json \
+            --project 17616483-f37b-4aa8-adf6-98c1a6d21db0 \
+            --environment production \
+            --service a5764966-3ae2-4433-890f-676c295e5a90 \
+            > "$RUNNER_TEMP/deployments.json"
+          python3 - << 'PY'
+          import json, os, urllib.request
+          sha = os.environ["TROOPER_SHA"]
+          raw = open(os.environ["RUNNER_TEMP"] + "/deployments.json").read()
+          items = json.loads(raw[raw.find("["):])
+          active = {"INITIALIZING", "QUEUED", "WAITING", "BUILDING", "DEPLOYING", "SUCCESS"}
+          matched = []
+          previous = ""
+          for item in items:
+              message = ((item.get("meta") or {}).get("cliMessage") or "").strip()
+              status = item.get("status") or ""
+              if sha and sha in message:
+                  matched.append(status)
+              if not previous and status == "SUCCESS" and len(message) == 40:
+                  previous = message
+          failed = sum(1 for status in matched if status == "FAILED")
+          if any(status in active for status in matched) or failed >= 2:
+              decision = "no"
+          elif previous and previous != sha:
+              decision = "yes"
+              runtime_prefixes = (
+                  "server/", "src/", "public/", "functions/",
+              )
+              runtime_names = {
+                  "package.json", "package-lock.json", "railway.toml",
+                  "railway.json", "Dockerfile", "index.html", "vite.config.js",
+                  "vite.config.ts",
+              }
+              for token in (os.environ.get("PRIMARY_TOKEN") or "", os.environ.get("FALLBACK_TOKEN") or ""):
+                  if not token:
+                      continue
+                  url = f"https://api.github.com/repos/absurdfounder/Trooper/compare/{previous}...{sha}"
+                  request = urllib.request.Request(url, headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "User-Agent": "trooper-railway-deploy",
+                  })
+                  try:
+                      with urllib.request.urlopen(request, timeout=30) as response:
+                          payload = json.load(response)
+                  except Exception as exc:
+                      print("compare-skipped", type(exc).__name__)
+                      continue
+                  files = [item.get("filename") or "" for item in payload.get("files") or []]
+                  runtime = [
+                      path for path in files
+                      if path in runtime_names or path.startswith(runtime_prefixes)
+                  ]
+                  print("changed", len(files), "runtime", len(runtime))
+                  decision = "yes" if runtime or len(files) >= 250 else "no"
+                  break
+          else:
+              decision = "yes"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
+              handle.write(f"deploy={decision}\n")
+          print("deploy", decision, "attempts", ",".join(matched) or "none")
+          PY
+
+      - name: Download private Trooper
+        if: steps.gate.outputs.deploy == 'yes'
+        uses: ./.github/actions/download-private-trooper
+        with:
+          ref: ${{ steps.sha.outputs.sha }}
+          token: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          fallback-token: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+
+      - name: Upload and deploy
+        if: steps.gate.outputs.deploy == 'yes'
+        working-directory: private-trooper
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          TROOPER_SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test -f railway.toml
+          test -f package.json
+          railway up --detach --json \
+            --project 17616483-f37b-4aa8-adf6-98c1a6d21db0 \
+            --environment production \
+            --service a5764966-3ae2-4433-890f-676c295e5a90 \
+            --message "$TROOPER_SHA" > "$RUNNER_TEMP/up.json"
+          python3 - << 'PY'
+          import json, os, sys
+          raw = open(os.environ["RUNNER_TEMP"] + "/up.json").read()
+          data = json.loads(raw[raw.find("{"):])
+          deployment = data.get("deploymentId") or ""
+          url = data.get("logsUrl") or ""
+          expected = "a5764966-3ae2-4433-890f-676c295e5a90"
+          if expected not in url or not deployment:
+              sys.stderr.write("deploy did not target the Trooper service\n")
+              sys.exit(1)
+          print("queued", deployment)
+          PY
