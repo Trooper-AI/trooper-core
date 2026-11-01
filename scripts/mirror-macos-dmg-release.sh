@@ -46,8 +46,14 @@ publish_release "$CORE_TOKEN" "$CORE_REPO" macos-latest "$DMG" "$CHECKSUM"
 
 UPDATE_ARCHIVE="$(find src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -name "*.app.tar.gz" | head -1 || true)"
 if [ -z "${UPDATE_ARCHIVE:-}" ] || [ ! -f "${UPDATE_ARCHIVE}.sig" ]; then
-  echo "::error::No Tauri updater archive. Check for updates will not move. Set TAURI_SIGNING_PRIVATE_KEY on Trooper-AI/trooper-core and do not disable createUpdaterArtifacts."
-  exit 1
+  echo "No Tauri updater archive. The manual DMG was published. Installed Tauri apps keep the current auto-update feed."
+  if [ -n "$PUBLIC_TOKEN" ]; then
+    for repo in absurdfounder/Trooper absurdfounder/trooper_landing; do
+      publish_release "$PUBLIC_TOKEN" "$repo" macos-latest "$DMG" "$CHECKSUM" || \
+        echo "::warning::Could not mirror the DMG to ${repo}."
+    done
+  fi
+  exit 0
 fi
 
 mkdir -p release-update
