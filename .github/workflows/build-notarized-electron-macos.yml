@@ -259,7 +259,12 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: "true"
         run: |
           set -euo pipefail
-          npm --prefix electron exec -- electron-builder --mac dir --universal
+          # npm --prefix keeps the repo root as cwd, so electron-builder would
+          # read the root package.json and miss the Electron install.
+          (
+            cd electron
+            ./node_modules/.bin/electron-builder --mac dir --universal --publish never
+          )
           APP=$(find electron/release -type d -name "Trooper.app" | head -1)
           if [ -z "$APP" ]; then
             echo "No Electron app bundle found."
