@@ -255,7 +255,8 @@ jobs:
       - name: Build the Electron app
         if: env.SKIP_MACOS_RELEASE != 'true'
         env:
-          CSC_NAME: ${{ env.DEVELOPER_ID_APPLICATION }}
+          # electron-builder adds "Developer ID Application:" itself.
+          CSC_NAME: "Vaibhav Kalra (L27PMU448G)"
           CSC_IDENTITY_AUTO_DISCOVERY: "true"
         run: |
           set -euo pipefail
