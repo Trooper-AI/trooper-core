@@ -292,12 +292,9 @@ jobs:
             exit 1
           fi
 
-          while IFS= read -r FILE_PATH; do
-            if file "$FILE_PATH" | grep -Eq 'Mach-O|dynamically linked shared library|current ar archive'; then
-              codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID_APPLICATION" "$FILE_PATH"
-            fi
-          done < <(find "$APP/Contents" -type f -perm -111)
-
+          # electron-builder already signed the bundle from the inside out.
+          # Walking every Mach-O again signs libraries inside Electron
+          # Framework after the framework seal, and Gatekeeper then rejects it.
           # This library is loaded into Trooper's own executable process.
           NATIVE_RUNTIME="$APP/Contents/Frameworks/libTrooperNative.dylib"
           if [ -f "$NATIVE_RUNTIME" ]; then
