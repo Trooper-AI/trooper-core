@@ -10,6 +10,7 @@ process.on('unhandledRejection', (err) => {
 // (workspace files, tools, memory, session persistence, sub-agent spawning)
 import { captureLog, recordRun, getLogs, getStats } from './lib/log-buffer.mjs';
 import { withGatewayAttachments } from './lib/gateway-attachments.mjs';
+import { modelListParamsForRefresh } from './lib/model-list-params.mjs';
 import { resolveSpillSettings } from './lib/tool-result-spill.mjs';
 import express from 'express';
 import {
@@ -15082,7 +15083,9 @@ app.get('/commands/list', async (req, res) => {
 app.get('/models/list', async (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
  try {
-  const raw = await gateway.request('models.list', {}, { timeoutMs: 15000 });
+  // Normal picker reads stay configured; an explicit refresh discovers live models.
+  const modelListParams = modelListParamsForRefresh(req.query.refresh === '1');
+  const raw = await gateway.request('models.list', modelListParams, { timeoutMs: 15000 });
   const providerModels = readConfigKey('providerModels') || {};
   const configuredProviders = readOpenClawConfig()?.models?.providers || {};
   const hasConfiguredProviderBaseUrl = (provider) =>
