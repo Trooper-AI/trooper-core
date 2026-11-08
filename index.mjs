@@ -187,6 +187,7 @@ import {
   migrateAllAgentAuthJsonToSqlite,
   syncAgentAuthProfileSqlite as syncAgentAuthProfileSqliteFile,
 } from './lib/agent-auth-sqlite.mjs';
+import { addCanonicalOpenAiOAuthProfiles } from './lib/canonical-openai-auth.mjs';
 import { applyTelegramTokenToOpenClawConfig, buildTelegramEnvUpdates, ensureTelegramChannelReady } from './lib/channel-config.mjs';
 import { openClawEnvFileCandidates, readOpenClawEnvFile, writeOpenClawEnvFile } from './lib/openclaw-env-file.mjs';
 import { hardenActiveMemoryConfigForBridge } from './lib/active-memory-config.mjs';
@@ -6749,8 +6750,13 @@ try {
 } catch (e) { /* config not available yet */ }
 
 try {
- const auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
- let authChanged = false;
+ const currentAuth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+ const canonicalAuth = addCanonicalOpenAiOAuthProfiles(currentAuth);
+ const auth = canonicalAuth.authDoc;
+ let authChanged = canonicalAuth.changed;
+ if (canonicalAuth.migrated.length) {
+  console.log(`[bridge] Added ${canonicalAuth.migrated.length} canonical OpenAI OAuth profile(s) from legacy Codex profiles`);
+ }
  if (auth.profiles) {
   for (const [id, profile] of Object.entries(auth.profiles)) {
    if (profile.provider === 'anthropic' && profile.key && profile.key.startsWith('sk-ant-oat')) {
@@ -6762,7 +6768,7 @@ try {
   }
  }
  if (authChanged) {
-  writeMirroredAuthProfiles(auth);
+  writeMirroredAuthProfiles(auth, { backup: canonicalAuth.migrated.length > 0 });
  }
 } catch (e) { /* auth profiles not available yet */ }
 
@@ -15325,11 +15331,17 @@ function readProviderPresenceValue(provider, envContent) {
 }
 
 function persistOpenClawEnvFile(content) {
- return writeOpenClawEnvFile(content, {
+ const result = writeOpenClawEnvFile(content, {
   write: writeTextFileIfChanged,
   candidates: openClawEnvFileCandidates({ primary: OPENCLAW_ENV_PATH, configPath: OPENCLAW_CONFIG_PATH }),
   warn: (message) => console.warn(message),
  });
+ if (!result.written) {
+  const error = new Error(`Could not save provider settings to OpenClaw: ${result.error || 'environment file is not writable'}`);
+  error.code = 'OPENCLAW_ENV_WRITE_FAILED';
+  throw error;
+ }
+ return result;
 }
 
 function readOpenClawEnvContent() {
