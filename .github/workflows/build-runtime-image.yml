@@ -15,6 +15,10 @@ on:
         description: Private Trooper branch, tag, or commit SHA to bake
         required: true
         default: main
+      gateway_image:
+        description: Immutable or tagged Trooper gateway image to use as the runtime base
+        required: true
+        default: ghcr.io/trooper-ai/trooper-gateway:latest
 
 permissions:
   contents: read
@@ -63,7 +67,7 @@ jobs:
             ghcr.io/trooper-ai/trooper-runtime:sha-${{ steps.trooper.outputs.sha }}
             ghcr.io/trooper-ai/trooper-runtime:latest
           build-args: |
-            GATEWAY_IMAGE=ghcr.io/trooper-ai/trooper-gateway:latest
+            GATEWAY_IMAGE=${{ inputs.gateway_image }}
             RUNTIME_IMAGE=ghcr.io/trooper-ai/trooper-runtime:sha-${{ steps.trooper.outputs.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/Trooper-AI/trooper-core
@@ -96,6 +100,7 @@ jobs:
             echo "- \`ghcr.io/trooper-ai/trooper-runtime:sha-${{ steps.trooper.outputs.sha }}\`"
             echo "- \`ghcr.io/trooper-ai/trooper-runtime:latest\`"
             echo
+            echo "Gateway base: \`${{ inputs.gateway_image }}\`"
             echo "Set on Railway: \`TROOPER_RUNTIME_IMAGE=ghcr.io/trooper-ai/trooper-runtime:sha-${{ steps.trooper.outputs.sha }}\`"
             echo "Keep \`TROOPER_APP_POOL_ENABLED\` off until staging smoke."
           } >> "$GITHUB_STEP_SUMMARY"

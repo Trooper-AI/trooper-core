@@ -14607,11 +14607,11 @@ app.post('/gateway/providers/verify', async (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
  const keys = Object.keys(body);
- if (keys.some((key) => !['provider', 'profileId'].includes(key))) {
+ if (keys.some((key) => !['provider', 'profileId', 'model'].includes(key))) {
   return res.status(400).json({
    ok: false,
    code: 'OPENCLAW_PROVIDER_REQUEST_INVALID',
-   message: 'Only a provider and optional account profile may be submitted.',
+   message: 'Only a provider, optional account profile, and optional probe model may be submitted.',
   });
  }
  const endOperation = beginRuntimeOperation('provider_connection_check', {
@@ -14622,6 +14622,7 @@ app.post('/gateway/providers/verify', async (req, res) => {
    provider: body.provider,
    profileId: body.profileId,
    probe: true,
+   model: body.model,
   });
   res.json(result);
  } catch (error) {
