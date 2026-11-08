@@ -188,7 +188,7 @@ import {
   syncAgentAuthProfileSqlite as syncAgentAuthProfileSqliteFile,
 } from './lib/agent-auth-sqlite.mjs';
 import { applyTelegramTokenToOpenClawConfig, buildTelegramEnvUpdates, ensureTelegramChannelReady } from './lib/channel-config.mjs';
-import { openClawEnvFileCandidates, writeOpenClawEnvFile } from './lib/openclaw-env-file.mjs';
+import { openClawEnvFileCandidates, readOpenClawEnvFile, writeOpenClawEnvFile } from './lib/openclaw-env-file.mjs';
 import { hardenActiveMemoryConfigForBridge } from './lib/active-memory-config.mjs';
 import {
   attachConfigFileMetadata,
@@ -927,6 +927,7 @@ process.env.OPENCLAW_GATEWAY_CONTAINER = OPENCLAW_GATEWAY_CONTAINER;
 const OPENCLAW_DATA_ROOT = process.env.OPENCLAW_DATA_ROOT || '/opt/openclaw-data';
 const OPENCLAW_CONFIG_ROOT = process.env.OPENCLAW_CONFIG_ROOT || `${OPENCLAW_DATA_ROOT}/config`;
 const OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH || `${OPENCLAW_CONFIG_ROOT}/openclaw.json`;
+const OPENCLAW_ENV_PATH = process.env.OPENCLAW_ENV_PATH || '/opt/openclaw/.env';
 const OPENCLAW_WORKSPACE_HOST_ROOT = process.env.OPENCLAW_WORKSPACE_HOST_ROOT || `${OPENCLAW_DATA_ROOT}/workspace`;
 const OPENCLAW_AGENTS_CONFIG_ROOT = process.env.OPENCLAW_AGENTS_CONFIG_ROOT || `${OPENCLAW_CONFIG_ROOT}/agents`;
 const USE_GATEWAY_DEVICE_AUTH = process.env.OPENCLAW_BRIDGE_DEVICE_AUTH === '1';
@@ -1019,7 +1020,7 @@ function writeProviderBillingSources(sources) {
 
 function readActiveProviderKey(provider) {
  const envContent = (() => {
-  try { return readFileSync('/opt/openclaw/.env', 'utf8'); } catch { return ''; }
+  try { return readOpenClawEnvContent(); } catch { return ''; }
  })();
  return readProviderEnvValue(envContent, provider);
 }
@@ -1755,9 +1756,11 @@ function safeDiagnosticExec(command, { timeout = 8000, maxBuffer = 4 * 1024 * 10
 }
 
 function readRuntimeEnvSummary() {
- const envPath = '/opt/openclaw/.env';
- let envContent = '';
- try { envContent = readFileSync(envPath, 'utf8'); } catch {}
+ const envFile = readOpenClawEnvFile({
+  read: (filePath) => readFileSync(filePath, 'utf8'),
+  candidates: openClawEnvFileCandidates({ primary: OPENCLAW_ENV_PATH, configPath: OPENCLAW_CONFIG_PATH }),
+ });
+ const envContent = envFile.content;
  const present = {};
  for (const line of envContent.split(/\r?\n/)) {
   const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
@@ -1766,7 +1769,7 @@ function readRuntimeEnvSummary() {
   if (!/(KEY|TOKEN|SECRET|URL|MODEL|PROVIDER|BASE)/i.test(key)) continue;
   present[key] = value ? true : false;
  }
- return { path: envPath, present };
+ return { path: envFile.path || OPENCLAW_ENV_PATH, present };
 }
 
 const OPENCLAW_GENERATION_MODEL_FIELD_BY_SLOT = {
@@ -1915,7 +1918,7 @@ function readOpenClawEnvValueForSecrets(name) {
  if (!key) return '';
  if (process.env[key]) return String(process.env[key]).trim();
  try {
-  const envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+  const envContent = readOpenClawEnvContent();
   const match = envContent.match(new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}=(.*)$`, 'm'));
   return match ? String(match[1] || '').trim() : '';
  } catch {
@@ -2074,7 +2077,7 @@ function ensureBridgeTelemetryPluginsForGatewayStart(config, repairs) {
 
 function readTelegramBotTokenFromEnvFile() {
  try {
-  return readProviderEnvValue(readFileSync('/opt/openclaw/.env', 'utf8'), 'telegram');
+  return readProviderEnvValue(readOpenClawEnvContent(), 'telegram');
  } catch {
   return '';
  }
@@ -5984,12 +5987,15 @@ function ensureAuthProfileSecretKeySource() {
   }
   try { execSync(`chown -R 1000:1000 ${AUTH_PROFILE_SECRET_DIR} 2>/dev/null; chmod 700 ${AUTH_PROFILE_SECRET_DIR} 2>/dev/null; chmod 600 ${AUTH_PROFILE_SECRET_FILE} 2>/dev/null`, { timeout: 3000 }); } catch {}
   try {
-   const envPath = '/opt/openclaw/.env';
+   // Shared slots pass this secret directory directly to the isolated gateway
+   // container and mount it below ~/.openclaw. Touching /opt/openclaw/.env
+   // there is both unnecessary and unwritable for the slot bridge user.
+   if (process.env.TROOPER_SHARED_SLOT_RUNTIME === '1') return;
    const line = `OPENCLAW_AUTH_PROFILE_SECRET_DIR=${AUTH_PROFILE_SECRET_DIR}`;
-   let env = '';
-   try { env = readFileSync(envPath, 'utf8'); } catch {}
+   let env = readOpenClawEnvContent();
    if (!env.includes('OPENCLAW_AUTH_PROFILE_SECRET_DIR=')) {
-    writeFileSync(envPath, `${env.replace(/\s*$/, '\n')}${line}\n`);
+    const writeResult = persistOpenClawEnvFile(`${env.replace(/\s*$/, '\n')}${line}\n`);
+    if (!writeResult.written) return;
     try {
      if (isLocalHostRuntime()) {
       const container = process.env.OPENCLAW_GATEWAY_CONTAINER || 'openclaw-openclaw-gateway-1';
@@ -7478,7 +7484,7 @@ function ensureSkillCredentials(skillCredentials) {
 
  try {
  let envContent = '';
- try { envContent = readFileSync('/opt/openclaw/.env', 'utf8'); } catch {}
+ try { envContent = readOpenClawEnvContent(); } catch {}
 
  let changed = false;
  for (const [key, value] of entries) {
@@ -7494,7 +7500,7 @@ function ensureSkillCredentials(skillCredentials) {
  }
 
  if (changed) {
-	   writeTextFileIfChanged('/opt/openclaw/.env', envContent);
+	   persistOpenClawEnvFile(envContent);
  console.log(`[skills] Updated ${entries.length} skill credential(s) in .env`);
  }
  } catch (err) {
@@ -15330,15 +15336,22 @@ function readProviderPresenceValue(provider, envContent) {
 function persistOpenClawEnvFile(content) {
  return writeOpenClawEnvFile(content, {
   write: writeTextFileIfChanged,
-  candidates: openClawEnvFileCandidates({ configPath: OPENCLAW_CONFIG_PATH }),
+  candidates: openClawEnvFileCandidates({ primary: OPENCLAW_ENV_PATH, configPath: OPENCLAW_CONFIG_PATH }),
   warn: (message) => console.warn(message),
  });
+}
+
+function readOpenClawEnvContent() {
+ return readOpenClawEnvFile({
+  read: (filePath) => readFileSync(filePath, 'utf8'),
+  candidates: openClawEnvFileCandidates({ primary: OPENCLAW_ENV_PATH, configPath: OPENCLAW_CONFIG_PATH }),
+ }).content;
 }
 
 app.get('/config/api-keys', (req, res) => {
  try {
  let envContent = '';
- try { envContent = readFileSync('/opt/openclaw/.env', 'utf8'); } catch {}
+ try { envContent = readOpenClawEnvContent(); } catch {}
  const mask = (key) => {
  if (!key || key.length < 8) return key ? '****' : '';
  return key.substring(0, 4) + '****' + key.substring(key.length - 4);
@@ -15464,7 +15477,7 @@ app.post('/config/api-keys', async (req, res) => {
  const run = promisify(exec);
 
 		 let envContent = '';
-		 try { envContent = readFileSync('/opt/openclaw/.env', 'utf8'); } catch {}
+		 try { envContent = readOpenClawEnvContent(); } catch {}
 		 const previousProviderKeys = {};
 		 const previousProviderSources = {};
 		 for (const provider of Object.keys(providerKeyPayloads)) {
@@ -16248,7 +16261,7 @@ app.get('/config/provider-settings', (req, res) => {
  try {
   // Key presence from .env
   let envContent = '';
-  try { envContent = readFileSync('/opt/openclaw/.env', 'utf8'); } catch {}
+  try { envContent = readOpenClawEnvContent(); } catch {}
   const mask = (key) => {
    if (!key || key.length < 8) return key ? '****' : '';
    return key.substring(0, 4) + '****' + key.substring(key.length - 4);
@@ -16309,7 +16322,7 @@ app.get('/config/provider-settings', (req, res) => {
 app.get('/config/provider-keys-internal', (req, res) => {
  try {
   let envContent = '';
-  try { envContent = readFileSync('/opt/openclaw/.env', 'utf8'); } catch {}
+  try { envContent = readOpenClawEnvContent(); } catch {}
   const keys = {};
   for (const provider of Object.keys(PROVIDER_ENV_NAME_MAP)) {
    keys[provider] = readProviderEnvValue(envContent, provider) || null;
@@ -16389,11 +16402,11 @@ app.delete('/config/api-keys/:provider', async (req, res) => {
 
   // Remove from .env
   try {
-   let envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+   let envContent = readOpenClawEnvContent();
    for (const envName of envNames) {
     envContent = envContent.replace(new RegExp(`^${envName}=.*\\n?`, 'm'), '');
    }
-	  writeTextFileIfChanged('/opt/openclaw/.env', envContent);
+	  persistOpenClawEnvFile(envContent);
 	  } catch {}
 
 	  if (provider === 'telegram') {
@@ -16493,7 +16506,7 @@ app.get('/config/provider-keys/:provider', (req, res) => {
   let activeKey = '';
   if (envName) {
    try {
-    const envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+    const envContent = readOpenClawEnvContent();
     const match = envContent.match(new RegExp(`^${envName}=(.*)$`, 'm'));
     if (match) activeKey = match[1].trim();
    } catch {}
@@ -16534,13 +16547,13 @@ app.post('/config/provider-keys/:provider/switch', (req, res) => {
   if (!envName) return res.status(400).json({ error: 'Unknown provider' });
 
   // Update .env
-  let envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+  let envContent = readOpenClawEnvContent();
   if (envContent.match(new RegExp(`^${envName}=`, 'm'))) {
    envContent = envContent.replace(new RegExp(`^${envName}=.*$`, 'm'), `${envName}=${newKey}`);
   } else {
    envContent += `\n${envName}=${newKey}\n`;
   }
-	  writeTextFileIfChanged('/opt/openclaw/.env', envContent);
+	  persistOpenClawEnvFile(envContent);
 	  const sources = getProviderBillingSources();
 	  const source = normalizeProviderBillingSource(
 	   sources?.[req.params.provider]?.keySources?.[hashProviderKey(newKey)],
@@ -16584,7 +16597,7 @@ app.delete('/config/provider-keys/:provider/:index', (req, res) => {
   let activeKey = '';
   if (envName) {
    try {
-    const envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+    const envContent = readOpenClawEnvContent();
     const match = envContent.match(new RegExp(`^${envName}=(.*)$`, 'm'));
     if (match) activeKey = match[1].trim();
    } catch {}
@@ -16597,11 +16610,11 @@ app.delete('/config/provider-keys/:provider/:index', (req, res) => {
   // If we removed the active key, switch to the next available one
   if (removedKey === activeKey && envName) {
    const newActive = backupKeys.length > 0 ? backupKeys[0] : '';
-   let envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+   let envContent = readOpenClawEnvContent();
    if (envContent.match(new RegExp(`^${envName}=`, 'm'))) {
     envContent = envContent.replace(new RegExp(`^${envName}=.*$`, 'm'), `${envName}=${newActive}`);
    }
-	   writeTextFileIfChanged('/opt/openclaw/.env', envContent);
+	   persistOpenClawEnvFile(envContent);
    writeConfigKey('pendingBridgeApply', true);
   }
 
@@ -17981,7 +17994,7 @@ app.get('/acp/agents', async (req, res) => {
 // Read research-related API keys from the .env file
 function getResearchEnv() {
  let envContent = '';
- try { envContent = readFileSync('/opt/openclaw/.env', 'utf8'); } catch {}
+ try { envContent = readOpenClawEnvContent(); } catch {}
  const get = (name) => {
  const m = envContent.match(new RegExp(`^${name}=(.*)$`, 'm'));
  return m ? m[1].trim() : '';
@@ -18339,7 +18352,7 @@ app.post('/integration-permissions/check', (req, res) => {
 // ── Composio connections (proxies to Composio API) ────────────────────
 function getComposioKey() {
  try {
- const envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+ const envContent = readOpenClawEnvContent();
  const m = envContent.match(/^COMPOSIO_API_KEY=(.*)$/m);
  return m ? normalizeComposioApiKey(m[1]) : '';
  } catch { return ''; }
@@ -18981,7 +18994,7 @@ app.get('/api/browser-session', (req, res) => {
 function readEnvValue(name) {
  if (process.env[name]) return String(process.env[name]).trim();
  try {
-  const envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+  const envContent = readOpenClawEnvContent();
   const match = envContent.match(new RegExp(`^${name}=(.*)$`, 'm'));
   return match ? match[1].trim() : '';
  } catch {
