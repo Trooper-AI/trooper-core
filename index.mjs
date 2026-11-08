@@ -33,7 +33,7 @@ import cors from 'cors';
 import { EventEmitter } from 'events';
 import { execFile, execFileSync, execSync, spawn } from 'child_process';
 import { Worker } from 'worker_threads';
-import { createReadStream, createWriteStream, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, lstatSync, rmSync, cpSync } from 'fs';
+import { createReadStream, createWriteStream, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, lstatSync, rmSync, cpSync, chmodSync } from 'fs';
 import { pipeline as streamPipeline } from 'stream/promises';
 import {
   cp as copyTree,
@@ -15332,7 +15332,13 @@ function readProviderPresenceValue(provider, envContent) {
 
 function persistOpenClawEnvFile(content) {
  const result = writeOpenClawEnvFile(content, {
-  write: writeTextFileIfChanged,
+  write: (filePath, nextContent) => {
+   const writeResult = writeTextFileIfChanged(filePath, nextContent);
+   // Provider .env contains raw API keys. Keep it private on first creation
+   // and repair permissions on existing files whenever settings are saved.
+   chmodSync(filePath, 0o600);
+   return writeResult;
+  },
   candidates: openClawEnvFileCandidates({ primary: OPENCLAW_ENV_PATH, configPath: OPENCLAW_CONFIG_PATH }),
   warn: (message) => console.warn(message),
  });
