@@ -2459,6 +2459,16 @@ while (true) {
 }
 POLLER
 
+# Native bridge dependencies such as better-sqlite3 may not publish a prebuilt
+# binary for the exact Node 22 patch/platform used by a snapshot. Make sure the
+# compiler toolchain exists before npm ci falls back to node-gyp. This also
+# covers restores from older snapshots that were created without make/g++.
+if ! command -v make >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then
+ dlog "Installing native build tools for bridge npm dependencies..."
+ run_cmd apt-get update -qq
+ run_cmd apt-get install -y -qq --no-install-recommends build-essential
+fi
+
 # Start 3 parallel tasks: bridge npm install, sandbox build, and poller npm + librarium
 dlog "Installing bridge, sandbox, and dependencies in parallel..."
 
