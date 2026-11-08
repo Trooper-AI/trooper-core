@@ -268,6 +268,7 @@ import {
   ManagedAcpCliManager,
   getManagedAcpCliRecipe,
 } from './lib/managed-acp-cli.mjs';
+import { OpenClawProviderHealthManager } from './lib/openclaw-provider-health.mjs';
 import {
  OpenCodeAcpConfigManager,
  ensureManagedOpenCodeAcpAgentConfig,
@@ -5906,6 +5907,10 @@ const acpAccountAuthJobs = new AcpAccountAuthJobManager({
 // Non-Codex ACP CLIs use their own fixed package/binary recipes. This is
 // intentionally separate from the plugin-only /gateway/exec endpoint.
 const managedAcpCliManager = new ManagedAcpCliManager({
+ containerName: OPENCLAW_GATEWAY_CONTAINER,
+ execFile: runExecFileAsync,
+});
+const openClawProviderHealth = new OpenClawProviderHealthManager({
  containerName: OPENCLAW_GATEWAY_CONTAINER,
  execFile: runExecFileAsync,
 });
@@ -14575,6 +14580,56 @@ app.post('/gateway/acp-cli/:harness/install', async (req, res) => {
   res.json({ success: true, ...(await managedAcpCliManager.install(harness)) });
  } catch (error) {
   sendManagedAcpCliError(res, error);
+ } finally {
+  endOperation();
+ }
+});
+
+// ── OpenClaw provider status and live verification ──────────────────────
+// Provider status is a fixed OpenClaw CLI operation in the gateway container.
+// Keep it separate from `/gateway/exec`, which remains plugin-install-only.
+function sendOpenClawProviderHealthError(res, error) {
+ const status = Number(error?.statusCode || 503);
+ res.status(Number.isFinite(status) && status >= 400 && status < 600 ? status : 503).json({
+  ok: false,
+  code: error?.code || 'OPENCLAW_PROVIDER_STATUS_FAILED',
+  message: String(error?.message || 'OpenClaw could not inspect this provider connection.').trim().slice(0, 800),
+ });
+}
+
+app.get('/gateway/providers/status', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+  const result = await openClawProviderHealth.run();
+  res.json(result);
+ } catch (error) {
+  sendOpenClawProviderHealthError(res, error);
+ }
+});
+
+app.post('/gateway/providers/verify', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+ const keys = Object.keys(body);
+ if (keys.some((key) => !['provider', 'profileId'].includes(key))) {
+  return res.status(400).json({
+   ok: false,
+   code: 'OPENCLAW_PROVIDER_REQUEST_INVALID',
+   message: 'Only a provider and optional account profile may be submitted.',
+  });
+ }
+ const endOperation = beginRuntimeOperation('provider_connection_check', {
+  provider: String(body.provider || '').trim().slice(0, 64),
+ }, 40_000);
+ try {
+  const result = await openClawProviderHealth.run({
+   provider: body.provider,
+   profileId: body.profileId,
+   probe: true,
+  });
+  res.json(result);
+ } catch (error) {
+  sendOpenClawProviderHealthError(res, error);
  } finally {
   endOperation();
  }
