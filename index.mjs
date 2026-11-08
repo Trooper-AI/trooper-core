@@ -120,7 +120,6 @@ import {
   resolveSpecialistPromptMode,
 } from './lib/runtime-identity.mjs';
 import {
-  buildOpenAiCodexProviderConfig,
   ensureOpenAiCodexProviderTransport,
   formatProviderLogLabel,
   normalizeProviderErrorMessage,
@@ -129,6 +128,7 @@ import {
   stripGatewayErrorPrefix,
 } from './lib/provider-runtime.mjs';
 import { buildCrossProviderImageFallbacks } from './lib/image-generation-routing.mjs';
+import { normalizePersistedOpenClawModelRoutes } from './lib/openclaw-model-routes.mjs';
 import { startFleetHeartbeat } from './lib/fleet-heartbeat.mjs';
 import { buildRuntimeServiceDiagnostics } from './lib/service-diagnostics.mjs';
 import {
@@ -2086,6 +2086,13 @@ function readTelegramBotTokenFromEnvFile() {
 function prepareOpenClawConfigForGatewayStart(config) {
  const next = cloneJson(config);
  const repairs = [];
+ if (normalizePersistedOpenClawModelRoutes(next, normalizeGatewayModelId)) {
+  repairs.push('agents: migrated legacy ChatGPT/Codex model routes to the canonical OpenAI provider');
+ }
+ if (next?.models?.providers && Object.hasOwn(next.models.providers, 'openai-codex')) {
+  delete next.models.providers['openai-codex'];
+  repairs.push('models.providers.openai-codex: removed legacy custom transport');
+ }
  const pluginAllow = ensureOpenClawPluginAllowList(next);
  if (pluginAllow.added.length) {
   repairs.push('plugins.allow: removed the exclusive list so every installed plugin can load');
@@ -6180,7 +6187,7 @@ function ensureLocalModelAuthReadyForAllAgents(reason = 'startup') {
 function isUsableCodexOAuthProfile(profile) {
  return Boolean(
   profile
-  && profile.provider === 'openai-codex'
+  && ['openai', 'openai-codex'].includes(String(profile.provider || ''))
   && profile.type === 'oauth'
   && (
    profile.access
@@ -6193,9 +6200,11 @@ function pickCodexOAuthProfile(authDoc) {
  const profiles = authDoc?.profiles && typeof authDoc.profiles === 'object'
   ? authDoc.profiles
   : {};
- const preferredId = authDoc?.lastGood?.['openai-codex'];
- const preferred = preferredId ? profiles[preferredId] : null;
- if (isUsableCodexOAuthProfile(preferred)) return { id: preferredId, profile: preferred };
+ for (const provider of ['openai', 'openai-codex']) {
+  const preferredId = authDoc?.lastGood?.[provider];
+  const preferred = preferredId ? profiles[preferredId] : null;
+  if (isUsableCodexOAuthProfile(preferred)) return { id: preferredId, profile: preferred };
+ }
  const match = Object.entries(profiles).find(([, profile]) => isUsableCodexOAuthProfile(profile));
  return match ? { id: match[0], profile: match[1] } : null;
 }
@@ -6305,7 +6314,7 @@ function getCodexAcpNativeAuthStatus() {
 function getCodexOAuthRef(profile) {
  const ref = profile?.oauthRef;
  if (!ref || typeof ref !== 'object') return null;
- if (ref.source !== 'openclaw-credentials' || ref.provider !== 'openai-codex') return null;
+ if (ref.source !== 'openclaw-credentials' || !['openai', 'openai-codex'].includes(String(ref.provider || ''))) return null;
  if (typeof ref.id !== 'string' || !/^[a-f0-9]{32}$/.test(ref.id)) return null;
  return ref;
 }
@@ -6402,7 +6411,8 @@ function modelRequiresCodexRuntime(model, config) {
 
 function hasUsableCodexAuthProfiles(auth) {
  return Object.entries(auth?.profiles || {}).some(([key, profile]) =>
-  key.startsWith('openai-codex:') && isUsableCodexOAuthProfile(profile)
+  (key.startsWith('openai:') || key.startsWith('openai-codex:') || isUsableCodexOAuthProfile(profile))
+    && isUsableCodexOAuthProfile(profile)
  );
 }
 
@@ -6696,7 +6706,7 @@ try {
  const { changed } = ensureOpenAiCodexProviderTransport();
  if (changed) {
   try { execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 }); } catch {}
-  console.log('[bridge] Repaired models.providers.openai-codex transport (openai-chatgpt-responses)');
+  console.log('[bridge] Removed legacy models.providers.openai-codex transport; using native OpenAI/Codex routing');
  }
 } catch (e) { /* config not available yet */ }
 
@@ -6756,36 +6766,14 @@ try {
  }
 } catch (e) { /* auth profiles not available yet */ }
 
-// ── Startup migration: fix openai profiles that should be openai-codex ────
-// When Codex OAuth tokens get saved through the wrong code path they end up
-// as "openai:default" { type: "api_key" } instead of "openai-codex:default"
-// { type: "oauth" }. Detect this by checking if an "openai:default" profile
-// exists but NO "openai-codex:*" profile exists, and the key looks like an
-// OAuth-derived token (JWT or has access/refresh fields).
+// ── Startup compatibility for canonical OpenAI/Codex auth ────────────────
+// OpenClaw stores both API-key and ChatGPT OAuth profiles under `openai`.
+// Keep valid OAuth profiles there; moving them back to `openai-codex` makes
+// current OpenClaw route them through the retired legacy provider.
 try {
  const auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
  let authChanged = false;
  if (auth.profiles) {
-  const openaiProfile = auth.profiles['openai:default'];
-  const hasCodexProfile = Object.keys(auth.profiles).some(k => k.startsWith('openai-codex:'));
-  // If openai:default has OAuth fields (access/refresh) it was meant to be openai-codex
-  if (openaiProfile && !hasCodexProfile && openaiProfile.access && openaiProfile.refresh) {
-   auth.profiles['openai-codex:default'] = {
-    type: 'oauth',
-    provider: 'openai-codex',
-    access: openaiProfile.access,
-    refresh: openaiProfile.refresh,
-    expires: openaiProfile.expires,
-    ...(openaiProfile.accountId ? { accountId: openaiProfile.accountId } : {}),
-    ...(openaiProfile.email ? { email: openaiProfile.email } : {}),
-   };
-   delete auth.profiles['openai:default'];
-   if (!auth.lastGood) auth.lastGood = {};
-   auth.lastGood['openai-codex'] = 'openai-codex:default';
-   if (auth.lastGood['openai'] === 'openai:default') delete auth.lastGood['openai'];
-   authChanged = true;
-   console.log('[bridge] Migrated auth profile "openai:default" → "openai-codex:default" (OAuth profile detected)');
-  }
   // Clean up invalid openai-codex profiles that have type "api_key" —
   // the openai-codex provider only works with OAuth tokens, not API keys.
   const codexProfile = auth.profiles['openai-codex:default'];
@@ -6840,26 +6828,28 @@ function isGatewayInheritedModel(model) {
 function normalizeGatewayModelId(model) {
  if (!model) return model;
  let m = String(model).trim();
+ // OpenClaw 2026.11+ folds ChatGPT/Codex subscriptions into the canonical
+ // OpenAI provider. Normalize persisted Trooper model IDs before writing them
+  // back so later settings applies cannot restore the retired route.
+ if (/^openai-codex\//i.test(m)) m = `openai/${m.slice(m.indexOf('/') + 1)}`;
  const EXACT_MODEL_MAP = {
-  'gpt': 'openai-codex/gpt-5.4',
-  'gpt-5.4': 'openai-codex/gpt-5.4',
-  // Keep openai-codex/* as-is — never rewrite to openai/* (API-key path).
-  // Mapping to openai/* caused 401 Missing bearer when only Codex OAuth is present.
-  'openai-codex/gpt-5.4': 'openai-codex/gpt-5.4',
-  'gpt-5-4': 'openai-codex/gpt-5.4',
-  'openai-codex/gpt-5-4': 'openai-codex/gpt-5.4',
-  'gpt-5.5': 'openai-codex/gpt-5.4',
-  'openai/gpt-5.5': 'openai-codex/gpt-5.4',
-  'openai/gpt-5.4': 'openai-codex/gpt-5.4',
-  'openai/gpt-5-4': 'openai-codex/gpt-5.4',
-  'gpt-5.2': 'openai-codex/gpt-5.2',
-  'openai/gpt-5.2': 'openai-codex/gpt-5.2',
-  'gpt-5-2': 'openai-codex/gpt-5.2',
-  'openai/gpt-5-2': 'openai-codex/gpt-5.2',
-  'gpt-5.0': 'openai-codex/gpt-5.0',
-  'openai/gpt-5.0': 'openai-codex/gpt-5.0',
-  'gpt-5-0': 'openai-codex/gpt-5.0',
-  'openai/gpt-5-0': 'openai-codex/gpt-5.0',
+  'gpt': 'openai/gpt-6-luna',
+  'gpt-5.4': 'openai/gpt-5.6-terra',
+  'gpt-5-4': 'openai/gpt-5.6-terra',
+  'gpt-5.5': 'openai/gpt-5.6-terra',
+  'openai/gpt-5.5': 'openai/gpt-5.6-terra',
+  'openai/gpt-5.4': 'openai/gpt-5.6-terra',
+  'openai/gpt-5-4': 'openai/gpt-5.6-terra',
+  'gpt-5.4-mini': 'openai/gpt-5.6-luna',
+  'gpt-5-4-mini': 'openai/gpt-5.6-luna',
+  'openai/gpt-5.4-mini': 'openai/gpt-5.6-luna',
+  'openai/gpt-5-4-mini': 'openai/gpt-5.6-luna',
+  'openai/gpt-5.2': 'openai/gpt-5.2',
+  'gpt-5-2': 'openai/gpt-5.2',
+  'openai/gpt-5-2': 'openai/gpt-5.2',
+  'openai/gpt-5.0': 'openai/gpt-5.0',
+  'gpt-5-0': 'openai/gpt-5.0',
+  'openai/gpt-5-0': 'openai/gpt-5.0',
   'gpt-5-mini': 'openrouter/openai/gpt-5-mini',
   'openai/gpt-5-mini': 'openrouter/openai/gpt-5-mini',
  };
@@ -15672,26 +15662,39 @@ function normalizeModelId(model) {
   || (entry.legacyIds || []).some((legacy) => m.toLowerCase() === legacy.toLowerCase())
  );
  if (trooperTier) return trooperTier.id;
+ // OpenClaw 2026.11+ handles ChatGPT/Codex OAuth through its native OpenAI
+ // provider. Convert persisted legacy routes before any config is written.
+ if (/^openai-codex\//i.test(m)) m = `openai/${m.slice(m.indexOf('/') + 1)}`;
  // Only normalize explicit known aliases. Never blanket-convert dots↔dashes across providers.
  const EXACT_MODEL_MAP = {
-   'gpt': 'openai-codex/gpt-5.4',
-   'gpt-5.4': 'openai-codex/gpt-5.4',
-   // Never rewrite openai-codex/* → openai/* (that forces API-key path and 401s).
-   'openai-codex/gpt-5.4': 'openai-codex/gpt-5.4',
-   'gpt-5-4': 'openai-codex/gpt-5.4',
-   'openai-codex/gpt-5-4': 'openai-codex/gpt-5.4',
-   'gpt-5.5': 'openai-codex/gpt-5.4',
-   'openai/gpt-5.5': 'openai-codex/gpt-5.4',
-   'openai/gpt-5.4': 'openai-codex/gpt-5.4',
-   'openai/gpt-5-4': 'openai-codex/gpt-5.4',
-   'gpt-5.2': 'openai-codex/gpt-5.2',
-   'openai/gpt-5.2': 'openai-codex/gpt-5.2',
-   'gpt-5-2': 'openai-codex/gpt-5.2',
-   'openai/gpt-5-2': 'openai-codex/gpt-5.2',
-   'gpt-5.0': 'openai-codex/gpt-5.0',
-   'openai/gpt-5.0': 'openai-codex/gpt-5.0',
-   'gpt-5-0': 'openai-codex/gpt-5.0',
-   'openai/gpt-5-0': 'openai-codex/gpt-5.0',
+   'gpt': 'openai/gpt-6-luna',
+   'gpt-5.4': 'openai/gpt-5.6-terra',
+   'openai/gpt-5.4': 'openai/gpt-5.6-terra',
+   'openai/gpt-5-4': 'openai/gpt-5.6-terra',
+   'gpt-5-4': 'openai/gpt-5.6-terra',
+   'openai-codex/gpt-5.4': 'openai/gpt-5.6-terra',
+   'openai-codex/gpt-5-4': 'openai/gpt-5.6-terra',
+   'gpt-5.4-mini': 'openai/gpt-5.6-luna',
+   'openai/gpt-5.4-mini': 'openai/gpt-5.6-luna',
+   'openai-codex/gpt-5.4-mini': 'openai/gpt-5.6-luna',
+   'gpt-5-4-mini': 'openai/gpt-5.6-luna',
+   'openai/gpt-5-4-mini': 'openai/gpt-5.6-luna',
+   'openai-codex/gpt-5-4-mini': 'openai/gpt-5.6-luna',
+   'gpt-5.5': 'openai/gpt-5.6-terra',
+   'openai/gpt-5.5': 'openai/gpt-5.6-terra',
+   'openai-codex/gpt-5.5': 'openai/gpt-5.6-terra',
+   'gpt-5.2': 'openai/gpt-5.2',
+   'openai/gpt-5.2': 'openai/gpt-5.2',
+   'gpt-5-2': 'openai/gpt-5.2',
+   'openai/gpt-5-2': 'openai/gpt-5.2',
+   'openai-codex/gpt-5.2': 'openai/gpt-5.2',
+   'openai-codex/gpt-5-2': 'openai/gpt-5.2',
+   'gpt-5.0': 'openai/gpt-5.0',
+   'openai/gpt-5.0': 'openai/gpt-5.0',
+   'gpt-5-0': 'openai/gpt-5.0',
+   'openai/gpt-5-0': 'openai/gpt-5.0',
+   'openai-codex/gpt-5.0': 'openai/gpt-5.0',
+   'openai-codex/gpt-5-0': 'openai/gpt-5.0',
    'gpt-5-mini': 'openrouter/openai/gpt-5-mini',
    'openai/gpt-5-mini': 'openrouter/openai/gpt-5-mini',
  };
@@ -15735,30 +15738,13 @@ const hasConfiguredProviderCredential = (provider) => {
 };
 
 const pickCredentialBackedDefaultModel = () => {
+ if (hasConfiguredProviderCredential('openai-codex')) return 'openai/gpt-6-luna';
  if (hasConfiguredProviderCredential('openai')) return 'openai/gpt-5.2';
  if (hasConfiguredProviderCredential('anthropic')) return 'anthropic/claude-sonnet-4-5';
  if (hasConfiguredProviderCredential('gemini')) return 'google/gemini-2.5-pro';
  if (hasConfiguredProviderCredential('openrouter')) return 'openrouter/qwen/qwen3.7-max';
- if (hasConfiguredProviderCredential('openai-codex')) return 'openai/gpt-5.4';
  return null;
 };
-
-function ensureCodexRuntimeModelMapping(config) {
- const primary = normalizeModelId(config?.agents?.defaults?.model?.primary || '');
- if (primary !== 'openai/gpt-5.4' || !hasConfiguredProviderCredential('openai-codex')) return false;
- if (hasConfiguredProviderCredential('openai')) return false;
- if (!config.agents) config.agents = {};
- if (!config.agents.defaults) config.agents.defaults = {};
- if (!config.agents.defaults.models || typeof config.agents.defaults.models !== 'object') {
-  config.agents.defaults.models = {};
- }
- const current = config.agents.defaults.models[primary] || {};
- const nextRuntime = { ...(current.agentRuntime || {}), id: 'codex' };
- const next = { ...current, agentRuntime: nextRuntime };
- if (JSON.stringify(current) === JSON.stringify(next)) return false;
- config.agents.defaults.models[primary] = next;
- return true;
-}
 
 const pickSafeNativeDefaultModel = (config, requestedFallbacks = []) => {
  const candidates = [
@@ -15891,9 +15877,6 @@ const _syncWarnings = [];
    config.agents.defaults.model.fallbacks = normalizedFallbacks;
    console.log(`[bridge] Updating default fallbacks to: ${normalizedFallbacks.join(', ') || '(none)'}`);
  }
- if (ensureCodexRuntimeModelMapping(config)) {
-   console.log('[bridge] Ensured openai/gpt-5.4 uses the Codex agent runtime');
- }
  if (imageModel !== undefined) {
    config.agents.defaults.imageModel = imageModel ? normalizeModelId(imageModel) : undefined;
    console.log(`[bridge] Updating image model to: ${config.agents.defaults.imageModel || '(none)'}`);
@@ -15970,14 +15953,16 @@ const _syncWarnings = [];
 
  // Write Codex OAuth profile if included in the same request (avoids race with container restart)
  if (openaiCodexAuthProfile?.access) {
- const codexId = openaiCodexAuthProfile.id || 'openai-codex:default';
+ const requestedCodexId = openaiCodexAuthProfile.id || 'openai:default';
+ const codexId = requestedCodexId.replace(/^openai-codex:/i, 'openai:');
  const existingCodexProfile = auth.profiles[codexId]
+  || auth.profiles[auth.lastGood?.openai]
   || auth.profiles[auth.lastGood?.['openai-codex']]
-  || Object.values(auth.profiles).find((profile) => profile?.provider === 'openai-codex' && getCodexOAuthRef(profile));
+  || Object.values(auth.profiles).find((profile) => isUsableCodexOAuthProfile(profile) && getCodexOAuthRef(profile));
  const oauthRef = getCodexOAuthRef(existingCodexProfile);
  auth.profiles[codexId] = {
   type: 'oauth',
-  provider: 'openai-codex',
+  provider: 'openai',
   access: openaiCodexAuthProfile.access,
   refresh: openaiCodexAuthProfile.refresh,
   expires: openaiCodexAuthProfile.expires,
@@ -15986,14 +15971,15 @@ const _syncWarnings = [];
   ...(openaiCodexAuthProfile.email ? { email: openaiCodexAuthProfile.email } : {}),
  };
  if (oauthRef) writeCodexOAuthSidecar(codexId, auth.profiles[codexId]);
- auth.lastGood['openai-codex'] = codexId;
+ auth.lastGood.openai = codexId;
+ delete auth.lastGood['openai-codex'];
  console.log(`[bridge] Included Codex OAuth profile: ${codexId}`);
  }
 
  writeMirroredAuthProfiles(auth);
  const updatedProviders = [
   ...keysToUpdate.map(e => e.provider),
-  ...(openaiCodexAuthProfile?.access ? ['openai-codex'] : []),
+  ...(openaiCodexAuthProfile?.access ? ['openai (ChatGPT/Codex OAuth)'] : []),
  ];
  console.log(`[bridge] Updated auth-profiles.json for: ${updatedProviders.join(', ')}`);
 } catch (e) { console.error('Failed to update auth-profiles.json:', e.message); _syncWarnings.push(`Auth profiles update failed: ${e.message}`); }
@@ -16059,7 +16045,6 @@ const _syncWarnings = [];
  { id: 'openai/gpt-5-mini', name: 'GPT-5 Mini (OR)', contextWindow: 128000 },
  { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro (OR)', contextWindow: 1000000 },
  ] }},
- 'openai-codex': { key: (openaiCodexAuthProfile?.access || hasFreshStoredCodexOAuthProfile()) ? 'oauth' : undefined, config: buildOpenAiCodexProviderConfig() },
  mistral: { key: mistralKey, config: {
  baseUrl: 'https://api.mistral.ai/v1', api: 'openai-completions',
  models: [
@@ -16076,9 +16061,7 @@ const _syncWarnings = [];
  if (!config.models.providers) config.models.providers = {};
  let changed = false;
  for (const [providerName, entry] of newProviders) {
- const nextProviderConfig = providerName === 'openai-codex'
-  ? buildOpenAiCodexProviderConfig(config.models.providers[providerName] || {})
-  : providerName === 'openrouter'
+ const nextProviderConfig = providerName === 'openrouter'
    ? mergeOpenRouterProviderCatalog(config.models.providers[providerName], entry.config)
    : entry.config;
  if (JSON.stringify(config.models.providers[providerName] || null) !== JSON.stringify(nextProviderConfig)) {
@@ -16277,9 +16260,11 @@ app.get('/config/provider-settings', (req, res) => {
   let openaiCodexAuthProfile = null;
   try {
    const authDoc = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
-   const codexProfile = getPreferredAuthProfile(authDoc, 'openai-codex')?.profile;
+   const selected = pickCodexOAuthProfile(authDoc);
+   const codexProfile = selected?.profile;
    if (isUsableCodexOAuthProfile(codexProfile)) {
     openaiCodexAuthProfile = {
+     id: selected.id,
      hasAccess: true,
      email: codexProfile.email || null,
      expires: codexProfile.expires || null,
@@ -16332,7 +16317,7 @@ app.get('/config/provider-keys-internal', (req, res) => {
   let openaiCodex = null;
   try {
    const authDoc = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
-   const codexProfile = getPreferredAuthProfile(authDoc, 'openai-codex')?.profile;
+   const codexProfile = pickCodexOAuthProfile(authDoc)?.profile;
    if (isUsableCodexOAuthProfile(codexProfile)) openaiCodex = codexProfile;
   } catch {}
 
