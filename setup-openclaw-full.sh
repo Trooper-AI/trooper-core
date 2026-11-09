@@ -1701,6 +1701,22 @@ chmod 755 "$JITI_CACHE_DIR" "$OPENCLAW_TMPDIR" "$OPENCLAW_NATIVE_HOOK_RELAY_DIR"
 chmod 700 /home/node/.openclaw/devices 2>/dev/null || true
 chmod 600 /home/node/.openclaw/devices/*.json 2>/dev/null || true
 
+# This generated startup script is bind-mounted over the image's /opt/startup.sh.
+# Keep the pre-gateway checks from the image startup here too: older persisted
+# configs must be migrated before OpenClaw's gateway config guard runs, and
+# ACPX must be present before an ACP-enabled gateway starts.
+if [ ! -x /opt/doctor-migrate.sh ] || ! /opt/doctor-migrate.sh; then
+  echo "[startup] FATAL: persisted OpenClaw config migration failed; gateway will not start" >&2
+  exit 1
+fi
+
+if [ "${TROOPER_ACPX_BOOTSTRAPPED:-0}" != "1" ]; then
+  if [ ! -x /opt/acpx-bootstrap.sh ] || ! /opt/acpx-bootstrap.sh; then
+    echo "[startup] FATAL: ACPX bootstrap failed; gateway will not start" >&2
+    exit 1
+  fi
+fi
+
 # Drop back to node user for the gateway process when running as root.
 if [ "$(id -u)" = "0" ]; then
   exec su -s /bin/bash node -c "DISPLAY=:99 TMPDIR=/home/node/.cache/openclaw/tmp TMP=/home/node/.cache/openclaw/tmp TEMP=/home/node/.cache/openclaw/tmp OPENCLAW_TMPDIR=/home/node/.cache/openclaw/tmp OPENCLAW_NATIVE_HOOK_RELAY_DIR=/home/node/.cache/openclaw/native-hook-relays JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind lan --port '$GATEWAY_PORT'"
