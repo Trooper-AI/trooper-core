@@ -5885,7 +5885,7 @@ function readActiveAuthProfiles() {
  // OpenClaw 2026.11 may make the shared state DB the canonical auth store.
  // Prefer it when configured so per-agent compatibility mirrors cannot hide
  // OAuth profiles that the Gateway is actually using.
- const sharedAuth = readSharedAuthProfileSqlite(openclawDataPath('openclaw.sqlite'));
+ const sharedAuth = readSharedAuthProfileSqlite(openclawDataPath('state', 'openclaw.sqlite'));
  if (sharedAuth?.location === 'state-db'
   && sharedAuth.store?.profiles
   && typeof sharedAuth.store.profiles === 'object') {
@@ -6057,10 +6057,11 @@ function ensureAuthProfileSecretKeySource() {
 ensureAuthProfileSecretKeySource();
 
 function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
- const sharedAuth = readSharedAuthProfileSqlite(openclawDataPath('openclaw.sqlite'));
+ const sharedDbPath = openclawDataPath('state', 'openclaw.sqlite');
+ const sharedAuth = readSharedAuthProfileSqlite(sharedDbPath);
  const sharedStoreEnabled = sharedAuth?.location === 'state-db';
  const sharedStoreSynced = !sharedStoreEnabled
-  || syncSharedAuthProfileSqlite(openclawDataPath('openclaw.sqlite'), authDoc);
+  || syncSharedAuthProfileSqlite(sharedDbPath, authDoc);
  if (sharedStoreEnabled && !sharedStoreSynced) {
   console.warn('[bridge] Could not sync auth profiles to OpenClaw shared state store');
  }
