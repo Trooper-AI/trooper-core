@@ -59,6 +59,10 @@ RUN chmod +x /opt/acpx-bootstrap.sh
 COPY doctor-migrate.sh /opt/doctor-migrate.sh
 RUN chmod +x /opt/doctor-migrate.sh
 
+# Securely stage managed ACP/plugin settings while Doctor normalizes legacy config.
+COPY openclaw-config-stage.mjs /opt/openclaw-config-stage.mjs
+RUN chmod 755 /opt/openclaw-config-stage.mjs
+
 # Simplified startup script
 COPY startup.sh /opt/startup.sh
 RUN chmod +x /opt/startup.sh

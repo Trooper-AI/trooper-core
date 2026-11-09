@@ -5813,6 +5813,13 @@ try {
  if (config.acp?.dispatch?.prefix) { delete config.acp.dispatch.prefix; changed = true; }
  if (config.acp?.permissions) { delete config.acp.permissions; changed = true; }
  if (config.acp?.sessionTimeout) { delete config.acp.sessionTimeout; changed = true; }
+ // OpenClaw retired this ACP tuning knob; leaving it in persisted config
+ // makes current gateway versions reject the entire config at startup.
+ if (config.acp?.maxConcurrentSessions !== undefined) {
+  delete config.acp.maxConcurrentSessions;
+  changed = true;
+  console.log('[bridge] Migrated: removed retired acp.maxConcurrentSessions');
+ }
  if (config.agents?.defaults?.heartbeat?.deliverTo) { delete config.agents.defaults.heartbeat.deliverTo; changed = true; }
  if (config.session?.idle) { delete config.session.idle; changed = true; }
  if (config.session?.maxAge) { delete config.session.maxAge; changed = true; }
@@ -5823,7 +5830,6 @@ try {
  backend: 'acpx',
  defaultAgent: 'claude',
  allowedAgents: ['claude', 'codex', 'opencode', 'kimi', 'copilot'],
- maxConcurrentSessions: 3,
  dispatch: { enabled: true },
  };
  changed = true;

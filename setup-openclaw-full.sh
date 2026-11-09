@@ -1535,7 +1535,6 @@ ${MODELS_PROVIDERS}
  "backend": "acpx",
  "defaultAgent": "claude",
  "allowedAgents": ["claude", "codex", "opencode", "kimi", "copilot"],
- "maxConcurrentSessions": 3,
  "dispatch": { "enabled": true }
  },
  "browser": {

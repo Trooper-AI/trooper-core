@@ -1,19 +1,14 @@
 #!/bin/bash
-# The ACP backend is provided by OpenClaw's external @openclaw/acpx plugin.
-# It must be installed before the gateway reads a config that enables
-# plugins.entries.acpx, otherwise OpenClaw remains in its "installing" state.
+# Install the pinned ACPX plugin before the gateway starts. Do not run
+# `plugins inspect --runtime` here: inspection loads ACPX's long-lived runtime
+# and can leave the startup process waiting on plugin cleanup.
 
 set -o pipefail
 
-# Keep the ACPX runtime compatible with the pinned OpenClaw 2026.11.1 host
-# image. An unversioned ClawHub install can now resolve 2026.11.2, which
-# requires OpenClaw >=2026.11.2 and makes the gateway restart-loop at boot.
-ACPX_PLUGIN_SPEC="npm:@openclaw/acpx@2026.11.1"
-
-# Managed OpenClaw npm plugins live under the state/config root. The official
-# image runs the gateway as uid 1000 (`node`), so this script deliberately
-# leaves that tree node-owned instead of trying to make the plugin root-owned.
+ACPX_PLUGIN_VERSION="2026.11.1"
+ACPX_PLUGIN_SPEC="npm:@openclaw/acpx@$ACPX_PLUGIN_VERSION"
 ACPX_STATE_DIR="${OPENCLAW_STATE_DIR:-${OPENCLAW_CONFIG_DIR:-/home/node/.openclaw}}"
+CONFIG_STAGE_TOOL="/opt/openclaw-config-stage.mjs"
 
 run_as_node() {
   if [ "$(id -u)" = "0" ]; then
@@ -23,46 +18,22 @@ run_as_node() {
   fi
 }
 
-acpx_package_present() {
-  # npm installs the official package inside a managed per-plugin project.
-  # Do not use the persisted install record alone: a prior failed upgrade can
-  # leave that record behind after its package payload has disappeared.
-  find "$ACPX_STATE_DIR/npm/projects" -type f \
-    -path '*/node_modules/@openclaw/acpx/package.json' \
-    -print -quit 2>/dev/null | grep -q .
+acpx_package_version() {
+  run_as_node "node '$CONFIG_STAGE_TOOL' plugin-version '$ACPX_STATE_DIR' '@openclaw/acpx'"
 }
 
-inspect_acpx_runtime() {
-  # `plugins inspect` itself reports a JSON error record with exit code zero in
-  # some failure cases, so require the runtime-loaded plugin status explicitly.
-  local inspect_json
-  inspect_json="$(run_as_node "cd /app && node dist/index.js plugins inspect acpx --runtime --json" 2>/dev/null)" || return 1
-  printf '%s' "$inspect_json" | node -e '
-    let input = "";
-    process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (chunk) => { input += chunk; });
-    process.stdin.on("end", () => {
-      try {
-        const report = JSON.parse(input);
-        const plugin = report?.plugin;
-        process.exit(plugin?.id === "acpx" && plugin?.status === "loaded" ? 0 : 1);
-      } catch {
-        process.exit(1);
-      }
-    });
-  '
+installed_version="$(acpx_package_version)" || {
+  echo "[acpx-bootstrap] FATAL: could not inspect the installed ACPX package metadata" >&2
+  exit 1
 }
 
-if inspect_acpx_runtime; then
-  echo "[acpx-bootstrap] @openclaw/acpx is already installed and runtime-ready"
+if [ "$installed_version" = "$ACPX_PLUGIN_VERSION" ]; then
+  echo "[acpx-bootstrap] Pinned ACPX package is installed; continuing to gateway startup"
   exit 0
 fi
 
-# `openclaw plugins install` is intentionally not an update command. Calling
-# it over an existing payload is non-idempotent, so only use it for the actual
-# missing-package case and surface a broken installed payload clearly.
-if acpx_package_present; then
-  echo "[acpx-bootstrap] FATAL: @openclaw/acpx exists but failed runtime inspection; run 'openclaw plugins inspect acpx --runtime --json' as node to diagnose it" >&2
+if [ -n "$installed_version" ]; then
+  echo "[acpx-bootstrap] FATAL: installed ACPX version does not match the gateway image pin; run OpenClaw Doctor to converge plugin versions" >&2
   exit 1
 fi
 
@@ -72,14 +43,10 @@ if ! run_as_node "cd /app && node dist/index.js plugins install '$ACPX_PLUGIN_SP
   exit 1
 fi
 
-if ! acpx_package_present; then
-  echo "[acpx-bootstrap] FATAL: @openclaw/acpx did not create its managed npm package payload" >&2
+installed_version="$(acpx_package_version)" || installed_version=""
+if [ "$installed_version" != "$ACPX_PLUGIN_VERSION" ]; then
+  echo "[acpx-bootstrap] FATAL: @openclaw/acpx did not converge to the image-pinned version" >&2
   exit 1
 fi
 
-if ! inspect_acpx_runtime; then
-  echo "[acpx-bootstrap] FATAL: @openclaw/acpx failed runtime inspection after installation" >&2
-  exit 1
-fi
-
-echo "[acpx-bootstrap] ACPX runtime plugin is ready"
+echo "[acpx-bootstrap] ACPX package is installed at the gateway-pinned version"
