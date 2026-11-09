@@ -37,6 +37,13 @@ jobs:
       - name: Checkout public workflow definitions
         uses: actions/checkout@v5
 
+      # Pin the bridge checkout to the exact workflow revision. The runtime
+      # Dockerfile uses this SHA in its clone step, which also invalidates
+      # BuildKit's cache when core changes while the app ref stays the same.
+      - name: Resolve Trooper core revision
+        id: trooper-core
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Download private Trooper source
         id: trooper
         uses: ./.github/actions/download-private-trooper
@@ -69,6 +76,7 @@ jobs:
           build-args: |
             GATEWAY_IMAGE=${{ inputs.gateway_image }}
             RUNTIME_IMAGE=ghcr.io/trooper-ai/trooper-runtime:sha-${{ steps.trooper.outputs.sha }}
+            TROOPER_CORE_REF=${{ steps.trooper-core.outputs.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/Trooper-AI/trooper-core
             org.opencontainers.image.description=Trooper App-pool runtime (gateway + org-runtime)
