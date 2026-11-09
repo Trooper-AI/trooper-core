@@ -14646,6 +14646,10 @@ app.post('/gateway/acp-cli/:harness/install', async (req, res) => {
 // ── OpenClaw provider status and live verification ──────────────────────
 // Provider status is a fixed OpenClaw CLI operation in the gateway container.
 // Keep it separate from `/gateway/exec`, which remains plugin-install-only.
+function normalizeProviderHealthProfileId(value = '') {
+ return String(value || '').trim().replace(/^openai-codex:(.+)$/i, 'openai:codex-$1');
+}
+
 function sendOpenClawProviderHealthError(res, error) {
  const status = Number(error?.statusCode || 503);
  res.status(Number.isFinite(status) && status >= 400 && status < 600 ? status : 503).json({
@@ -14659,7 +14663,21 @@ app.get('/gateway/providers/status', async (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
  try {
   const result = await openClawProviderHealth.run();
+  if (result?.status) {
+   result.status.providerChecks = Array.isArray(readConfigKey('providerChecks'))
+    ? readConfigKey('providerChecks')
+    : [];
+  }
   res.json(result);
+ } catch (error) {
+  sendOpenClawProviderHealthError(res, error);
+ }
+});
+
+app.get('/gateway/providers/usage', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+  res.json(await openClawProviderHealth.getUsage());
  } catch (error) {
   sendOpenClawProviderHealthError(res, error);
  }
@@ -14686,6 +14704,32 @@ app.post('/gateway/providers/verify', async (req, res) => {
    probe: true,
    model: body.model,
   });
+  const probeRows = Array.isArray(result?.status?.probes?.results) ? result.status.probes.results : [];
+  const normalizedProvider = String(body.provider || '').trim().toLowerCase() === 'openai-codex'
+   ? 'openai'
+   : String(body.provider || '').trim().toLowerCase();
+  const normalizedProfile = normalizeProviderHealthProfileId(body.profileId || '');
+  const probe = probeRows.find((item) => (
+   String(item?.provider || '').trim().toLowerCase() === normalizedProvider
+   && (!normalizedProfile || normalizeProviderHealthProfileId(item?.profileId || '') === normalizedProfile)
+  )) || null;
+  if (probe) {
+   const checks = Array.isArray(readConfigKey('providerChecks')) ? readConfigKey('providerChecks') : [];
+   const next = checks.filter((item) => !(
+    String(item?.provider || '').trim().toLowerCase() === normalizedProvider
+    && normalizeProviderHealthProfileId(item?.profileId || '') === normalizedProfile
+   ));
+   next.push({
+    provider: normalizedProvider,
+    profileId: String(probe.profileId || normalizedProfile),
+    model: String(probe.model || '').trim().slice(0, 200),
+    status: String(probe.status || 'unknown').trim().slice(0, 40),
+    error: redactDiagnosticText(String(probe.error || '')).trim().slice(0, 1000),
+    latencyMs: Number.isFinite(Number(probe.latencyMs)) ? Number(probe.latencyMs) : null,
+    checkedAt: Date.now(),
+   });
+   writeConfigKey('providerChecks', next.slice(-100));
+  }
   res.json(result);
  } catch (error) {
   sendOpenClawProviderHealthError(res, error);
@@ -16352,6 +16396,7 @@ app.get('/config/provider-settings', (req, res) => {
  const modelRouting = readConfigKey('modelRouting') || {};
  const providerModels = readConfigKey('providerModels') || {};
  const modelRoutingFallbacks = readConfigKey('modelRoutingFallbacks') || {};
+ const providerChecks = Array.isArray(readConfigKey('providerChecks')) ? readConfigKey('providerChecks') : [];
   const pendingBridgeApply = readConfigKey('pendingBridgeApply') || false;
   const defaultModel = modelRouting.chat || readConfigKey('defaultModel') || null;
   const composerChatModel = readConfigKey('composerChatModel') || null;
@@ -16365,6 +16410,7 @@ app.get('/config/provider-settings', (req, res) => {
    modelRouting,
    providerModels,
    modelRoutingFallbacks,
+   providerChecks,
    pendingBridgeApply,
    defaultModel,
    composerChatModel,
@@ -16407,10 +16453,21 @@ app.get('/config/provider-keys-internal', (req, res) => {
 
 app.put('/config/provider-settings', (req, res) => {
  try {
-  const { modelRouting, providerModels, modelRoutingFallbacks, pendingBridgeApply, defaultModel, composerChatModel, chatThinkingLevel, localModelUrl, ollamaBaseUrl } = req.body;
+  const { modelRouting, providerModels, modelRoutingFallbacks, providerChecks, pendingBridgeApply, defaultModel, composerChatModel, chatThinkingLevel, localModelUrl, ollamaBaseUrl } = req.body;
   if (modelRouting !== undefined) writeConfigKey('modelRouting', modelRouting);
   if (providerModels !== undefined) writeConfigKey('providerModels', providerModels);
   if (modelRoutingFallbacks !== undefined) writeConfigKey('modelRoutingFallbacks', modelRoutingFallbacks);
+  if (providerChecks !== undefined && Array.isArray(providerChecks)) {
+   writeConfigKey('providerChecks', providerChecks.slice(-100).map((item) => ({
+    provider: String(item?.provider || '').trim().slice(0, 64),
+    profileId: String(item?.profileId || '').trim().slice(0, 160),
+    model: String(item?.model || '').trim().slice(0, 200),
+    status: String(item?.status || 'unknown').trim().slice(0, 40),
+    error: redactDiagnosticText(String(item?.error || '')).trim().slice(0, 1000),
+    latencyMs: Number.isFinite(Number(item?.latencyMs)) ? Number(item.latencyMs) : null,
+    checkedAt: Number.isFinite(Number(item?.checkedAt)) ? Number(item.checkedAt) : Date.now(),
+   })));
+  }
   if (pendingBridgeApply !== undefined) writeConfigKey('pendingBridgeApply', pendingBridgeApply);
   if (defaultModel !== undefined) writeConfigKey('defaultModel', defaultModel);
 	  if (composerChatModel !== undefined) writeConfigKey('composerChatModel', composerChatModel || null);
