@@ -197,6 +197,7 @@ import {
   syncAgentAuthProfileSqlite as syncAgentAuthProfileSqliteFile,
 } from './lib/agent-auth-sqlite.mjs';
 import { addCanonicalOpenAiOAuthProfiles } from './lib/canonical-openai-auth.mjs';
+import { buildOpenAiAuthOrder } from './lib/openai-auth-order.mjs';
 import { applyTelegramTokenToOpenClawConfig, buildTelegramEnvUpdates, ensureTelegramChannelReady } from './lib/channel-config.mjs';
 import { openClawEnvFileCandidates, readOpenClawEnvFile, writeOpenClawEnvFile } from './lib/openclaw-env-file.mjs';
 import { hardenActiveMemoryConfigForBridge } from './lib/active-memory-config.mjs';
@@ -6147,52 +6148,16 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
 
 function syncOpenAiOAuthProfileOrder(authDoc) {
  try {
-  const profiles = authDoc?.profiles && typeof authDoc.profiles === 'object' ? authDoc.profiles : {};
-  const oauthIds = Object.entries(profiles)
-   .filter(([profileId, profile]) =>
-    /^openai:/i.test(profileId)
-     && String(profile?.provider || '').toLowerCase() === 'openai'
-     && String(profile?.type || '').toLowerCase() === 'oauth'
-     && Boolean(profile?.access || profile?.oauthRef),
-   )
-   .map(([profileId]) => profileId);
   const config = readOpenClawConfig();
   const currentOrder = Array.isArray(config?.auth?.order?.openai) ? config.auth.order.openai : [];
-  if (!oauthIds.length) {
-   if (!currentOrder.length) return false;
-   const apiKeyIds = Object.entries(profiles)
-    .filter(([profileId, profile]) =>
-     /^openai:/i.test(profileId)
-      && String(profile?.provider || '').toLowerCase() === 'openai'
-      && String(profile?.type || '').toLowerCase() === 'api_key'
-      && Boolean(profile?.key),
-    )
-    .map(([profileId]) => profileId);
-   const remainingApiKeyOrder = currentOrder.filter((profileId) => apiKeyIds.includes(profileId));
-   const nextOrder = [...new Set([...remainingApiKeyOrder, ...apiKeyIds])];
-   if (JSON.stringify(currentOrder) === JSON.stringify(nextOrder)) return false;
-   if (nextOrder.length) {
-    if (!config.auth || typeof config.auth !== 'object' || Array.isArray(config.auth)) config.auth = {};
-    if (!config.auth.order || typeof config.auth.order !== 'object' || Array.isArray(config.auth.order)) config.auth.order = {};
-    config.auth.order.openai = nextOrder;
-   } else {
-    delete config.auth?.order?.openai;
-   }
-   writeOpenClawConfig(config);
-   console.info(`[bridge] Updated OpenAI auth order after OAuth removal (${nextOrder.length} API key profile${nextOrder.length === 1 ? '' : 's'})`);
-   return true;
-  }
-
-  // Keep existing account priority, append newly connected ChatGPT accounts,
-  // and leave static API-key profiles out of the OAuth rotation order.
-  const preferred = currentOrder.filter((profileId) => oauthIds.includes(profileId));
-  const nextOrder = [...new Set([...preferred, ...oauthIds])];
+  const nextOrder = buildOpenAiAuthOrder(authDoc, currentOrder);
   if (JSON.stringify(currentOrder) === JSON.stringify(nextOrder)) return false;
   if (!config.auth || typeof config.auth !== 'object' || Array.isArray(config.auth)) config.auth = {};
   if (!config.auth.order || typeof config.auth.order !== 'object' || Array.isArray(config.auth.order)) config.auth.order = {};
-  config.auth.order.openai = nextOrder;
+  if (nextOrder.length) config.auth.order.openai = nextOrder;
+  else delete config.auth.order.openai;
   writeOpenClawConfig(config);
-  console.info(`[bridge] Synced OpenAI OAuth failover order (${nextOrder.length} account${nextOrder.length === 1 ? '' : 's'})`);
+  console.info(`[bridge] Synced OpenAI auth order (${nextOrder.length} usable profile${nextOrder.length === 1 ? '' : 's'})`);
   return true;
  } catch (error) {
   console.warn(`[bridge] Could not sync OpenAI OAuth failover order: ${error.message}`);
@@ -14750,7 +14715,13 @@ app.get('/gateway/providers/status', async (req, res) => {
 app.get('/gateway/providers/usage', async (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
  try {
-  res.json(await openClawProviderHealth.getUsage());
+  const auth = readActiveAuthProfiles();
+  const selectedProfileId = auth?.lastGood?.openai || auth?.lastGood?.['openai-codex'] || '';
+  const profileId = selectedProfileId ? normalizeProviderHealthProfileId(selectedProfileId) : '';
+  res.json(await openClawProviderHealth.getUsage({
+   refresh: req.query.refresh === '1',
+   profileId,
+  }));
  } catch (error) {
   sendOpenClawProviderHealthError(res, error);
  }
