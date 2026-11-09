@@ -2490,6 +2490,14 @@ function ensureOpenClawComposeOverride({ reason = 'repair' } = {}) {
   '      GEMINI_API_KEY: ${GEMINI_API_KEY:-}',
   '      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}',
   '      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}',
+  '      AWS_BEARER_TOKEN_BEDROCK: ${AWS_BEARER_TOKEN_BEDROCK:-}',
+  '      AWS_REGION: ${AWS_REGION:-}',
+  '      COHERE_API_KEY: ${COHERE_API_KEY:-}',
+  '      FIREWORKS_API_KEY: ${FIREWORKS_API_KEY:-}',
+  '      COPILOT_GITHUB_TOKEN: ${COPILOT_GITHUB_TOKEN:-}',
+  '      LITELLM_API_KEY: ${LITELLM_API_KEY:-}',
+  '      LM_API_TOKEN: ${LM_API_TOKEN:-}',
+  '      REQUESTY_API_KEY: ${REQUESTY_API_KEY:-}',
   '      BRAVE_API_KEY: ${BRAVE_API_KEY}',
   '      CHROME_PATH: /opt/chrome-wrapper.sh',
   '      CHROMIUM_PATH: /opt/chrome-wrapper.sh',
@@ -15465,6 +15473,13 @@ const PROVIDER_ENV_NAME_MAP = Object.freeze({
  synthetic: ['SYNTHETIC_API_KEY'],
  volcengine: ['VOLCANO_ENGINE_API_KEY'],
  byteplus: ['BYTEPLUS_API_KEY'],
+ 'amazon-bedrock': ['AWS_BEARER_TOKEN_BEDROCK'],
+ cohere: ['COHERE_API_KEY'],
+ fireworks: ['FIREWORKS_API_KEY'],
+ 'github-copilot': ['COPILOT_GITHUB_TOKEN'],
+ litellm: ['LITELLM_API_KEY'],
+ lmstudio: ['LM_API_TOKEN'],
+ requesty: ['REQUESTY_API_KEY'],
  brave: ['BRAVE_API_KEY'],
  composio: ['COMPOSIO_API_KEY'],
  exa: ['EXA_API_KEY'],
@@ -15497,6 +15512,10 @@ function readProviderEnvValue(envContent, provider) {
 function readProviderPresenceValue(provider, envContent) {
  const fromEnv = readProviderEnvValue(envContent, provider);
  if (fromEnv) return fromEnv;
+ if (provider === 'lmstudio' || provider === 'litellm') {
+  const settings = readConfigKey('providerConnectionSettings') || {};
+  if (settings[provider]?.baseUrl && settings[provider]?.modelId) return `${provider}-configured`;
+ }
  if (provider !== 'telegram') return '';
  try {
   return String(readOpenClawConfig()?.channels?.telegram?.botToken || '').trim();
@@ -15590,10 +15609,41 @@ app.post('/config/api-keys', async (req, res) => {
   browserbaseProjectId, minimaxKey, zaiKey, moonshotKey, kimiKey, groqKey, cerebrasKey, togetherKey,
   nvidiaKey, qianfanKey, stepfunKey, veniceKey, huggingfaceKey, aiGatewayKey, kilocodeKey,
   cloudflareAiGatewayKey, syntheticKey, volcanoEngineKey, byteplusKey, defaultModel, defaultFallbacks,
+  bedrockBearerToken, cohereKey, fireworksKey, copilotGithubToken, litellmKey, lmStudioToken, requestyKey,
+  providerBaseUrl, providerModelId, providerRegion,
 	  imageModel, pdfModel, openaiCodexAuthProfile, localProvider, removeLocalProvider,
 	  ollamaProvider, removeOllamaProvider, ollamaBaseUrl,
 	  telegramToken, telegramBotToken, trooperEmailEnabled,
 	 } = body;
+ const cleanConnectionSettings = {};
+ if (providerBaseUrl !== undefined) {
+  const value = String(providerBaseUrl || '').trim().replace(/\/+$/, '');
+  if (value) {
+   let parsed;
+   try { parsed = new URL(value); } catch { parsed = null; }
+   if (!parsed || !['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.hash) {
+    keysUpdateInProgress = false;
+    return res.status(400).json({ error: 'Provider endpoint must be an http or https URL without embedded credentials.' });
+   }
+   cleanConnectionSettings.baseUrl = value;
+  }
+ }
+ if (providerModelId !== undefined) {
+  const value = String(providerModelId || '').trim();
+  if (value && !/^[a-z0-9][a-z0-9._:/-]{0,199}$/i.test(value)) {
+   keysUpdateInProgress = false;
+   return res.status(400).json({ error: 'Provider model ID contains unsupported characters.' });
+  }
+  if (value) cleanConnectionSettings.modelId = value;
+ }
+ if (providerRegion !== undefined) {
+  const value = String(providerRegion || '').trim();
+  if (value && !/^[a-z0-9-]{2,32}$/i.test(value)) {
+   keysUpdateInProgress = false;
+   return res.status(400).json({ error: 'Invalid AWS region.' });
+  }
+  if (value) cleanConnectionSettings.region = value;
+ }
  const providerKeyPayloads = {
   anthropic: anthropicKey,
   openai: openaiKey,
@@ -15623,6 +15673,13 @@ app.post('/config/api-keys', async (req, res) => {
   synthetic: syntheticKey,
   volcengine: volcanoEngineKey,
   byteplus: byteplusKey,
+  'amazon-bedrock': bedrockBearerToken,
+  cohere: cohereKey,
+  fireworks: fireworksKey,
+  'github-copilot': copilotGithubToken,
+  litellm: litellmKey,
+  lmstudio: lmStudioToken,
+  requesty: requestyKey,
   brave: braveKey,
   composio: composioKey,
   exa: exaKey,
@@ -15685,6 +15742,9 @@ app.post('/config/api-keys', async (req, res) => {
 		  const normalizedValue = provider === 'composio' ? normalizeComposioApiKey(keyValue) : keyValue;
 		  setEnvVar(envName, normalizedValue);
 	 }
+	 if (settingsProvider === 'amazon-bedrock' && cleanConnectionSettings.region) {
+	  setEnvVar('AWS_REGION', cleanConnectionSettings.region);
+	 }
 	 for (const [envName, envValue] of Object.entries(channelEnvUpdates)) {
 	  setEnvVar(envName, envValue);
 	 }
@@ -15702,6 +15762,8 @@ app.post('/config/api-keys', async (req, res) => {
   'vercel-ai-gateway': aiGatewayKey, kilocode: kilocodeKey,
   'cloudflare-ai-gateway': cloudflareAiGatewayKey, synthetic: syntheticKey,
   volcengine: volcanoEngineKey, byteplus: byteplusKey,
+	  'amazon-bedrock': bedrockBearerToken, cohere: cohereKey, fireworks: fireworksKey,
+	  'github-copilot': copilotGithubToken, litellm: litellmKey, lmstudio: lmStudioToken, requesty: requestyKey,
 	 };
 	 for (const [prov, keyVal] of Object.entries(BACKUP_KEY_PROVIDERS)) {
 	  const previousKey = previousProviderKeys[prov];
@@ -15722,6 +15784,20 @@ app.post('/config/api-keys', async (req, res) => {
 	   const source = normalizeProviderBillingSource(providerKeySources[prov] || providerKeySource, 'byo');
 	   rememberProviderKeySource(prov, keyVal, source);
 	  }
+	 }
+
+	 if (settingsProvider && Object.keys(cleanConnectionSettings).length > 0) {
+	  const savedConnections = readConfigKey('providerConnectionSettings') || {};
+	  savedConnections[settingsProvider] = {
+	   ...(savedConnections[settingsProvider] || {}),
+	   ...cleanConnectionSettings,
+	  };
+	  writeConfigKey('providerConnectionSettings', savedConnections);
+	 }
+	 if (settingsProvider && [
+	  'amazon-bedrock', 'cohere', 'fireworks', 'github-copilot', 'litellm', 'lmstudio', 'requesty',
+	 ].includes(settingsProvider)) {
+	  writeConfigKey('providerRestartRequired', true);
 	 }
 
  // Save provider settings if included in payload
@@ -16116,9 +16192,10 @@ const _syncWarnings = [];
  // These payload fields are not LLM providers and don't belong in auth-profiles.
  const AUTH_PROFILE_SKIP = new Set([
  'browserbaseProjectId', 'brave', 'composio', 'exa', 'tavily', 'serpapi', 'searchapi', 'browserbase', 'ollama',
+ 'amazon-bedrock', 'github-copilot',
  ]);
  const providerKeyMap = Object.entries(providerKeyPayloads)
- .filter(([provider, key]) => typeof key === 'string' && !AUTH_PROFILE_SKIP.has(provider))
+ .filter(([provider, key]) => typeof key === 'string' && key.trim().length > 0 && !AUTH_PROFILE_SKIP.has(provider))
  .map(([provider, key]) => {
  const authProvider = AUTH_PROFILE_PROVIDER_REMAP[provider] || provider;
  return { key, provider: authProvider, profileId: `${authProvider}:default` };
@@ -16252,6 +16329,26 @@ const _syncWarnings = [];
  { id: 'mistral-large-latest', name: 'Mistral Large', contextWindow: 128000 },
  { id: 'mistral-medium-latest', name: 'Mistral Medium', contextWindow: 32000 },
  ] }},
+ litellm: { key: litellmKey !== undefined ? litellmKey : (settingsProvider === 'litellm' && cleanConnectionSettings.baseUrl !== undefined ? '' : undefined), config: {
+  baseUrl: cleanConnectionSettings.baseUrl || (readConfigKey('providerConnectionSettings') || {}).litellm?.baseUrl || 'http://localhost:4000',
+  apiKey: '${LITELLM_API_KEY}',
+  api: 'openai-completions',
+  models: cleanConnectionSettings.modelId
+   ? [{ id: cleanConnectionSettings.modelId, name: cleanConnectionSettings.modelId, input: ['text'], contextWindow: 32768, maxTokens: 8192 }]
+   : ((readConfigKey('providerConnectionSettings') || {}).litellm?.modelId
+     ? [{ id: (readConfigKey('providerConnectionSettings') || {}).litellm.modelId, name: (readConfigKey('providerConnectionSettings') || {}).litellm.modelId, input: ['text'], contextWindow: 32768, maxTokens: 8192 }]
+     : []),
+ }},
+ lmstudio: { key: lmStudioToken !== undefined ? lmStudioToken : (settingsProvider === 'lmstudio' && cleanConnectionSettings.baseUrl !== undefined ? '' : undefined), config: {
+  baseUrl: cleanConnectionSettings.baseUrl || (readConfigKey('providerConnectionSettings') || {}).lmstudio?.baseUrl || 'http://localhost:1234/v1',
+  apiKey: String(lmStudioToken || '').trim() ? '${LM_API_TOKEN}' : 'lmstudio',
+  api: 'openai-completions',
+  models: cleanConnectionSettings.modelId
+   ? [{ id: cleanConnectionSettings.modelId, name: cleanConnectionSettings.modelId, input: ['text'], contextWindow: 32768, maxTokens: 8192 }]
+   : ((readConfigKey('providerConnectionSettings') || {}).lmstudio?.modelId
+     ? [{ id: (readConfigKey('providerConnectionSettings') || {}).lmstudio.modelId, name: (readConfigKey('providerConnectionSettings') || {}).lmstudio.modelId, input: ['text'], contextWindow: 32768, maxTokens: 8192 }]
+     : []),
+ }},
  };
  const newProviders = Object.entries(providerConfigs).filter(([, entry]) => entry.key !== undefined);
  if (newProviders.length > 0) {
@@ -16485,6 +16582,8 @@ app.get('/config/provider-settings', (req, res) => {
   const chatThinkingLevel = readConfigKey('chatThinkingLevel') || 'auto';
   const localModelUrl = readConfigKey('localModelUrl') || null;
   const ollamaBaseUrl = readConfigKey('ollamaBaseUrl') || readProviderEnvValue(envContent, 'ollama') || null;
+  const providerConnectionSettings = readConfigKey('providerConnectionSettings') || {};
+  const providerRestartRequired = readConfigKey('providerRestartRequired') === true;
 
   res.json({
    providers,
@@ -16499,6 +16598,8 @@ app.get('/config/provider-settings', (req, res) => {
    chatThinkingLevel,
    localModelUrl,
    ollamaBaseUrl,
+   providerConnectionSettings,
+   providerRestartRequired,
   });
  } catch (err) {
   res.status(500).json({ error: err.message });
@@ -16512,17 +16613,24 @@ app.get('/config/provider-keys-internal', (req, res) => {
   let envContent = '';
   try { envContent = readOpenClawEnvContent(); } catch {}
   const keys = {};
-  for (const provider of Object.keys(PROVIDER_ENV_NAME_MAP)) {
+  const requestedProviders = typeof req.query?.providers === 'string'
+    ? [...new Set(req.query.providers.split(',').map((provider) => provider.trim()).filter(Boolean))]
+    : Object.keys(PROVIDER_ENV_NAME_MAP);
+  for (const provider of requestedProviders.filter((id) => Object.hasOwn(PROVIDER_ENV_NAME_MAP, id))) {
    keys[provider] = readProviderEnvValue(envContent, provider) || null;
   }
 
-  // OpenAI Codex auth profile
+  // Keep OAuth profile secrets off filtered provider-model-list requests.
   let openaiCodex = null;
-  try {
-    const authDoc = readActiveAuthProfiles();
-   const codexProfile = pickCodexOAuthProfile(authDoc)?.profile;
-   if (isUsableCodexOAuthProfile(codexProfile)) openaiCodex = codexProfile;
-  } catch {}
+  const includeAuthProfile = typeof req.query?.providers !== 'string'
+    || req.query?.includeAuthProfile === 'true';
+  if (includeAuthProfile) {
+   try {
+     const authDoc = readActiveAuthProfiles();
+    const codexProfile = pickCodexOAuthProfile(authDoc)?.profile;
+    if (isUsableCodexOAuthProfile(codexProfile)) openaiCodex = codexProfile;
+   } catch {}
+  }
 
   const modelRouting = readConfigKey('modelRouting') || {};
   const defaultModel = modelRouting.chat || readConfigKey('defaultModel') || null;
@@ -16535,7 +16643,7 @@ app.get('/config/provider-keys-internal', (req, res) => {
 
 app.put('/config/provider-settings', (req, res) => {
  try {
-  const { modelRouting, providerModels, modelRoutingFallbacks, providerChecks, pendingBridgeApply, defaultModel, composerChatModel, chatThinkingLevel, localModelUrl, ollamaBaseUrl } = req.body;
+  const { modelRouting, providerModels, modelRoutingFallbacks, providerChecks, pendingBridgeApply, defaultModel, composerChatModel, chatThinkingLevel, localModelUrl, ollamaBaseUrl, providerConnectionSettings, providerRestartRequired } = req.body;
   if (modelRouting !== undefined) writeConfigKey('modelRouting', modelRouting);
   if (providerModels !== undefined) writeConfigKey('providerModels', providerModels);
   if (modelRoutingFallbacks !== undefined) writeConfigKey('modelRoutingFallbacks', modelRoutingFallbacks);
@@ -16551,6 +16659,27 @@ app.put('/config/provider-settings', (req, res) => {
    })));
   }
   if (pendingBridgeApply !== undefined) writeConfigKey('pendingBridgeApply', pendingBridgeApply);
+  if (providerRestartRequired !== undefined) writeConfigKey('providerRestartRequired', providerRestartRequired === true);
+  if (providerConnectionSettings !== undefined && providerConnectionSettings && typeof providerConnectionSettings === 'object' && !Array.isArray(providerConnectionSettings)) {
+   const safe = {};
+   for (const provider of ['amazon-bedrock', 'litellm', 'lmstudio']) {
+    const item = providerConnectionSettings[provider];
+    if (!item || typeof item !== 'object') continue;
+    const entry = {};
+    const baseUrl = String(item.baseUrl || '').trim().replace(/\/+$/, '');
+    if (baseUrl) {
+     let parsed;
+     try { parsed = new URL(baseUrl); } catch { parsed = null; }
+     if (parsed && ['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password && !parsed.hash) entry.baseUrl = baseUrl;
+    }
+    const modelId = String(item.modelId || '').trim();
+    if (modelId && /^[a-z0-9][a-z0-9._:/-]{0,199}$/i.test(modelId)) entry.modelId = modelId;
+    const region = String(item.region || '').trim();
+    if (region && /^[a-z0-9-]{2,32}$/i.test(region)) entry.region = region;
+    if (Object.keys(entry).length) safe[provider] = entry;
+   }
+   writeConfigKey('providerConnectionSettings', safe);
+  }
   if (defaultModel !== undefined) writeConfigKey('defaultModel', defaultModel);
 	  if (composerChatModel !== undefined) writeConfigKey('composerChatModel', composerChatModel || null);
 	  if (chatThinkingLevel !== undefined) writeConfigKey('chatThinkingLevel', chatThinkingLevel || 'auto');
@@ -16605,6 +16734,7 @@ app.delete('/config/api-keys/:provider', async (req, res) => {
    for (const envName of envNames) {
     envContent = envContent.replace(new RegExp(`^${envName}=.*\\n?`, 'm'), '');
    }
+   if (provider === 'amazon-bedrock') envContent = envContent.replace(/^AWS_REGION=.*\n?/m, '');
 	  persistOpenClawEnvFile(envContent);
 	  } catch {}
 
@@ -16632,7 +16762,7 @@ app.delete('/config/api-keys/:provider', async (req, res) => {
    const authDoc = readActiveAuthProfiles();
    const authProviders = [];
    if (provider === 'gemini') authProviders.push('google');
-   if (['anthropic', 'openai', 'openrouter', 'mistral'].includes(provider)) authProviders.push(provider);
+   if (['anthropic', 'openai', 'openrouter', 'mistral', 'cohere', 'fireworks', 'github-copilot', 'litellm', 'lmstudio', 'requesty'].includes(provider)) authProviders.push(provider);
    if (provider === 'openai') authProviders.push('openai-codex');
    let authChanged = false;
    for (const authProvider of authProviders) {
@@ -16652,6 +16782,21 @@ app.delete('/config/api-keys/:provider', async (req, res) => {
    }
   }
   if (providerModelsChanged) writeConfigKey('providerModels', providerModels);
+
+  if (provider === 'litellm' || provider === 'lmstudio') {
+   try {
+    const config = readOpenClawConfig();
+    if (config?.models?.providers?.[provider]) {
+     delete config.models.providers[provider];
+     writeOpenClawConfig(config);
+    }
+   } catch {}
+  }
+  const providerConnectionSettings = readConfigKey('providerConnectionSettings') || {};
+  if (providerConnectionSettings[provider]) {
+   delete providerConnectionSettings[provider];
+   writeConfigKey('providerConnectionSettings', providerConnectionSettings);
+  }
 
   // Clean model routing if it referenced this provider
   const modelRouting = readConfigKey('modelRouting') || {};
@@ -16680,6 +16825,9 @@ app.delete('/config/api-keys/:provider', async (req, res) => {
 
   // Mark pending
   writeConfigKey('pendingBridgeApply', true);
+  if (['amazon-bedrock', 'cohere', 'fireworks', 'github-copilot', 'litellm', 'lmstudio', 'requesty'].includes(provider)) {
+   writeConfigKey('providerRestartRequired', true);
+  }
 
   res.json({ ok: true, pendingBridgeApply: true });
  } catch (err) {
@@ -16700,6 +16848,10 @@ app.get('/config/provider-keys/:provider', (req, res) => {
    mistral: 'MISTRAL_API_KEY', qwen: 'QWEN_API_KEY',
    deepseek: 'DEEPSEEK_API_KEY', xai: 'XAI_API_KEY',
    perplexity: 'PERPLEXITY_API_KEY',
+   'amazon-bedrock': 'AWS_BEARER_TOKEN_BEDROCK',
+   cohere: 'COHERE_API_KEY', fireworks: 'FIREWORKS_API_KEY',
+   'github-copilot': 'COPILOT_GITHUB_TOKEN', litellm: 'LITELLM_API_KEY',
+   lmstudio: 'LM_API_TOKEN', requesty: 'REQUESTY_API_KEY',
   };
   const envName = ENV_KEY_MAP[req.params.provider];
   let activeKey = '';
