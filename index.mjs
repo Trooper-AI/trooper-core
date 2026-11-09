@@ -137,6 +137,7 @@ import { buildCrossProviderImageFallbacks } from './lib/image-generation-routing
 import { normalizePersistedOpenClawModelRoutes } from './lib/openclaw-model-routes.mjs';
 import { startFleetHeartbeat } from './lib/fleet-heartbeat.mjs';
 import { buildRuntimeServiceDiagnostics } from './lib/service-diagnostics.mjs';
+import { snapshotFastReadyStatus } from './lib/snapshot-fast-ready.mjs';
 import {
   buildPostCompactionRecoveryMessage,
   classifyOpenClawLifecycleSignal,
@@ -9631,6 +9632,16 @@ function maybeCaptureGatewayProblemSnapshot(reason) {
   finally { automaticDiagnosticSnapshotInFlight = false; }
  }, 0);
 }
+
+app.get('/snapshot-fast-ready', (req, res) => {
+ const readiness = snapshotFastReadyStatus({
+   enabled: process.env.TROOPER_SNAPSHOT_BUILD === '1' || process.env.ORG_ID === 'snapshot-builder',
+   markerExists: existsSync('/tmp/trooper-snapshot-fast-ready'),
+ });
+ if (readiness.status === 404) return res.status(404).json(readiness.body);
+ if (!requireBridgeAuth(req, res)) return;
+ return res.status(readiness.status).json(readiness.body);
+});
 
 app.get('/health', async (req, res) => {
  // During initial provisioning, return 'installing' so provision.js keeps polling
