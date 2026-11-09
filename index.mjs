@@ -191,6 +191,7 @@ import {
 import {
   LOCAL_PROVIDER_AUTH_KEY as SHARED_LOCAL_PROVIDER_AUTH_KEY,
   migrateAllAgentAuthJsonToSqlite,
+  readAgentAuthProfileSqlitePrimary,
   syncAgentAuthProfileSqlite as syncAgentAuthProfileSqliteFile,
 } from './lib/agent-auth-sqlite.mjs';
 import { addCanonicalOpenAiOAuthProfiles } from './lib/canonical-openai-auth.mjs';
@@ -5878,6 +5879,28 @@ try {
 // not type "api_key"/"key" with field "key". Fix any that were created incorrectly.
 const AUTH_PROFILES_PATH = openclawConfigPath('agents', 'main', 'agent', 'auth-profiles.json');
 const AUTH_PROFILES_ROOT_PATH = openclawConfigPath('auth-profiles.json');
+function readActiveAuthProfiles() {
+ const databasePaths = [
+  openclawDataPath('agents', 'main', 'agent', 'openclaw-agent.sqlite'),
+  openclawConfigPath('agents', 'main', 'agent', 'openclaw-agent.sqlite'),
+ ];
+ for (const databasePath of [...new Set(databasePaths)]) {
+  const active = readAgentAuthProfileSqlitePrimary(databasePath);
+  if (active && active.profiles && typeof active.profiles === 'object') return active;
+ }
+ for (const authPath of [
+  AUTH_PROFILES_PATH,
+  openclawDataPath('agents', 'main', 'agent', 'auth-profiles.json'),
+  AUTH_PROFILES_ROOT_PATH,
+  openclawDataPath('auth-profiles.json'),
+ ]) {
+  try {
+   const value = JSON.parse(readFileSync(authPath, 'utf8'));
+   if (value?.profiles && typeof value.profiles === 'object') return value;
+  } catch {}
+ }
+ return { version: 1, profiles: {}, lastGood: {} };
+}
 const CODEX_OAUTH_SIDECAR_DIR = openclawConfigPath('credentials', 'auth-profiles');
 // The bundled codex-acp adapter runs with its own CODEX_HOME. Keeping only an
 // OpenClaw auth profile is insufficient: the Codex CLI will otherwise fall
@@ -14181,6 +14204,14 @@ app.post('/gateway/restart', async (req, res) => {
    expectedReconnectUntil: gateway.expectedReconnectUntil,
   });
  }
+ if (process.env.TROOPER_APP_POOL === '1') {
+  const reason = String(req.body?.reason || 'gateway-restart').replace(/[^a-z0-9._-]/gi, '').slice(0, 80) || 'gateway-restart';
+  const markerPath = process.env.TROOPER_APP_POOL_GATEWAY_RESTART_FILE || '/tmp/trooper-openclaw-gateway-restart';
+  writeFileSync(markerPath, `${reason}\n`, { mode: 0o600 });
+  try { chmodSync(markerPath, 0o600); } catch {}
+  gateway.forceReconnect(30000, 'gateway-restart');
+  return res.json({ success: true, message: 'Gateway restart scheduled', reload: 'scheduled' });
+ }
  console.log('Restarting OpenClaw gateway container...');
  appendDiagnosticEvent('info', 'Gateway restart requested', { body: req.body || {} });
  collectDiagnosticSnapshot('before-gateway-restart', { heavy: false, includeCommands: false });
@@ -14766,7 +14797,10 @@ app.put('/gateway/config', (req, res) => {
 	 try {
 	 const restart = req.query.restart === 'true' || req.query.restart === '1' || req.body?.restart === true;
 	 const changed = writeOpenClawConfig(normalizeOpenClawConfigForWrite(req.body));
-	 const configRepair = repairOpenClawConfigForGatewayStart('config-update');
+	 const appPool = process.env.TROOPER_APP_POOL === '1';
+	 const configRepair = appPool
+	  ? { updated: false, repairs: [], skipped: true, reason: 'app-pool-runtime' }
+	  : repairOpenClawConfigForGatewayStart('config-update');
  if (!changed && !configRepair.updated) {
   return res.json({
     success: true,
@@ -14786,6 +14820,13 @@ app.put('/gateway/config', (req, res) => {
 	    reload: 'deferred',
   });
  }
+	 if (appPool) {
+	  const markerPath = process.env.TROOPER_APP_POOL_GATEWAY_RESTART_FILE || '/tmp/trooper-openclaw-gateway-restart';
+	  writeFileSync(markerPath, 'config-update\n', { mode: 0o600 });
+	  try { chmodSync(markerPath, 0o600); } catch {}
+	  gateway.forceReconnect(30000, 'config-update');
+	  return res.json({ success: true, message: 'Config updated and gateway restart scheduled', changed, configRepair, reload: 'scheduled' });
+	 }
  let applyOutput = '';
  console.log('Gateway config updated, restarting...');
  applyOutput = execSync(`docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 30000 }).toString();
@@ -18880,10 +18921,9 @@ app.put('/config/openclaw', (req, res) => {
 // ── Auth Profiles (read/write OpenClaw auth-profiles.json) ───────────
 app.get('/config/auth-profiles', (req, res) => {
  try {
- const data = readFileSync(AUTH_PROFILES_PATH, 'utf8');
- res.json(attachConfigFileMetadata(JSON.parse(data), 'auth-profiles.json'));
+ const data = readActiveAuthProfiles();
+ res.json(attachConfigFileMetadata(data, 'auth-profiles.json'));
  } catch (err) {
- if (err.code === 'ENOENT') return res.json({ version: 1, profiles: {} });
  res.status(500).json({ error: err.message });
  }
 });
@@ -18905,7 +18945,7 @@ app.put('/config/auth-profiles', (req, res) => {
  }
  if (!data || typeof data !== 'object') return res.status(400).json({ error: 'Invalid JSON body' });
  let existing = null;
- try { existing = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8')); } catch {}
+	 try { existing = readActiveAuthProfiles(); } catch {}
  const submittedHash = getSubmittedConfigHash(data);
  const currentHash = existing ? jsonFileHash(existing) : '';
  if (existing && submittedHash && currentHash && shouldRejectConfigWrite({ file: 'auth-profiles.json', current: existing, submitted: data })) {
@@ -18930,7 +18970,13 @@ app.put('/config/auth-profiles', (req, res) => {
  let reload = 'deferred';
  let restartError = null;
  if (restartGateway) {
-  try {
+	  if (process.env.TROOPER_APP_POOL === '1') {
+	   const markerPath = process.env.TROOPER_APP_POOL_GATEWAY_RESTART_FILE || '/tmp/trooper-openclaw-gateway-restart';
+	   writeFileSync(markerPath, 'auth-profiles-update\n', { mode: 0o600 });
+	   try { chmodSync(markerPath, 0o600); } catch {}
+	   gateway.forceReconnect(30000, 'auth-profiles-update');
+	   reload = 'scheduled';
+	  } else try {
    execSync(`docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 30000 });
    gateway.forceReconnect(30000, 'auth-profiles-update');
    reload = 'restart';
