@@ -10,6 +10,7 @@ process.on('unhandledRejection', (err) => {
 // (workspace files, tools, memory, session persistence, sub-agent spawning)
 import { captureLog, recordRun, getLogs, getStats } from './lib/log-buffer.mjs';
 import { withGatewayAttachments } from './lib/gateway-attachments.mjs';
+import { migrateGatewayNodeCommands } from './lib/openclaw-config-migrations.mjs';
 import { modelListParamsForRefresh } from './lib/model-list-params.mjs';
 import { resolveSpillSettings } from './lib/tool-result-spill.mjs';
 import express from 'express';
@@ -5728,24 +5729,10 @@ try {
   config.gateway.nodes = {};
   changed = true;
  }
- const allowedNodeCommands = Array.isArray(config.gateway.nodes.allowCommands)
-  ? config.gateway.nodes.allowCommands
-  : [];
- for (const command of ['system.run', 'system.which']) {
-  if (!allowedNodeCommands.includes(command)) {
-   allowedNodeCommands.push(command);
-   changed = true;
-   console.log(`[bridge] Migrated: allowed node command ${command}`);
-  }
- }
- config.gateway.nodes.allowCommands = allowedNodeCommands;
- if (Array.isArray(config.gateway.nodes.denyCommands)) {
-  const nextDenied = config.gateway.nodes.denyCommands.filter((name) => !['system.run', 'system.which'].includes(String(name || '').trim()));
-  if (nextDenied.length !== config.gateway.nodes.denyCommands.length) {
-   config.gateway.nodes.denyCommands = nextDenied;
-   changed = true;
-   console.log('[bridge] Migrated: removed system.run/system.which from gateway.nodes.denyCommands');
-  }
+ const nodeCommandsMigration = migrateGatewayNodeCommands(config);
+ if (nodeCommandsMigration.changed) {
+  changed = true;
+  console.log('[bridge] Migrated gateway.nodes command policy to the current commands.allow/deny schema');
  }
  // Startup migration: add maxSpawnDepth if missing
  if (config.agents?.defaults?.subagents && !config.agents.defaults.subagents.maxSpawnDepth) {
