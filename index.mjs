@@ -6080,6 +6080,62 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
  // Codex OAuth session into the adapter's CODEX_HOME after every auth-profile
  // write so tagged @Codex work never inherits the parent Trooper API model.
  syncCodexOAuthToAcpHome(authDoc);
+ syncOpenAiOAuthProfileOrder(authDoc);
+}
+
+function syncOpenAiOAuthProfileOrder(authDoc) {
+ try {
+  const profiles = authDoc?.profiles && typeof authDoc.profiles === 'object' ? authDoc.profiles : {};
+  const oauthIds = Object.entries(profiles)
+   .filter(([profileId, profile]) =>
+    /^openai:/i.test(profileId)
+     && String(profile?.provider || '').toLowerCase() === 'openai'
+     && String(profile?.type || '').toLowerCase() === 'oauth'
+     && Boolean(profile?.access || profile?.oauthRef),
+   )
+   .map(([profileId]) => profileId);
+  const config = readOpenClawConfig();
+  const currentOrder = Array.isArray(config?.auth?.order?.openai) ? config.auth.order.openai : [];
+  if (!oauthIds.length) {
+   if (!currentOrder.length) return false;
+   const apiKeyIds = Object.entries(profiles)
+    .filter(([profileId, profile]) =>
+     /^openai:/i.test(profileId)
+      && String(profile?.provider || '').toLowerCase() === 'openai'
+      && String(profile?.type || '').toLowerCase() === 'api_key'
+      && Boolean(profile?.key),
+    )
+    .map(([profileId]) => profileId);
+   const remainingApiKeyOrder = currentOrder.filter((profileId) => apiKeyIds.includes(profileId));
+   const nextOrder = [...new Set([...remainingApiKeyOrder, ...apiKeyIds])];
+   if (JSON.stringify(currentOrder) === JSON.stringify(nextOrder)) return false;
+   if (nextOrder.length) {
+    if (!config.auth || typeof config.auth !== 'object' || Array.isArray(config.auth)) config.auth = {};
+    if (!config.auth.order || typeof config.auth.order !== 'object' || Array.isArray(config.auth.order)) config.auth.order = {};
+    config.auth.order.openai = nextOrder;
+   } else {
+    delete config.auth?.order?.openai;
+   }
+   writeOpenClawConfig(config);
+   console.info(`[bridge] Updated OpenAI auth order after OAuth removal (${nextOrder.length} API key profile${nextOrder.length === 1 ? '' : 's'})`);
+   return true;
+  }
+
+  // Keep existing account priority, append newly connected ChatGPT accounts,
+  // and leave static API-key profiles out of the OAuth rotation order.
+  const preferred = currentOrder.filter((profileId) => oauthIds.includes(profileId));
+  const nextOrder = [...new Set([...preferred, ...oauthIds])];
+  if (JSON.stringify(currentOrder) === JSON.stringify(nextOrder)) return false;
+  if (!config.auth || typeof config.auth !== 'object' || Array.isArray(config.auth)) config.auth = {};
+  if (!config.auth.order || typeof config.auth.order !== 'object' || Array.isArray(config.auth.order)) config.auth.order = {};
+  config.auth.order.openai = nextOrder;
+  writeOpenClawConfig(config);
+  console.info(`[bridge] Synced OpenAI OAuth failover order (${nextOrder.length} account${nextOrder.length === 1 ? '' : 's'})`);
+  return true;
+ } catch (error) {
+  console.warn(`[bridge] Could not sync OpenAI OAuth failover order: ${error.message}`);
+  return false;
+ }
 }
 
 // OpenClaw 2026.6+ stores auth in openclaw-agent.sqlite (not only auth-profiles.json).
