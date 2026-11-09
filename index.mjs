@@ -6065,6 +6065,20 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
  if (sharedStoreEnabled && !sharedStoreSynced) {
   console.warn('[bridge] Could not sync auth profiles to OpenClaw shared state store');
  }
+ if (sharedStoreEnabled) {
+  // OpenClaw 2026.11 reads provider credentials from the shared state DB.
+  // Mirroring that full document into legacy JSON files and each agent's
+  // SQLite store creates stale copies of rotating OAuth tokens. A later
+  // startup migration or local-provider repair can then overwrite the shared
+  // profile with one of those stale copies. Keep one authoritative store.
+  if (sharedStoreSynced) {
+   // ACP adapters own their native credential stores. This is the only
+   // intentional compatibility copy of the selected Codex session.
+   syncCodexOAuthToAcpHome(authDoc);
+   syncOpenAiOAuthProfileOrder(authDoc);
+  }
+  return { sharedStoreEnabled, sharedStoreSynced };
+ }
  // OpenClaw gateway default agent dir is ~/.openclaw/agents/main/agent (DATA root),
  // while Trooper also keeps managed copies under CONFIG_ROOT/agents/... Write both.
  const gatewayStateAuthPath = openclawDataPath('agents', 'main', 'agent', 'auth-profiles.json');
@@ -6190,7 +6204,7 @@ function syncAgentAuthProfileSqlite(authDoc, agentId = 'main') {
 function ensureSyntheticLocalAuthProfiles({ localProvider, removeLocalProvider, ollamaProvider, removeOllamaProvider }) {
  let auth;
  try {
-  auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+  auth = readActiveAuthProfiles();
  } catch {
   auth = { version: 1, profiles: {}, lastGood: {} };
  }
@@ -6433,7 +6447,7 @@ function parseAuthProfileExpiryMs(expires) {
 
 function getStoredCodexOAuthProfileStatus() {
  try {
-  const auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+  const auth = readActiveAuthProfiles();
   const profiles = Object.entries(auth.profiles || {})
    .filter(([, profile]) => isUsableCodexOAuthProfile(profile));
   if (!profiles.length) return { usable: false, fresh: false, reason: 'missing' };
@@ -6469,7 +6483,7 @@ function hasRuntimeProviderCredential(provider) {
  };
  if ((envNames[provider] || []).some((name) => readEnvValue(name))) return true;
  try {
-  const auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+   const auth = readActiveAuthProfiles();
   const authProvider = provider === 'gemini' ? 'google' : provider;
   const preferredId = auth.lastGood?.[authProvider];
   const preferred = preferredId ? auth.profiles?.[preferredId] : null;
@@ -6845,7 +6859,7 @@ try {
 } catch (e) { /* config not available yet */ }
 
 try {
- const currentAuth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+ const currentAuth = readActiveAuthProfiles();
  const canonicalAuth = addCanonicalOpenAiOAuthProfiles(currentAuth);
  const auth = canonicalAuth.authDoc;
  let authChanged = canonicalAuth.changed;
@@ -6872,7 +6886,7 @@ try {
 // Keep valid OAuth profiles there; moving them back to `openai-codex` makes
 // current OpenClaw route them through the retired legacy provider.
 try {
- const auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+ const auth = readActiveAuthProfiles();
  let authChanged = false;
  if (auth.profiles) {
   // Clean up invalid openai-codex profiles that have type "api_key" —
@@ -7433,8 +7447,10 @@ function ensureSpcAgentRuntime(agentId) {
  const agentDir = path.join(AGENT_WORKSPACE_ROOT, agentId);
  execSync(`mkdir -p ${agentDir}/agent ${agentDir}/sessions`, { timeout: 5000 });
  try {
-  const mainAuth = readFileSync(AUTH_PROFILES_PATH, 'utf8');
-  writeFileSync(`${agentDir}/agent/auth-profiles.json`, mainAuth);
+  const sharedAuth = readSharedAuthProfileSqlite(openclawDataPath('state', 'openclaw.sqlite'));
+  if (sharedAuth?.location !== 'state-db') {
+   writeFileSync(`${agentDir}/agent/auth-profiles.json`, JSON.stringify(readActiveAuthProfiles()), { mode: 0o600 });
+  }
  } catch {}
  execSync(`chown -R 1000:1000 ${agentDir}`, { timeout: 5000 });
  return ensureAgentWorkspacePath(agentId);
@@ -7648,7 +7664,7 @@ async function handleIncomingTask(req, res) {
  let _authProfileReadError = null;
  let _hasAuthProfileCredential = false;
  try {
-  const _authPre = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+  const _authPre = readActiveAuthProfiles();
   const _profiles = _authPre?.profiles || {};
   _hasAuthProfileCredential = Object.values(_profiles).some((p) => p && (p.access || p.key || p.token));
  } catch (error) {
@@ -11918,8 +11934,10 @@ app.post('/agents', (req, res) => {
 
  // Copy auth profiles from main agent
  try {
- const mainAuth = readFileSync(AUTH_PROFILES_PATH, 'utf8');
- writeFileSync(`${agentDir}/agent/auth-profiles.json`, mainAuth);
+ const sharedAuth = readSharedAuthProfileSqlite(openclawDataPath('state', 'openclaw.sqlite'));
+ if (sharedAuth?.location !== 'state-db') {
+  writeFileSync(`${agentDir}/agent/auth-profiles.json`, JSON.stringify(readActiveAuthProfiles()), { mode: 0o600 });
+ }
  } catch {}
 
  // Fix permissions
@@ -15905,7 +15923,7 @@ const hasConfiguredProviderCredential = (provider) => {
  if (provider === 'openai-codex') return hasFreshStoredCodexOAuthProfile();
  if (readProviderEnvValue(envContent, provider)) return true;
  try {
-  const auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+  const auth = readActiveAuthProfiles();
   const preferred = getPreferredAuthProfile(auth, provider)?.profile;
   return Boolean(preferred?.key || preferred?.token || preferred?.access);
  } catch {
@@ -16111,7 +16129,7 @@ const _syncWarnings = [];
  try {
  let auth;
  try {
- auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+  auth = readActiveAuthProfiles();
  } catch {
  auth = { version: 1, profiles: {}, lastGood: {} };
  }
@@ -16442,7 +16460,7 @@ app.get('/config/provider-settings', (req, res) => {
   // OpenAI Codex auth profile
   let openaiCodexAuthProfile = null;
   try {
-   const authDoc = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+   const authDoc = readActiveAuthProfiles();
    const selected = pickCodexOAuthProfile(authDoc);
    const codexProfile = selected?.profile;
    if (isUsableCodexOAuthProfile(codexProfile)) {
@@ -16501,7 +16519,7 @@ app.get('/config/provider-keys-internal', (req, res) => {
   // OpenAI Codex auth profile
   let openaiCodex = null;
   try {
-   const authDoc = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+    const authDoc = readActiveAuthProfiles();
    const codexProfile = pickCodexOAuthProfile(authDoc)?.profile;
    if (isUsableCodexOAuthProfile(codexProfile)) openaiCodex = codexProfile;
   } catch {}
@@ -16611,7 +16629,7 @@ app.delete('/config/api-keys/:provider', async (req, res) => {
 
 	  // Remove from auth-profiles.json
   try {
-   const authDoc = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+   const authDoc = readActiveAuthProfiles();
    const authProviders = [];
    if (provider === 'gemini') authProviders.push('google');
    if (['anthropic', 'openai', 'openrouter', 'mistral'].includes(provider)) authProviders.push(provider);
@@ -18024,7 +18042,7 @@ app.get('/acp/agents', async (req, res) => {
  // native CODEX_HOME before reporting availability, but do not overwrite a
  // valid device-auth session that already belongs to that adapter.
  try {
-  const authDoc = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+   const authDoc = readActiveAuthProfiles();
   syncCodexOAuthToAcpHome(authDoc, { overwriteNative: false });
  } catch {}
  const [managedEntries, codexAvailability, opencodeProviderAvailability, accountAuthEntries] = await Promise.all([
@@ -18986,10 +19004,12 @@ app.put('/config/auth-profiles', (req, res) => {
  if (authWrite.sharedStoreEnabled && !authWrite.sharedStoreSynced) {
   return res.status(503).json({ error: 'Could not save provider credentials to OpenClaw shared auth store.' });
  }
- try {
- const existingText = readFileSync(AUTH_PROFILES_PATH + '.bak', 'utf8');
- writeTimestampedBackup(AUTH_PROFILES_PATH, existingText, 'pre-write');
- } catch {}
+  if (!authWrite.sharedStoreEnabled) {
+   try {
+    const existingText = readFileSync(AUTH_PROFILES_PATH + '.bak', 'utf8');
+    writeTimestampedBackup(AUTH_PROFILES_PATH, existingText, 'pre-write');
+   } catch {}
+  }
  let reload = 'deferred';
  let restartError = null;
  if (restartGateway) {
@@ -19012,7 +19032,7 @@ app.put('/config/auth-profiles', (req, res) => {
  const response = {
   success: true,
   reload,
-  hash: jsonFileHash(JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'))),
+  hash: jsonFileHash(readActiveAuthProfiles()),
  };
  if (restartError) response.warning = `Gateway restart failed after auth profile save: ${restartError}`;
  res.json(response);
