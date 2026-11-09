@@ -192,6 +192,8 @@ import {
   LOCAL_PROVIDER_AUTH_KEY as SHARED_LOCAL_PROVIDER_AUTH_KEY,
   migrateAllAgentAuthJsonToSqlite,
   readAgentAuthProfileSqlitePrimary,
+  readSharedAuthProfileSqlite,
+  syncSharedAuthProfileSqlite,
   syncAgentAuthProfileSqlite as syncAgentAuthProfileSqliteFile,
 } from './lib/agent-auth-sqlite.mjs';
 import { addCanonicalOpenAiOAuthProfiles } from './lib/canonical-openai-auth.mjs';
@@ -5880,6 +5882,15 @@ try {
 const AUTH_PROFILES_PATH = openclawConfigPath('agents', 'main', 'agent', 'auth-profiles.json');
 const AUTH_PROFILES_ROOT_PATH = openclawConfigPath('auth-profiles.json');
 function readActiveAuthProfiles() {
+ // OpenClaw 2026.11 may make the shared state DB the canonical auth store.
+ // Prefer it when configured so per-agent compatibility mirrors cannot hide
+ // OAuth profiles that the Gateway is actually using.
+ const sharedAuth = readSharedAuthProfileSqlite(openclawDataPath('openclaw.sqlite'));
+ if (sharedAuth?.location === 'state-db'
+  && sharedAuth.store?.profiles
+  && typeof sharedAuth.store.profiles === 'object') {
+  return sharedAuth.store;
+ }
  const databasePaths = [
   openclawDataPath('agents', 'main', 'agent', 'openclaw-agent.sqlite'),
   openclawConfigPath('agents', 'main', 'agent', 'openclaw-agent.sqlite'),
@@ -6046,6 +6057,13 @@ function ensureAuthProfileSecretKeySource() {
 ensureAuthProfileSecretKeySource();
 
 function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
+ const sharedAuth = readSharedAuthProfileSqlite(openclawDataPath('openclaw.sqlite'));
+ const sharedStoreEnabled = sharedAuth?.location === 'state-db';
+ const sharedStoreSynced = !sharedStoreEnabled
+  || syncSharedAuthProfileSqlite(openclawDataPath('openclaw.sqlite'), authDoc);
+ if (sharedStoreEnabled && !sharedStoreSynced) {
+  console.warn('[bridge] Could not sync auth profiles to OpenClaw shared state store');
+ }
  // OpenClaw gateway default agent dir is ~/.openclaw/agents/main/agent (DATA root),
  // while Trooper also keeps managed copies under CONFIG_ROOT/agents/... Write both.
  const gatewayStateAuthPath = openclawDataPath('agents', 'main', 'agent', 'auth-profiles.json');
@@ -6101,6 +6119,7 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
  // write so tagged @Codex work never inherits the parent Trooper API model.
  syncCodexOAuthToAcpHome(authDoc);
  syncOpenAiOAuthProfileOrder(authDoc);
+ return { sharedStoreEnabled, sharedStoreSynced };
 }
 
 function syncOpenAiOAuthProfileOrder(authDoc) {
@@ -18962,7 +18981,10 @@ app.put('/config/auth-profiles', (req, res) => {
    if (oauthRef) writeCodexOAuthSidecar(profileId, profile);
   }
  }
- writeMirroredAuthProfiles(stripTrooperFileMetadata(data), { backup: true });
+ const authWrite = writeMirroredAuthProfiles(stripTrooperFileMetadata(data), { backup: true });
+ if (authWrite.sharedStoreEnabled && !authWrite.sharedStoreSynced) {
+  return res.status(503).json({ error: 'Could not save provider credentials to OpenClaw shared auth store.' });
+ }
  try {
  const existingText = readFileSync(AUTH_PROFILES_PATH + '.bak', 'utf8');
  writeTimestampedBackup(AUTH_PROFILES_PATH, existingText, 'pre-write');
