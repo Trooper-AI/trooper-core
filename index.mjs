@@ -11,6 +11,11 @@ process.on('unhandledRejection', (err) => {
 import { captureLog, recordRun, getLogs, getStats } from './lib/log-buffer.mjs';
 import { withGatewayAttachments } from './lib/gateway-attachments.mjs';
 import { migrateGatewayNodeCommands } from './lib/openclaw-config-migrations.mjs';
+import {
+  hydrateOpenClawAgentList,
+  migrateOpenClawAgentRoster,
+  migrateOpenClawMediaModels,
+} from './lib/openclaw-config-shape.mjs';
 import { modelListParamsForRefresh } from './lib/model-list-params.mjs';
 import { resolveSpillSettings } from './lib/tool-result-spill.mjs';
 import express from 'express';
@@ -1668,19 +1673,10 @@ function summarizeRuntimeUsageEntries(entries = []) {
 
 function readOpenClawConfig() {
  try {
- return JSON.parse(readFileSync(OPENCLAW_CONFIG_PATH, 'utf8'));
+ return hydrateOpenClawAgentList(JSON.parse(readFileSync(OPENCLAW_CONFIG_PATH, 'utf8')));
  } catch {
  return {};
  }
-}
-
-function normalizeOpenClawAgentsList(config) {
- if (!Array.isArray(config?.agents?.list)) return config;
- config.agents.list = config.agents.list
-  .filter((entry) => entry && typeof entry === 'object' && String(entry.id || '').trim())
-  .map((entry) => ({ ...entry, id: String(entry.id).trim() }))
-  .sort((left, right) => String(left.id).localeCompare(String(right.id)));
- return config;
 }
 
 function redactDiagnosticValue(value) {
@@ -1774,10 +1770,10 @@ function readRuntimeEnvSummary() {
  return { path: envFile.path || OPENCLAW_ENV_PATH, present };
 }
 
-const OPENCLAW_GENERATION_MODEL_FIELD_BY_SLOT = {
- image_gen: 'imageGenerationModel',
- video_gen: 'videoGenerationModel',
- music_gen: 'musicGenerationModel',
+const OPENCLAW_GENERATION_MEDIA_SLOT_BY_SLOT = {
+ image_gen: 'image',
+ video_gen: 'video',
+ music_gen: 'music',
 };
 
 const OPENCLAW_GENERATION_TOOL_BY_SLOT = {
@@ -1807,14 +1803,17 @@ function applyMediaGenerationRoutingToOpenClawConfig(config, routing = {}, fallb
   config.agents.defaults = {};
  }
 
- let changed = false;
+ let changed = migrateOpenClawMediaModels(config);
+ const mediaModels = config.agents.defaults.mediaModels && typeof config.agents.defaults.mediaModels === 'object' && !Array.isArray(config.agents.defaults.mediaModels)
+  ? { ...config.agents.defaults.mediaModels }
+  : {};
  const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
- for (const [slot, field] of Object.entries(OPENCLAW_GENERATION_MODEL_FIELD_BY_SLOT)) {
+ for (const [slot, mediaSlot] of Object.entries(OPENCLAW_GENERATION_MEDIA_SLOT_BY_SLOT)) {
   const toolName = OPENCLAW_GENERATION_TOOL_BY_SLOT[slot];
   const hasRouting = hasOwn(routing, slot);
   const hasFallbacks = hasOwn(fallbacks, slot);
   if (!hasRouting && !hasFallbacks) {
-   if (config.agents.defaults[field]) {
+   if (mediaModels[mediaSlot]) {
     changed = ensureOpenClawToolAllowed(config, toolName) || changed;
    }
    continue;
@@ -1826,8 +1825,8 @@ function applyMediaGenerationRoutingToOpenClawConfig(config, routing = {}, fallb
    : [];
 
   if (!primary) {
-   if (Object.prototype.hasOwnProperty.call(config.agents.defaults, field)) {
-    delete config.agents.defaults[field];
+   if (Object.prototype.hasOwnProperty.call(mediaModels, mediaSlot)) {
+    delete mediaModels[mediaSlot];
     changed = true;
    }
    continue;
@@ -1844,12 +1843,14 @@ function applyMediaGenerationRoutingToOpenClawConfig(config, routing = {}, fallb
   }
 
   const nextValue = slotFallbacks.length ? { primary, fallbacks: slotFallbacks } : primary;
-  if (JSON.stringify(config.agents.defaults[field]) !== JSON.stringify(nextValue)) {
-   config.agents.defaults[field] = nextValue;
+  if (JSON.stringify(mediaModels[mediaSlot]) !== JSON.stringify(nextValue)) {
+   mediaModels[mediaSlot] = nextValue;
    changed = true;
   }
   changed = ensureOpenClawToolAllowed(config, toolName) || changed;
  }
+ if (Object.keys(mediaModels).length) config.agents.defaults.mediaModels = mediaModels;
+ else delete config.agents.defaults.mediaModels;
  return changed;
 }
 
@@ -1975,14 +1976,17 @@ function bridgeHasImageProviderCredential(provider) {
 /**
  * Image routing chains written by Trooper were historically single-provider
  * (all OpenRouter), so one provider-level billing/auth failure killed every
- * fallback at once. Extend agents.defaults.imageGenerationModel with the
+ * fallback at once. Extend agents.defaults.mediaModels.image with the
  * default image model of each credentialed provider not already in the chain
  * so the image_generate tool can genuinely fail over across providers.
  */
 function augmentImageGenerationFallbacksForGatewayStart(config, repairs) {
  const defaults = config?.agents?.defaults;
  if (!defaults || typeof defaults !== 'object' || Array.isArray(defaults)) return;
- const current = defaults.imageGenerationModel;
+ const mediaModels = defaults.mediaModels && typeof defaults.mediaModels === 'object' && !Array.isArray(defaults.mediaModels)
+  ? defaults.mediaModels
+  : {};
+ const current = mediaModels.image;
  const primary = typeof current === 'string'
   ? current.trim()
   : String(current?.primary || '').trim();
@@ -1996,8 +2000,9 @@ function augmentImageGenerationFallbacksForGatewayStart(config, repairs) {
   hasProviderCredential: bridgeHasImageProviderCredential,
  });
  if (!added.length) return;
- defaults.imageGenerationModel = { primary, fallbacks: nextFallbacks };
- repairs.push(`agents.defaults.imageGenerationModel: added cross-provider image fallbacks (${added.join(', ')})`);
+ mediaModels.image = { primary, fallbacks: nextFallbacks };
+ defaults.mediaModels = mediaModels;
+ repairs.push(`agents.defaults.mediaModels.image: added cross-provider image fallbacks (${added.join(', ')})`);
 }
 
 // This is a bridge-owned safety/cost policy, not a user-managed optional
@@ -2099,7 +2104,12 @@ function prepareOpenClawConfigForGatewayStart(config) {
  if (pluginAllow.added.length) {
   repairs.push('plugins.allow: removed the exclusive list so every installed plugin can load');
  }
- normalizeOpenClawAgentsList(next);
+ if (migrateOpenClawAgentRoster(next)) {
+  repairs.push('agents: migrated retired agents.list to keyed agents.entries');
+ }
+ if (migrateOpenClawMediaModels(next)) {
+  repairs.push('agents.defaults: migrated generation routes to mediaModels');
+ }
  sanitizeBravePluginConfigForGatewayStart(next, repairs);
  augmentImageGenerationFallbacksForGatewayStart(next, repairs);
  ensureImageGenerationDefaultsPluginForGatewayStart(next, repairs);
@@ -6785,8 +6795,7 @@ try {
    : [];
   config.gateway.controlUi.allowedOrigins = [...new Set([...existingOrigins, ...configuredOrigins])];
   if (JSON.stringify(config.gateway) !== before) {
-   writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(config, null, 2));
-   try { execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 }); } catch {}
+   writeOpenClawConfig(config);
    console.log('[bridge] Repaired gateway trusted proxies / Control UI origins');
   }
  }
@@ -15991,24 +16000,31 @@ const _syncWarnings = [];
    config.agents.defaults.pdfModel = pdfModel ? normalizeModelId(pdfModel) : undefined;
    console.log(`[bridge] Updating pdf model to: ${config.agents.defaults.pdfModel || '(none)'}`);
  }
- const setGenerationModel = (slot, field) => {
+ migrateOpenClawMediaModels(config);
+ const setGenerationModel = (slot) => {
    if (!hasOwn(mediaRouting, slot) && !hasOwn(mediaFallbacks, slot)) return;
+   const field = OPENCLAW_GENERATION_MEDIA_SLOT_BY_SLOT[slot];
+   if (!field) return;
    const primary = mediaRouting[slot] ? normalizeModelId(mediaRouting[slot]) : '';
    const fallbacks = Array.isArray(mediaFallbacks[slot])
      ? mediaFallbacks[slot].filter(Boolean).map(normalizeModelId).filter(Boolean)
      : [];
+   if (!config.agents.defaults.mediaModels || typeof config.agents.defaults.mediaModels !== 'object' || Array.isArray(config.agents.defaults.mediaModels)) {
+     config.agents.defaults.mediaModels = {};
+   }
    if (!primary) {
-     delete config.agents.defaults[field];
-     console.log(`[bridge] Clearing ${field}`);
+     delete config.agents.defaults.mediaModels[field];
+     if (!Object.keys(config.agents.defaults.mediaModels).length) delete config.agents.defaults.mediaModels;
+     console.log(`[bridge] Clearing agents.defaults.mediaModels.${field}`);
      return;
    }
-   config.agents.defaults[field] = fallbacks.length ? { primary, fallbacks } : primary;
+   config.agents.defaults.mediaModels[field] = fallbacks.length ? { primary, fallbacks } : primary;
    ensureOpenClawToolAllowed(config, OPENCLAW_GENERATION_TOOL_BY_SLOT[slot]);
-   console.log(`[bridge] Updating ${field} to: ${primary}${fallbacks.length ? ` (+${fallbacks.length} fallback)` : ''}`);
+   console.log(`[bridge] Updating agents.defaults.mediaModels.${field} to: ${primary}${fallbacks.length ? ` (+${fallbacks.length} fallback)` : ''}`);
  };
- setGenerationModel('image_gen', 'imageGenerationModel');
- setGenerationModel('video_gen', 'videoGenerationModel');
- setGenerationModel('music_gen', 'musicGenerationModel');
+ setGenerationModel('image_gen');
+ setGenerationModel('video_gen');
+ setGenerationModel('music_gen');
 	 writeOpenClawConfig(config);
  } catch (e) { console.error('Failed to update native models in openclaw.json:', e.message); _syncWarnings.push(`Native model update failed: ${e.message}`); }
  }

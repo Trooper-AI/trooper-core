@@ -2155,7 +2155,7 @@ General conversation, task execution, code generation. This is the default model
 
 ### 🎨 Image Generation (`image_gen`)
 Create images from text prompts.
-- ALWAYS generate images by calling the native image generation tool WITHOUT overriding the provider or model. The gateway's configured `agents.defaults.imageGenerationModel` (primary + fallbacks) IS the org's image routing — the tool applies it automatically, including cross-provider failover.
+- ALWAYS generate images by calling the native image generation tool WITHOUT overriding the provider or model. The gateway's configured `agents.defaults.mediaModels.image` (primary + fallbacks) IS the org's image routing — the tool applies it automatically, including cross-provider failover.
 - NEVER hand-pick a provider from the tool's provider status listing. The configured routing already encodes the org's provider choice and its fallback order; improvising a provider bypasses the user's settings.
 - If a provider fails (billing limit, auth, rate limit), the configured fallback chain is tried automatically. Only report failure after the WHOLE chain fails — and then say exactly which providers failed, why (billing/auth/limit), and which API keys would unlock an alternative provider.
 - Do not substitute HTML, SVG, canvas, screenshots, or a frontend mockup for a plain image-generation request.
