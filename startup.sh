@@ -96,27 +96,22 @@ run_as_node() {
   fi
 }
 
-# Local-Mac launches intentionally bypass the image entrypoint, so make the
-# ACPX plugin bootstrap available here as well. The normal image entrypoint
-# sets the marker after it has already performed this check.
+# OpenClaw validates persisted configuration during plugin install. Migrate
+# old config schemas first, or ACPX bootstrap will refuse to run and the
+# gateway will enter a restart loop before the previous post-start repair can
+# execute. This helper also validates the repaired config and fails closed.
+if ! /opt/doctor-migrate.sh; then
+  echo "[startup] FATAL: persisted OpenClaw config migration failed; gateway will not start" >&2
+  exit 1
+fi
+
+# Local launches and the production image share the same ordered bootstrap:
+# config migration first, then ACPX installation/verification, then gateway.
 if [ "${TROOPER_ACPX_BOOTSTRAPPED:-0}" != "1" ]; then
   if ! /opt/acpx-bootstrap.sh; then
     echo "[startup] FATAL: ACPX bootstrap failed; gateway will not start" >&2
     exit 1
   fi
-fi
-
-# Auto-repair config after upgrades (prevents crash loops from schema changes).
-# Local Mac installs can skip this foreground repair because the bridge already
-# writes a managed config, and amd64 gateway images can spend minutes here under
-# Apple Silicon emulation before the API port opens.
-if [ "${TROOPER_GATEWAY_SKIP_DOCTOR:-0}" = "1" ]; then
-  echo "[startup] Skipping openclaw doctor repair."
-else
-  echo "[startup] Running openclaw doctor repair (auto-heal config)..."
-  run_as_node "node dist/index.js doctor --repair" 2>&1 \
-    || run_as_node "node dist/index.js doctor --fix" 2>&1 \
-    || echo "[startup] WARNING: doctor repair failed (non-fatal)"
 fi
 
 # Start gateway as node user

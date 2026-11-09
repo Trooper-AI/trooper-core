@@ -50,10 +50,14 @@ RUN chmod +x /opt/chrome-wrapper.sh
 COPY entrypoint.sh /opt/entrypoint.sh
 RUN chmod +x /opt/entrypoint.sh
 
-# ACPX is an external OpenClaw runtime plugin. Bootstrap it on the persisted
-# state volume before the gateway reads the ACP-enabled configuration.
+# ACPX is an external OpenClaw runtime plugin. startup.sh migrates persisted
+# config before bootstrapping ACPX and launching the gateway.
 COPY acpx-bootstrap.sh /opt/acpx-bootstrap.sh
 RUN chmod +x /opt/acpx-bootstrap.sh
+
+# Validate and migrate persisted OpenClaw config before any plugin bootstrap.
+COPY doctor-migrate.sh /opt/doctor-migrate.sh
+RUN chmod +x /opt/doctor-migrate.sh
 
 # Simplified startup script
 COPY startup.sh /opt/startup.sh
