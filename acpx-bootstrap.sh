@@ -5,6 +5,11 @@
 
 set -o pipefail
 
+# Keep the ACPX runtime compatible with the pinned OpenClaw 2026.11.1 host
+# image. An unversioned ClawHub install can now resolve 2026.11.2, which
+# requires OpenClaw >=2026.11.2 and makes the gateway restart-loop at boot.
+ACPX_PLUGIN_SPEC="npm:@openclaw/acpx@2026.11.1"
+
 # Managed OpenClaw npm plugins live under the state/config root. The official
 # image runs the gateway as uid 1000 (`node`), so this script deliberately
 # leaves that tree node-owned instead of trying to make the plugin root-owned.
@@ -62,7 +67,7 @@ if acpx_package_present; then
 fi
 
 echo "[acpx-bootstrap] Installing required @openclaw/acpx runtime plugin..."
-if ! run_as_node "cd /app && node dist/index.js plugins install @openclaw/acpx"; then
+if ! run_as_node "cd /app && node dist/index.js plugins install '$ACPX_PLUGIN_SPEC'"; then
   echo "[acpx-bootstrap] FATAL: could not install @openclaw/acpx; refusing to start an ACP-enabled gateway" >&2
   exit 1
 fi
