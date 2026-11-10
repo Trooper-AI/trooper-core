@@ -2,7 +2,8 @@ name: Server — Dokploy runtime image
 
 # Public-repo workflow so GitHub-hosted Ubuntu minutes are free. It downloads
 # private Trooper with a read-only credential, builds
-# deploy/app-pool/Dockerfile, and pushes ghcr.io/trooper-ai/trooper-runtime.
+# deploy/app-pool/Dockerfile, and pushes the source-bearing image to the
+# private ghcr.io/trooper-ai/trooper-runtime-private package.
 #
 # Manual-only. Keep the default branch protected and do not add pull_request or
 # repository_dispatch: a public fork must never run a job that receives the
@@ -15,11 +16,6 @@ on:
         description: Private Trooper branch, tag, or commit SHA to bake
         required: true
         default: main
-      confirm_public_runtime_source:
-        description: Confirm that this public GHCR image publishes private Trooper source
-        type: boolean
-        required: true
-        default: false
       bridge_commit:
         description: Exact full OpenClaw bridge commit from the promoted runtime target
         required: true
@@ -43,12 +39,6 @@ jobs:
     steps:
       - name: Checkout public workflow definitions
         uses: actions/checkout@v5
-
-      - name: Require explicit approval to publish the runtime contents publicly
-        if: ${{ inputs.confirm_public_runtime_source != true }}
-        run: |
-          echo '::error::The runtime image contains private Trooper source and the GHCR package is public. Review the distribution and explicitly confirm it before building.'
-          exit 1
 
       # Build from the exact bridge commit in the promoted runtime descriptor.
       - name: Resolve promoted bridge revision
@@ -92,7 +82,7 @@ jobs:
           if not match:
               raise SystemExit('Gateway image must be pinned to an @sha256 digest')
           tag = f"sha-{app}-br-{bridge}-gw-{match.group(1)[:32].lower()}"
-          print(f'image=ghcr.io/trooper-ai/trooper-runtime:{tag}')
+          print(f'image=ghcr.io/trooper-ai/trooper-runtime-private:{tag}')
           print(f'tag={tag}')
           PY
 
@@ -115,8 +105,8 @@ jobs:
           platforms: linux/amd64
           tags: |
             ${{ steps.release.outputs.image }}
-            ghcr.io/trooper-ai/trooper-runtime:sha-${{ steps.trooper.outputs.sha }}
-            ghcr.io/trooper-ai/trooper-runtime:latest
+            ghcr.io/trooper-ai/trooper-runtime-private:sha-${{ steps.trooper.outputs.sha }}
+            ghcr.io/trooper-ai/trooper-runtime-private:latest
           build-args: |
             GATEWAY_IMAGE=${{ inputs.gateway_image }}
             RUNTIME_IMAGE=${{ steps.release.outputs.image }}
@@ -125,37 +115,45 @@ jobs:
             org.opencontainers.image.source=https://github.com/Trooper-AI/trooper-core
             org.opencontainers.image.description=Trooper App-pool runtime (gateway + org-runtime)
             org.opencontainers.image.revision=${{ steps.trooper.outputs.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # This public workflow builds private Trooper source into the image.
+          # Do not export BuildKit layers to the public repository's Actions
+          # cache, where public-repo readers could retrieve source-bearing layers.
 
-      - name: Verify public GHCR pull
+      - name: Verify authenticated pull and private package visibility
         run: |
           set -euo pipefail
-          docker logout ghcr.io >/dev/null 2>&1 || true
           IMAGE="${{ steps.release.outputs.image }}"
           for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
-            if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
-              echo "$IMAGE is anonymously pullable"
-              exit 0
+            if docker pull "$IMAGE" >/dev/null 2>&1; then
+              break
             fi
-            echo "Waiting for $IMAGE to become anonymously pullable ($attempt/12)..."
+            if [ "$attempt" -eq 12 ]; then
+              echo "::error::Authenticated pull failed for $IMAGE."
+              exit 1
+            fi
+            echo "Waiting for authenticated pull of $IMAGE ($attempt/12)..."
             sleep 5
           done
-          echo "::error::$IMAGE is not anonymously pullable. Make the trooper-runtime GHCR package public (same as trooper-gateway) so App-pool workers can pull without credentials."
-          exit 1
+          docker logout ghcr.io >/dev/null 2>&1 || true
+          if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "::error::The source-bearing runtime package is anonymously pullable; it must remain private."
+            exit 1
+          fi
+          echo "$IMAGE pulls with credentials and is not anonymously pullable."
 
       - name: Summary
         run: |
           {
-            echo "## trooper-runtime image"
+            echo "## Private trooper-runtime image"
             echo
-            echo "- \`${{ steps.release.outputs.image }}\` (promoted-release tag)"
-            echo "- \`ghcr.io/trooper-ai/trooper-runtime:sha-${{ steps.trooper.outputs.sha }}\`"
-            echo "- \`ghcr.io/trooper-ai/trooper-runtime:latest\`"
+            echo "- \`${{ steps.release.outputs.image }}\` (private promoted-release tag)"
+            echo "- \`ghcr.io/trooper-ai/trooper-runtime-private:sha-${{ steps.trooper.outputs.sha }}\`"
+            echo "- \`ghcr.io/trooper-ai/trooper-runtime-private:latest\`"
             echo
             echo "App commit: \`${{ steps.trooper.outputs.sha }}\`"
             echo "Bridge commit: \`${{ steps.trooper-core.outputs.sha }}\`"
             echo "Gateway base: \`${{ inputs.gateway_image }}\`"
             echo "Set on Railway: \`TROOPER_RUNTIME_IMAGE=${{ steps.release.outputs.image }}\`"
+            echo "Configure a read-only GHCR credential on the Trooper server as TROOPER_GHCR_PULL_USERNAME and TROOPER_GHCR_PULL_TOKEN."
             echo "Keep \`TROOPER_APP_POOL_ENABLED\` off until staging smoke."
           } >> "$GITHUB_STEP_SUMMARY"
