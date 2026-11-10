@@ -19581,7 +19581,7 @@ server.listen(PORT, '0.0.0.0', () => {
  setTimeout(() => {
   void syncBridgeOwnedGatewayPluginsAsync('startup-retry')
    .then((retryResults) => scheduleImageDefaultsActivation(retryResults, 'startup-retry'));
- }, 20_000);
+ }, Math.max(90_000, Number(process.env.OPENCLAW_PLUGIN_STARTUP_RETRY_MS || 90_000)));
  // Soft-start: strip unresolved env secrets + restart path if gateway is dead.
  try {
   const repaired = repairOpenClawConfigForGatewayStart('startup');
@@ -19614,6 +19614,13 @@ function startGatewayProcessWatchdog({ intervalMs = 45_000, initialDelayMs = 25_
 
  const tick = async (reason) => {
   try {
+   const now = Date.now();
+   // Config/plugin activation and explicit gateway restarts already schedule
+   // a reconnect. Do not let the watchdog recreate that container mid-restart.
+   if (gateway.expectedReconnectUntil && now < gateway.expectedReconnectUntil) {
+    consecutiveFailures = 0;
+    return;
+   }
    const res = await fetch('http://127.0.0.1:18789/healthz', {
     signal: AbortSignal.timeout(2500),
    }).catch(() => null);
@@ -19623,7 +19630,6 @@ function startGatewayProcessWatchdog({ intervalMs = 45_000, initialDelayMs = 25_
    }
    consecutiveFailures += 1;
    if (consecutiveFailures < 2) return;
-   const now = Date.now();
    if (now - lastRestartAt < 90_000) return;
    lastRestartAt = now;
    console.warn(`[gateway-watchdog] Gateway unhealthy (${reason}, fails=${consecutiveFailures}) — repairing secrets + restarting`);
