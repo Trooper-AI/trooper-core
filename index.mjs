@@ -5971,6 +5971,7 @@ const managedAcpCliManager = new ManagedAcpCliManager({
 const openClawProviderHealth = new OpenClawProviderHealthManager({
  containerName: OPENCLAW_GATEWAY_CONTAINER,
  execFile: runExecFileAsync,
+ gatewayRequest: (...args) => gateway.request(...args),
 });
 // OpenCode is intentionally configured through a separate, provider-specific
 // manager. It never runs a client-supplied command and only writes `{env:...}`
@@ -14734,7 +14735,18 @@ app.get('/gateway/providers/usage', async (req, res) => {
  try {
   const auth = readActiveAuthProfiles();
   const selectedProfileId = auth?.lastGood?.openai || auth?.lastGood?.['openai-codex'] || '';
-  const profileId = selectedProfileId ? normalizeProviderHealthProfileId(selectedProfileId) : '';
+  const requestedProfileId = String(req.query.profileId || '').trim();
+  const normalizedRequestedProfileId = requestedProfileId
+   ? normalizeProviderHealthProfileId(requestedProfileId)
+   : '';
+  if (normalizedRequestedProfileId && !/^openai:[a-z0-9][a-z0-9._:-]{0,159}$/i.test(normalizedRequestedProfileId)) {
+   return res.status(400).json({
+    ok: false,
+    code: 'OPENCLAW_PROVIDER_PROFILE_INVALID',
+    message: 'Choose a valid saved OpenAI account profile before reading Codex usage.',
+   });
+  }
+  const profileId = normalizedRequestedProfileId || (selectedProfileId ? normalizeProviderHealthProfileId(selectedProfileId) : '');
   res.json(await openClawProviderHealth.getUsage({
    refresh: req.query.refresh === '1',
    profileId,
